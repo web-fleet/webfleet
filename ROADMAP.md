@@ -94,12 +94,14 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** shared public-target network guard reused by HTTP/TLS, certificate handshake/hostname validation, chain leaf metadata and expiry persistence, 30-day fleet warning query, manual inspection, 12-hour scheduler refresh, and site-detail TLS presentation.
 
-### CP8 - DNS observation
+### CP8 - DNS observation ✅
 
 - Observe relevant A/AAAA/CNAME records.
 - Record resolved values and meaningful changes.
 - Distinguish transient resolution failures from changed configuration.
 - DNS history UI.
+
+**Completed:** A/AAAA/CNAME observation with normalized record sets, private/reserved-answer rejection, successful-state comparison, explicit error observations that do not masquerade as configuration changes, one-hour scheduler refresh, manual observation, history API, and site-detail presentation.
 
 ### CP9 - Headers and redirects
 

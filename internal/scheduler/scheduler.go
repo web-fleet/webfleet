@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
@@ -18,6 +19,7 @@ type Scheduler struct {
 	store       *store.Store
 	checker     Checker
 	tls         *tlshealth.Service
+	dns         *dnsobs.Service
 	interval    time.Duration
 	concurrency int
 	log         *slog.Logger
@@ -25,14 +27,14 @@ type Scheduler struct {
 	wg          sync.WaitGroup
 }
 
-func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, interval time.Duration, concurrency int, log *slog.Logger) *Scheduler {
+func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, dnsSvc *dnsobs.Service, interval time.Duration, concurrency int, log *slog.Logger) *Scheduler {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &Scheduler{store: st, checker: c, tls: tlsSvc, interval: interval, concurrency: concurrency, log: log}
+	return &Scheduler{store: st, checker: c, tls: tlsSvc, dns: dnsSvc, interval: interval, concurrency: concurrency, log: log}
 }
 func (s *Scheduler) Start(ctx context.Context) {
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -94,6 +96,21 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 					}
 				}
 			}
+			if s.dns != nil {
+				due := true
+				rows, _ := s.store.DB.Query(`SELECT checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, id)
+				if len(rows) > 0 {
+					if t, err := time.Parse(time.RFC3339Nano, rows[0]["checked_at"].Text); err == nil && time.Since(t) <= time.Hour {
+						due = false
+					}
+				}
+				if due {
+					if _, e := s.dns.ObserveSite(ctx, id); e != nil {
+						s.log.Warn("dns observation failed", "site_id", id, "error", e)
+					}
+				}
+			}
+
 		}()
 	}
 	wg.Wait()
