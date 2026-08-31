@@ -103,12 +103,14 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** A/AAAA/CNAME observation with normalized record sets, private/reserved-answer rejection, successful-state comparison, explicit error observations that do not masquerade as configuration changes, one-hour scheduler refresh, manual observation, history API, and site-detail presentation.
 
-### CP9 - Headers and redirects
+### CP9 - Headers and redirects ✅
 
 - Security/header observations.
 - Redirect chain recording.
 - Configurable expectations without turning the feature into a generic rule engine.
 - Regression/change history.
+
+**Completed:** complete bounded redirect-chain capture, selected HTTP/security header observations, per-site configurable required-header expectations, missing-header evaluation, change detection against the prior observation, history API, and site-detail summary.
 
 ### CP10 - Website crawler and link health
 

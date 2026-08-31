@@ -9,7 +9,7 @@ import (
 
 type Store struct{ DB *sqlite.DB }
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 func Open(dataDir string) (*Store, error) {
 	db, err := sqlite.Open(filepath.Join(dataDir, "webfleet.db"))
@@ -162,6 +162,26 @@ func (s *Store) migrate() error {
 			return err
 		}
 		if err = s.DB.Exec(`UPDATE schema_meta SET version=8`); err != nil {
+			return err
+		}
+	}
+
+	if v < 9 {
+		stmts := []string{
+			`CREATE TABLE header_expectations(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, name TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 1, UNIQUE(site_id,name));`,
+			`INSERT INTO header_expectations(site_id,name,required) SELECT id,'Content-Security-Policy',1 FROM sites;`,
+			`INSERT INTO header_expectations(site_id,name,required) SELECT id,'Strict-Transport-Security',1 FROM sites;`,
+			`INSERT INTO header_expectations(site_id,name,required) SELECT id,'X-Content-Type-Options',1 FROM sites;`,
+			`INSERT INTO header_expectations(site_id,name,required) SELECT id,'Referrer-Policy',1 FROM sites;`,
+			`CREATE TABLE http_observations(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, check_id INTEGER NOT NULL REFERENCES check_results(id) ON DELETE CASCADE, redirect_chain TEXT NOT NULL DEFAULT '[]', headers_json TEXT NOT NULL DEFAULT '{}', missing_headers TEXT NOT NULL DEFAULT '', changed INTEGER NOT NULL DEFAULT 0, observed_at TEXT NOT NULL);`,
+			`CREATE INDEX http_observations_site_idx ON http_observations(site_id,id DESC);`,
+		}
+		for _, q := range stmts {
+			if err = s.DB.Exec(q); err != nil {
+				return err
+			}
+		}
+		if err = s.DB.Exec(`UPDATE schema_meta SET version=9`); err != nil {
 			return err
 		}
 	}

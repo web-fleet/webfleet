@@ -104,6 +104,11 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 	if e = s.store.DB.Exec(`INSERT INTO site_health(site_id,state,last_change_at) VALUES(?,'unknown',?)`, id, now); e != nil {
 		return Site{}, e
 	}
+	for _, header := range []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "Referrer-Policy"} {
+		if e = s.store.DB.Exec(`INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,1)`, id, header); e != nil {
+			return Site{}, e
+		}
+	}
 	return s.Get(id)
 }
 func (s *Service) Get(id int64) (Site, error) {

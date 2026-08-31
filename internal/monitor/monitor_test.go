@@ -104,3 +104,36 @@ func TestHealthTransitions(t *testing.T) {
 		t.Fatalf("recovery site=%+v", site)
 	}
 }
+
+func TestRedirectAndHeaderObservation(t *testing.T) {
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, base+"/final", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	base = srv.URL
+	u, _ := url.Parse(srv.URL)
+	st, id := setupSite(t, srv.URL)
+	defer st.Close()
+	svc := NewForTests(st, fakeResolver{u.Hostname(): {netip.MustParseAddr("127.0.0.1")}}, true)
+	if _, e := svc.CheckSite(context.Background(), id); e != nil {
+		t.Fatal(e)
+	}
+	hist, e := svc.HTTPHistory(id)
+	if e != nil || len(hist) != 1 {
+		t.Fatalf("history=%+v err=%v", hist, e)
+	}
+	if len(hist[0].RedirectChain) != 2 {
+		t.Fatalf("redirects=%v", hist[0].RedirectChain)
+	}
+	if _, ok := hist[0].Headers["Content-Security-Policy"]; !ok {
+		t.Fatal("missing observed CSP")
+	}
+}

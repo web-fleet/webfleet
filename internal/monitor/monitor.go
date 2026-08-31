@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,17 @@ type Result struct {
 	CheckedAt             string `json:"checked_at"`
 }
 
+type HTTPObservation struct {
+	ID             int64             `json:"id"`
+	SiteID         int64             `json:"site_id"`
+	CheckID        int64             `json:"check_id"`
+	RedirectChain  []string          `json:"redirect_chain"`
+	Headers        map[string]string `json:"headers"`
+	MissingHeaders []string          `json:"missing_headers"`
+	Changed        bool              `json:"changed"`
+	ObservedAt     string            `json:"observed_at"`
+}
+
 func New(st *store.Store) *Service { return &Service{store: st, guard: netguard.New()} }
 func NewForTests(st *store.Store, r netguard.Resolver, allowPrivate bool) *Service {
 	return &Service{store: st, guard: netguard.Guard{Resolver: r, AllowPrivate: allowPrivate}}
@@ -55,11 +67,16 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DialContext: s.guard.DialContext}
+	redirects := []string{raw}
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
 		}
-		return s.guard.ValidateURL(req.Context(), req.URL)
+		if err := s.guard.ValidateURL(req.Context(), req.URL); err != nil {
+			return err
+		}
+		redirects = append(redirects, req.URL.String())
+		return nil
 	}}
 	u, e := url.Parse(raw)
 	if e != nil {
@@ -91,7 +108,14 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 		res.ErrorClass = "http_status"
 		res.Error = fmt.Sprintf("unexpected HTTP status %d", resp.StatusCode)
 	}
-	return s.persist(siteID, monitorID, res)
+	res, e = s.persist(siteID, monitorID, res)
+	if e != nil {
+		return Result{}, e
+	}
+	if _, e = s.persistHTTPObservation(res, redirects, resp.Header); e != nil {
+		return Result{}, e
+	}
+	return res, nil
 }
 func (s *Service) persist(siteID, monitorID int64, res Result) (Result, error) {
 	rows, e := s.store.DB.Query(`INSERT INTO check_results(site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, monitorID, res.OK, res.StatusCode, res.LatencyMS, res.FinalURL, res.ErrorClass, res.Error, res.CheckedAt)
@@ -104,6 +128,79 @@ func (s *Service) persist(siteID, monitorID int64, res Result) (Result, error) {
 	}
 	return res, nil
 }
+func (s *Service) persistHTTPObservation(res Result, redirects []string, h http.Header) (HTTPObservation, error) {
+	selected := map[string]string{}
+	for _, name := range []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy", "X-Frame-Options", "Server", "Content-Type"} {
+		if v := h.Get(name); v != "" {
+			selected[name] = v
+		}
+	}
+	exp, err := s.store.DB.Query(`SELECT name FROM header_expectations WHERE site_id=? AND required=1 ORDER BY lower(name)`, res.SiteID)
+	if err != nil {
+		return HTTPObservation{}, err
+	}
+	missing := []string{}
+	final, _ := url.Parse(res.FinalURL)
+	for _, r := range exp {
+		name := r["name"].Text
+		if strings.EqualFold(name, "Strict-Transport-Security") && final != nil && final.Scheme != "https" {
+			continue
+		}
+		if h.Get(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	chainJSON, _ := json.Marshal(redirects)
+	headersJSON, _ := json.Marshal(selected)
+	missingText := strings.Join(missing, "\n")
+	changed := false
+	prev, _ := s.store.DB.Query(`SELECT redirect_chain,headers_json,missing_headers FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, res.SiteID)
+	if len(prev) > 0 {
+		changed = prev[0]["redirect_chain"].Text != string(chainJSON) || prev[0]["headers_json"].Text != string(headersJSON) || prev[0]["missing_headers"].Text != missingText
+	}
+	rows, err := s.store.DB.Query(`INSERT INTO http_observations(site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at) VALUES(?,?,?,?,?,?,?) RETURNING id`, res.SiteID, res.ID, string(chainJSON), string(headersJSON), missingText, changed, res.CheckedAt)
+	if err != nil {
+		return HTTPObservation{}, err
+	}
+	return HTTPObservation{ID: rows[0]["id"].Int64, SiteID: res.SiteID, CheckID: res.ID, RedirectChain: redirects, Headers: selected, MissingHeaders: missing, Changed: changed, ObservedAt: res.CheckedAt}, nil
+}
+func (s *Service) HTTPHistory(siteID int64) ([]HTTPObservation, error) {
+	rows, err := s.store.DB.Query(`SELECT id,site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 50`, siteID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]HTTPObservation, 0, len(rows))
+	for _, r := range rows {
+		o := HTTPObservation{ID: r["id"].Int64, SiteID: r["site_id"].Int64, CheckID: r["check_id"].Int64, Changed: r["changed"].Int64 != 0, ObservedAt: r["observed_at"].Text, Headers: map[string]string{}}
+		_ = json.Unmarshal([]byte(r["redirect_chain"].Text), &o.RedirectChain)
+		_ = json.Unmarshal([]byte(r["headers_json"].Text), &o.Headers)
+		if r["missing_headers"].Text != "" {
+			o.MissingHeaders = strings.Split(r["missing_headers"].Text, "\n")
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+func (s *Service) HeaderExpectations(siteID int64) (map[string]bool, error) {
+	rows, err := s.store.DB.Query(`SELECT name,required FROM header_expectations WHERE site_id=? ORDER BY lower(name)`, siteID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, r := range rows {
+		out[r["name"].Text] = r["required"].Int64 != 0
+	}
+	return out, nil
+}
+func (s *Service) SetHeaderExpectation(siteID int64, name string, required bool) error {
+	name = http.CanonicalHeaderKey(strings.TrimSpace(name))
+	allowed := map[string]bool{"Content-Security-Policy": true, "Strict-Transport-Security": true, "X-Content-Type-Options": true, "Referrer-Policy": true, "Permissions-Policy": true, "X-Frame-Options": true}
+	if !allowed[name] {
+		return errors.New("unsupported header expectation")
+	}
+	return s.store.DB.Exec(`INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,?) ON CONFLICT(site_id,name) DO UPDATE SET required=excluded.required`, siteID, name, required)
+}
+
 func (s *Service) updateHealth(res Result) error {
 	rows, err := s.store.DB.Query(`SELECT state,consecutive_failures FROM site_health WHERE site_id=?`, res.SiteID)
 	if err != nil {

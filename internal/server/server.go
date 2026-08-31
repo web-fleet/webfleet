@@ -70,6 +70,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/fleet/tls", s.withSession(s.handleFleetTLS, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/dns", s.withSession(s.handleSiteDNS, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/dns/observe", s.withSession(s.handleObserveDNS, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/http-observations", s.withSession(s.handleHTTPObservations, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectations, false))
+	s.mux.HandleFunc("PUT /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectationUpdate, true))
 	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -121,6 +124,49 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleHTTPObservations(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.monitor.HTTPHistory(id)
+	if err != nil {
+		writeError(w, 500, "HTTP observations unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"observations": rows})
+}
+func (s *Server) handleHeaderExpectations(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	x, err := s.monitor.HeaderExpectations(id)
+	if err != nil {
+		writeError(w, 500, "header expectations unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"expectations": x})
+}
+func (s *Server) handleHeaderExpectationUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Name     string `json:"name"`
+		Required bool   `json:"required"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if err := s.monitor.SetHeaderExpectation(id, in.Name, in.Required); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) handleSiteDNS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
