@@ -4,7 +4,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 1 - prove the monitoring loop
 
-### CP1 - Application foundation
+### CP1 - Application foundation ✅
 
 - Establish Go module and package layout.
 - Embed/build the Nift dashboard frontend through the normal repository workflow.
@@ -15,6 +15,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Add unit tests for configuration and migration behaviour.
 
 **Exit:** one binary starts from a fresh directory, initializes its database, serves the dashboard and exits cleanly.
+
+**Completed:** Go/CGO application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. The current build binds system SQLite through an internal CGO wrapper because this execution environment cannot download Go modules; portability is tracked for the later cross-platform hardening gate.
 
 ### CP2 - First-admin authentication
 

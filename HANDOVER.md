@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- Product implementation has not started beyond the initial Nift scaffold and planning documents.
+- CP1 is complete: the Go application, SQLite migration foundation, embedded Nift dashboard, configuration, health endpoint, logging and graceful lifecycle are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The first implementation checkpoint is CP1 in `ROADMAP.md`.
+- The next implementation checkpoint is CP2 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Start CP1 only after reviewing this handover and `ROADMAP.md`. Do not skip straight to analytics or enterprise features before the fleet/site/check persistence and scheduler foundations are trustworthy.
+Continue with CP2 first-admin authentication. Preserve the CP1 one-binary + SQLite shape and keep the frontend generated through Nift.
