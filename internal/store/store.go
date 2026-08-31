@@ -9,7 +9,7 @@ import (
 
 type Store struct{ DB *sqlite.DB }
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 func Open(dataDir string) (*Store, error) {
 	db, err := sqlite.Open(filepath.Join(dataDir, "webfleet.db"))
@@ -120,6 +120,24 @@ func (s *Store) migrate() error {
 			}
 		}
 		if err = s.DB.Exec(`UPDATE schema_meta SET version=5`); err != nil {
+			return err
+		}
+	}
+
+	if v < 6 {
+		stmts := []string{
+			`CREATE TABLE incidents(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, state TEXT NOT NULL, summary TEXT NOT NULL, opened_at TEXT NOT NULL, closed_at TEXT, acknowledged_at TEXT);`,
+			`CREATE INDEX incidents_site_time_idx ON incidents(site_id,opened_at DESC);`,
+			`CREATE TABLE alert_policies(id INTEGER PRIMARY KEY, organization_id INTEGER NOT NULL DEFAULT 1 REFERENCES organizations(id), name TEXT NOT NULL, transport TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);`,
+			`INSERT INTO alert_policies(organization_id,name,transport,enabled,created_at) VALUES(1,'Dashboard alerts','in_app',1,datetime('now'));`,
+			`CREATE TABLE alert_deliveries(id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, transport TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);`,
+		}
+		for _, q := range stmts {
+			if err = s.DB.Exec(q); err != nil {
+				return err
+			}
+		}
+		if err = s.DB.Exec(`UPDATE schema_meta SET version=6`); err != nil {
 			return err
 		}
 	}

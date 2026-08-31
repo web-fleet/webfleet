@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP5 are complete: application/auth/inventory plus SSRF-bounded monitoring, scheduling and fleet/site health views are implemented.
+- CP1-CP6 are complete: application/auth/inventory, monitoring/scheduling/health, and coherent incident plus in-app alert history are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP6 in `ROADMAP.md`.
+- The next implementation checkpoint is CP7 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP6 incident history and alert foundations. Preserve one incident across a failure period, close it on recovery, and keep notification transport deliberately simple.
+Continue with CP7 TLS health. Reuse the secure monitor destination rules, persist certificate observations independently from uptime checks, and surface expiry/failure warnings at fleet and site level.

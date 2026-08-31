@@ -71,7 +71,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** bounded-concurrency scheduler with interval jitter, manual Check now, persisted healthy/degraded/warning/down/unknown state, consecutive failure and recovery transitions, fleet health counts, attention queue, health-aware site inventory, and recent check history on the individual site page.
 
-### CP6 - Incident history and alerts foundation
+### CP6 - Incident history and alerts foundation ✅
 
 - Open/close incidents from monitor state transitions.
 - Incident timeline and acknowledgement metadata.
@@ -80,6 +80,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Deduplication and recovery notification behaviour.
 
 **Exit:** an outage creates one coherent incident and recovery closes it without alert storms.
+
+**Completed:** one persisted incident per unhealthy period, state escalation without duplicate incidents, recovery closure, acknowledgement metadata, alert policy model, and deduplicated in-app open/recovery delivery history. The site-detail view exposes incident history; external transports remain intentionally deferred to the integrations checkpoint.
 
 ## Phase 2 - understand websites as websites
 

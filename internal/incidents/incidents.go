@@ -1,0 +1,76 @@
+package incidents
+
+import (
+	"errors"
+	"github.com/web-fleet/webfleet/internal/sqlite"
+	"github.com/web-fleet/webfleet/internal/store"
+	"strings"
+)
+
+type Service struct{ store *store.Store }
+type Incident struct {
+	ID, SiteID                                         int64  `json:"id"`
+	State, OpenedAt, ClosedAt, AcknowledgedAt, Summary string `json:"state"`
+}
+
+func New(st *store.Store) *Service { return &Service{store: st} }
+func (s *Service) Transition(siteID int64, prev, next, at string) error {
+	if next == prev {
+		return nil
+	}
+	if next == "healthy" {
+		rows, e := s.store.DB.Query(`SELECT id FROM incidents WHERE site_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1`, siteID)
+		if e != nil {
+			return e
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		id := rows[0]["id"].Int64
+		if e = s.store.DB.Exec(`UPDATE incidents SET state='resolved',closed_at=? WHERE id=?`, at, id); e != nil {
+			return e
+		}
+		return s.delivery(id, siteID, "recovery", at)
+	}
+	if next == "unknown" {
+		return nil
+	}
+	rows, e := s.store.DB.Query(`SELECT id FROM incidents WHERE site_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1`, siteID)
+	if e != nil {
+		return e
+	}
+	if len(rows) > 0 {
+		return s.store.DB.Exec(`UPDATE incidents SET state=? WHERE id=?`, next, rows[0]["id"].Int64)
+	}
+	summary := "Website entered " + next + " state"
+	r, e := s.store.DB.Query(`INSERT INTO incidents(site_id,state,summary,opened_at) VALUES(?,?,?,?) RETURNING id`, siteID, next, summary, at)
+	if e != nil {
+		return e
+	}
+	return s.delivery(r[0]["id"].Int64, siteID, "open", at)
+}
+func (s *Service) delivery(incidentID, siteID int64, kind, at string) error {
+	return s.store.DB.Exec(`INSERT INTO alert_deliveries(incident_id,site_id,transport,kind,status,created_at) VALUES(?,?,'in_app',?,'delivered',?)`, incidentID, siteID, kind, at)
+}
+func (s *Service) List(siteID int64) ([]Incident, error) {
+	rows, e := s.store.DB.Query(`SELECT id,site_id,state,summary,opened_at,COALESCE(closed_at,'') closed_at,COALESCE(acknowledged_at,'') acknowledged_at FROM incidents WHERE site_id=? ORDER BY id DESC LIMIT 100`, siteID)
+	if e != nil {
+		return nil, e
+	}
+	out := make([]Incident, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rowIncident(r))
+	}
+	return out, nil
+}
+func (s *Service) Acknowledge(id int64, at string) error {
+	rows, e := s.store.DB.Query(`SELECT id FROM incidents WHERE id=?`, id)
+	if e != nil || len(rows) == 0 {
+		return errors.New("incident not found")
+	}
+	return s.store.DB.Exec(`UPDATE incidents SET acknowledged_at=? WHERE id=?`, at, id)
+}
+func rowIncident(r sqlite.Row) Incident {
+	return Incident{ID: r["id"].Int64, SiteID: r["site_id"].Int64, State: r["state"].Text, Summary: r["summary"].Text, OpenedAt: r["opened_at"].Text, ClosedAt: r["closed_at"].Text, AcknowledgedAt: r["acknowledged_at"].Text}
+}
+func NormalizeState(s string) string { return strings.ToLower(strings.TrimSpace(s)) }

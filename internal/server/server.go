@@ -14,6 +14,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/fleet"
+	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
@@ -23,18 +24,19 @@ import (
 var embedded embed.FS
 
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	auth    *auth.Service
-	sites   *sites.Service
-	monitor *monitor.Service
-	log     *slog.Logger
-	http    *http.Server
-	mux     *http.ServeMux
+	cfg       config.Config
+	store     *store.Store
+	auth      *auth.Service
+	sites     *sites.Service
+	monitor   *monitor.Service
+	incidents *incidents.Service
+	log       *slog.Logger
+	http      *http.Server
+	mux       *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -58,6 +60,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/incidents", s.withSession(s.handleSiteIncidents, false))
+	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 }
@@ -108,6 +112,31 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleSiteIncidents(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.incidents.List(id)
+	if err != nil {
+		writeError(w, 500, "incident history unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"incidents": rows})
+}
+func (s *Server) handleAckIncident(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, 400, "invalid incident id")
+		return
+	}
+	if err = s.incidents.Acknowledge(id, store.Now()); err != nil {
+		writeError(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	sum, err := fleet.SummaryFor(s.store)
 	if err != nil {

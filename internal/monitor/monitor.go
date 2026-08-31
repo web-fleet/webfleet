@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 )
@@ -149,12 +150,19 @@ func (s *Service) updateHealth(res Result) error {
 	}
 	changed := next != state
 	if len(rows) == 0 {
-		return s.store.DB.Exec(`INSERT INTO site_health(site_id,state,consecutive_failures,last_check_id,last_change_at,last_success_at,last_failure_at) VALUES(?,?,?,?,?,?,?)`, res.SiteID, next, fails, res.ID, now, success, failure)
+		err = s.store.DB.Exec(`INSERT INTO site_health(site_id,state,consecutive_failures,last_check_id,last_change_at,last_success_at,last_failure_at) VALUES(?,?,?,?,?,?,?)`, res.SiteID, next, fails, res.ID, now, success, failure)
+	} else if changed {
+		err = s.store.DB.Exec(`UPDATE site_health SET state=?,consecutive_failures=?,last_check_id=?,last_change_at=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, next, fails, res.ID, now, success, failure, res.SiteID)
+	} else {
+		err = s.store.DB.Exec(`UPDATE site_health SET consecutive_failures=?,last_check_id=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, fails, res.ID, success, failure, res.SiteID)
+	}
+	if err != nil {
+		return err
 	}
 	if changed {
-		return s.store.DB.Exec(`UPDATE site_health SET state=?,consecutive_failures=?,last_check_id=?,last_change_at=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, next, fails, res.ID, now, success, failure, res.SiteID)
+		return incidents.New(s.store).Transition(res.SiteID, state, next, now)
 	}
-	return s.store.DB.Exec(`UPDATE site_health SET consecutive_failures=?,last_check_id=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, fails, res.ID, success, failure, res.SiteID)
+	return nil
 }
 
 func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
