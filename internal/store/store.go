@@ -9,7 +9,7 @@ import (
 
 type Store struct{ DB *sqlite.DB }
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 func Open(dataDir string) (*Store, error) {
 	db, err := sqlite.Open(filepath.Join(dataDir, "webfleet.db"))
@@ -182,6 +182,25 @@ func (s *Store) migrate() error {
 			}
 		}
 		if err = s.DB.Exec(`UPDATE schema_meta SET version=9`); err != nil {
+			return err
+		}
+	}
+
+	if v < 10 {
+		stmts := []string{
+			`CREATE TABLE crawl_runs(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, status TEXT NOT NULL, pages_crawled INTEGER NOT NULL DEFAULT 0, internal_links INTEGER NOT NULL DEFAULT 0, external_links INTEGER NOT NULL DEFAULT 0, broken_internal INTEGER NOT NULL DEFAULT 0, broken_external INTEGER NOT NULL DEFAULT 0, new_broken INTEGER NOT NULL DEFAULT 0, robots_found INTEGER NOT NULL DEFAULT 0, sitemap_found INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, finished_at TEXT);`,
+			`CREATE INDEX crawl_runs_site_idx ON crawl_runs(site_id,id DESC);`,
+			`CREATE TABLE crawl_pages(id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, url TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 0, depth INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');`,
+			`CREATE INDEX crawl_pages_run_idx ON crawl_pages(run_id);`,
+			`CREATE TABLE crawl_links(id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, from_url TEXT NOT NULL, to_url TEXT NOT NULL, kind TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 0, broken INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');`,
+			`CREATE INDEX crawl_links_run_idx ON crawl_links(run_id);`,
+		}
+		for _, q := range stmts {
+			if err = s.DB.Exec(q); err != nil {
+				return err
+			}
+		}
+		if err = s.DB.Exec(`UPDATE schema_meta SET version=10`); err != nil {
 			return err
 		}
 	}

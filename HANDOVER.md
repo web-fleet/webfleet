@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP9 are complete: core monitoring/fleet health, incidents, TLS/DNS, and HTTP header/redirect regression observations are implemented.
+- CP1-CP10 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP10 in `ROADMAP.md`.
+- The next implementation checkpoint is CP11 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP10 crawling and link health. Keep crawling bounded, same-site-first, robots-aware, independently scheduled, and protected by the shared destination guard at every request/redirect.
+Continue with CP11 performance history. Keep server-side timing honest about what it measures, add response-size/transfer observations and regression baselines, and do not label synthetic HTTP timings as browser Core Web Vitals.

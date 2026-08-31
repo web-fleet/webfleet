@@ -23,14 +23,16 @@ type Service struct {
 	guard netguard.Guard
 }
 type Result struct {
-	ID, SiteID, MonitorID int64  `json:"id"`
-	OK                    bool   `json:"ok"`
-	StatusCode            int    `json:"status_code"`
-	LatencyMS             int64  `json:"latency_ms"`
-	FinalURL              string `json:"final_url"`
-	ErrorClass            string `json:"error_class"`
-	Error                 string `json:"error"`
-	CheckedAt             string `json:"checked_at"`
+	ID         int64  `json:"id"`
+	SiteID     int64  `json:"site_id"`
+	MonitorID  int64  `json:"monitor_id"`
+	OK         bool   `json:"ok"`
+	StatusCode int    `json:"status_code"`
+	LatencyMS  int64  `json:"latency_ms"`
+	FinalURL   string `json:"final_url"`
+	ErrorClass string `json:"error_class"`
+	Error      string `json:"error"`
+	CheckedAt  string `json:"checked_at"`
 }
 
 type HTTPObservation struct {

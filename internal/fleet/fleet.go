@@ -6,8 +6,13 @@ import (
 )
 
 type Summary struct {
-	Total, Healthy, Degraded, Warning, Down, Unknown int64        `json:"total"`
-	Attention                                        []sites.Site `json:"attention"`
+	Total     int64        `json:"total"`
+	Healthy   int64        `json:"healthy"`
+	Degraded  int64        `json:"degraded"`
+	Warning   int64        `json:"warning"`
+	Down      int64        `json:"down"`
+	Unknown   int64        `json:"unknown"`
+	Attention []sites.Site `json:"attention"`
 }
 
 func SummaryFor(st *store.Store) (Summary, error) {

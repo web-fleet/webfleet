@@ -13,6 +13,7 @@ import (
 
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
@@ -34,13 +35,14 @@ type Server struct {
 	incidents *incidents.Service
 	tls       *tlshealth.Service
 	dns       *dnsobs.Service
+	crawler   *crawler.Service
 	log       *slog.Logger
 	http      *http.Server
 	mux       *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -71,6 +73,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sites/{id}/dns", s.withSession(s.handleSiteDNS, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/dns/observe", s.withSession(s.handleObserveDNS, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/http-observations", s.withSession(s.handleHTTPObservations, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/crawl", s.withSession(s.handleSiteCrawl, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/crawl", s.withSession(s.handleCrawlSite, true))
+	s.mux.HandleFunc("GET /api/fleet/link-regressions", s.withSession(s.handleFleetLinkRegressions, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectations, false))
 	s.mux.HandleFunc("PUT /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectationUpdate, true))
 	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
@@ -124,6 +129,49 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	detail, err := s.crawler.LatestDetail(id)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"crawl": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"crawl": detail})
+}
+
+func (s *Server) handleCrawlSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	detail, err := s.crawler.CrawlSite(r.Context(), id)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, detail)
+}
+
+func (s *Server) handleFleetLinkRegressions(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	runs, err := s.crawler.FleetRegressions()
+	if err != nil {
+		writeError(w, 500, "link regressions unavailable")
+		return
+	}
+	out := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		site, err := s.sites.Get(run.SiteID)
+		if err != nil {
+			continue
+		}
+		out = append(out, map[string]any{"site": site, "crawl": run})
+	}
+	writeJSON(w, 200, map[string]any{"regressions": out})
+}
+
 func (s *Server) handleHTTPObservations(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)
 	if !ok {

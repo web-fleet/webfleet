@@ -32,8 +32,11 @@ type Site struct {
 	UpdatedAt           string `json:"updated_at"`
 }
 type List struct {
-	Sites                        []Site `json:"sites"`
-	Page, PageSize, Total, Pages int    `json:"page"`
+	Sites    []Site `json:"sites"`
+	Page     int    `json:"page"`
+	PageSize int    `json:"page_size"`
+	Total    int    `json:"total"`
+	Pages    int    `json:"pages"`
 }
 
 func New(s *store.Store) *Service { return &Service{store: s} }

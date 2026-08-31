@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/scheduler"
@@ -34,7 +35,8 @@ func main() {
 	mon := monitor.New(st)
 	tlsSvc := tlshealth.New(st)
 	dnsSvc := dnsobs.New(st)
-	sched := scheduler.New(st, mon, tlsSvc, dnsSvc, cfg.CheckInterval, cfg.CheckConcurrency, log)
+	crawlSvc := crawler.New(st)
+	sched := scheduler.New(st, mon, tlsSvc, dnsSvc, crawlSvc, cfg.CheckInterval, cfg.CrawlInterval, cfg.CheckConcurrency, log)
 	sched.Start(context.Background())
 	defer sched.Stop()
 	srv := server.New(cfg, st, log)

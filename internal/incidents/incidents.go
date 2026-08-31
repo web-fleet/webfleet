@@ -9,8 +9,13 @@ import (
 
 type Service struct{ store *store.Store }
 type Incident struct {
-	ID, SiteID                                         int64  `json:"id"`
-	State, OpenedAt, ClosedAt, AcknowledgedAt, Summary string `json:"state"`
+	ID             int64  `json:"id"`
+	SiteID         int64  `json:"site_id"`
+	State          string `json:"state"`
+	OpenedAt       string `json:"opened_at"`
+	ClosedAt       string `json:"closed_at"`
+	AcknowledgedAt string `json:"acknowledged_at"`
+	Summary        string `json:"summary"`
 }
 
 func New(st *store.Store) *Service { return &Service{store: st} }

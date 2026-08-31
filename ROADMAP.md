@@ -112,7 +112,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** complete bounded redirect-chain capture, selected HTTP/security header observations, per-site configurable required-header expectations, missing-header evaluation, change detection against the prior observation, history API, and site-detail summary.
 
-### CP10 - Website crawler and link health
+### CP10 - Website crawler and link health ✅
 
 - Same-site crawler with explicit limits.
 - robots/sitemap awareness where appropriate.
@@ -120,6 +120,10 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Conservative external-link checking.
 - Crawl schedule independent from high-frequency uptime checks.
 - Per-page and fleet-level regressions.
+
+**Completed:** bounded same-origin crawl queue (50 pages, depth 3, 200 links/page), robots.txt and sitemap awareness, persisted page/link graph, internal broken-link detection, conservative capped external checks with HEAD-to-GET fallback, new-broken comparison against the prior completed crawl, six-hour independent crawl scheduling, manual crawl API/UI, site-detail link health, and fleet-level regression surfacing. All crawler requests and redirects use the shared public-target network guard.
+
+**Ordering review after CP10:** CP11 remains next. Completing performance history closes the core website-health phase before analytics begins. CP12-CP15 remain together because tracker ingestion, storage/rollups, dashboarding, then events/goals form one coherent privacy-first analytics slice. CP16 backup/restore remains a release gate and may be pulled ahead of analytics only if monitoring-only dogfooding begins before the analytics phase is ready.
 
 ### CP11 - Performance history
 

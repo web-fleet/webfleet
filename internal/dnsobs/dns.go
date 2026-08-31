@@ -24,10 +24,15 @@ type Service struct {
 	guard    netguard.Guard
 }
 type Observation struct {
-	ID, SiteID                      int64    `json:"id"`
-	A, AAAA                         []string `json:"a"`
-	CNAME, Status, Error, CheckedAt string   `json:"cname"`
-	Changed                         bool     `json:"changed"`
+	ID        int64    `json:"id"`
+	SiteID    int64    `json:"site_id"`
+	A         []string `json:"a"`
+	AAAA      []string `json:"aaaa"`
+	CNAME     string   `json:"cname"`
+	Status    string   `json:"status"`
+	Error     string   `json:"error"`
+	CheckedAt string   `json:"checked_at"`
+	Changed   bool     `json:"changed"`
 }
 
 func New(st *store.Store) *Service {

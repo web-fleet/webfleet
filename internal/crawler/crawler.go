@@ -1,0 +1,431 @@
+package crawler
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/web-fleet/webfleet/internal/netguard"
+	"github.com/web-fleet/webfleet/internal/sqlite"
+	"github.com/web-fleet/webfleet/internal/store"
+)
+
+const (
+	MaxPages          = 50
+	MaxDepth          = 3
+	MaxLinksPerPage   = 200
+	MaxExternalChecks = 20
+	MaxBodyBytes      = 2 << 20
+)
+
+type Service struct {
+	store *store.Store
+	guard netguard.Guard
+}
+type Run struct {
+	ID             int64  `json:"id"`
+	SiteID         int64  `json:"site_id"`
+	Status         string `json:"status"`
+	PagesCrawled   int    `json:"pages_crawled"`
+	InternalLinks  int    `json:"internal_links"`
+	ExternalLinks  int    `json:"external_links"`
+	BrokenInternal int    `json:"broken_internal"`
+	BrokenExternal int    `json:"broken_external"`
+	NewBroken      int    `json:"new_broken"`
+	RobotsFound    bool   `json:"robots_found"`
+	SitemapFound   bool   `json:"sitemap_found"`
+	Error          string `json:"error"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+}
+type Page struct {
+	URL        string `json:"url"`
+	StatusCode int    `json:"status_code"`
+	Depth      int    `json:"depth"`
+	Error      string `json:"error"`
+}
+type Link struct {
+	FromURL    string `json:"from_url"`
+	ToURL      string `json:"to_url"`
+	Kind       string `json:"kind"`
+	StatusCode int    `json:"status_code"`
+	Broken     bool   `json:"broken"`
+	Error      string `json:"error"`
+}
+type Detail struct {
+	Run   Run    `json:"run"`
+	Pages []Page `json:"pages"`
+	Links []Link `json:"links"`
+}
+
+type fetchResult struct {
+	status int
+	body   []byte
+	final  string
+	header http.Header
+	err    error
+}
+type queued struct {
+	u     string
+	depth int
+}
+
+func New(st *store.Store) *Service                           { return &Service{store: st, guard: netguard.New()} }
+func NewForTests(st *store.Store, g netguard.Guard) *Service { return &Service{store: st, guard: g} }
+
+var hrefRE = regexp.MustCompile(`(?i)\bhref\s*=\s*["']([^"'#]+)["']`)
+var locRE = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
+
+func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
+	rows, e := s.store.DB.Query(`SELECT primary_url FROM sites WHERE id=? AND archived_at IS NULL`, siteID)
+	if e != nil || len(rows) == 0 {
+		return Detail{}, errors.New("site not found")
+	}
+	root, e := url.Parse(rows[0]["primary_url"].Text)
+	if e != nil {
+		return Detail{}, e
+	}
+	root.Fragment = ""
+	prevID := int64(0)
+	if p, _ := s.store.DB.Query(`SELECT id FROM crawl_runs WHERE site_id=? AND status='complete' ORDER BY id DESC LIMIT 1`, siteID); len(p) > 0 {
+		prevID = p[0]["id"].Int64
+	}
+	started := store.Now()
+	ridRows, e := s.store.DB.Query(`INSERT INTO crawl_runs(site_id,status,started_at) VALUES(?,'running',?) RETURNING id`, siteID, started)
+	if e != nil {
+		return Detail{}, e
+	}
+	runID := ridRows[0]["id"].Int64
+	detail := Detail{Run: Run{ID: runID, SiteID: siteID, Status: "running", StartedAt: started}}
+	defer func() {
+		if detail.Run.Status == "running" {
+			detail.Run.Status = "error"
+		}
+	}()
+	robots, robotsFound, sitemaps := s.loadRobots(ctx, root)
+	detail.Run.RobotsFound = robotsFound
+	if len(sitemaps) == 0 {
+		sitemapURL := *root
+		sitemapURL.Path = "/sitemap.xml"
+		sitemapURL.RawQuery = ""
+		sitemaps = append(sitemaps, sitemapURL.String())
+	}
+	queue := []queued{{u: root.String(), depth: 0}}
+	seen := map[string]bool{}
+	for _, sm := range sitemaps {
+		if urls := s.loadSitemap(ctx, sm, root); len(urls) > 0 {
+			detail.Run.SitemapFound = true
+			for _, u := range urls {
+				if !seen[u] {
+					queue = append(queue, queued{u: u, depth: 0})
+				}
+			}
+		}
+	}
+	external := map[string]Link{}
+	brokenNow := map[string]bool{}
+	for len(queue) > 0 && len(detail.Pages) < MaxPages {
+		q := queue[0]
+		queue = queue[1:]
+		if seen[q.u] || q.depth > MaxDepth {
+			continue
+		}
+		seen[q.u] = true
+		u, _ := url.Parse(q.u)
+		if disallowed(robots, u.Path) {
+			continue
+		}
+		fr := s.fetch(ctx, http.MethodGet, q.u, MaxBodyBytes)
+		page := Page{URL: q.u, Depth: q.depth, StatusCode: fr.status}
+		if fr.err != nil {
+			page.Error = fr.err.Error()
+		}
+		detail.Pages = append(detail.Pages, page)
+		_, _ = s.store.DB.Query(`INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error) VALUES(?,?,?,?,?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error)
+		if fr.err != nil || fr.status >= 400 {
+			brokenNow[q.u] = true
+			continue
+		}
+		if !strings.Contains(strings.ToLower(fr.header.Get("Content-Type")), "text/html") && fr.header.Get("Content-Type") != "" {
+			continue
+		}
+		links := extractLinks(fr.body, fr.final)
+		if len(links) > MaxLinksPerPage {
+			links = links[:MaxLinksPerPage]
+		}
+		for _, target := range links {
+			tu, e := url.Parse(target)
+			if e != nil || tu.Hostname() == "" {
+				continue
+			}
+			kind := "external"
+			if strings.EqualFold(tu.Hostname(), root.Hostname()) {
+				kind = "internal"
+				detail.Run.InternalLinks++
+				if !seen[target] && q.depth < MaxDepth {
+					queue = append(queue, queued{u: target, depth: q.depth + 1})
+				}
+			} else {
+				detail.Run.ExternalLinks++
+				if len(external) < MaxExternalChecks {
+					external[target] = Link{FromURL: q.u, ToURL: target, Kind: "external"}
+				}
+			}
+			_, _ = s.store.DB.Query(`INSERT INTO crawl_links(run_id,site_id,from_url,to_url,kind,status_code,broken,error) VALUES(?,?,?,?,?,0,0,'') RETURNING id`, runID, siteID, q.u, target, kind)
+		}
+	}
+	// Internal broken links are pages that were linked and returned an error/status >=400.
+	for _, p := range detail.Pages {
+		if p.Error != "" || p.StatusCode >= 400 {
+			detail.Run.BrokenInternal++
+			brokenNow[p.URL] = true
+		}
+	}
+	// External checks are capped and HEAD-only to remain conservative.
+	keys := make([]string, 0, len(external))
+	for k := range external {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, target := range keys {
+		l := external[target]
+		fr := s.fetch(ctx, http.MethodHead, target, 64<<10)
+		if fr.err == nil && (fr.status == http.StatusMethodNotAllowed || fr.status == http.StatusNotImplemented) {
+			fr = s.fetch(ctx, http.MethodGet, target, 64<<10)
+		}
+		l.StatusCode = fr.status
+		if fr.err != nil {
+			l.Broken = true
+			l.Error = fr.err.Error()
+		} else if fr.status >= 400 {
+			l.Broken = true
+		}
+		if l.Broken {
+			detail.Run.BrokenExternal++
+			brokenNow[target] = true
+		}
+		external[target] = l
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Update persisted link rows with verified statuses/broken state. Internal targets use page results.
+	statusByURL := map[string]Page{}
+	for _, p := range detail.Pages {
+		statusByURL[p.URL] = p
+	}
+	for _, target := range keys {
+		l := external[target]
+		_ = s.store.DB.Exec(`UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='external' AND to_url=?`, l.StatusCode, l.Broken, l.Error, runID, target)
+	}
+	for target, p := range statusByURL {
+		broken := p.Error != "" || p.StatusCode >= 400
+		_ = s.store.DB.Exec(`UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='internal' AND to_url=?`, p.StatusCode, broken, p.Error, runID, target)
+	}
+	if prevID > 0 {
+		prev, _ := s.store.DB.Query(`SELECT DISTINCT to_url FROM crawl_links WHERE run_id=? AND broken=1`, prevID)
+		old := map[string]bool{}
+		for _, r := range prev {
+			old[r["to_url"].Text] = true
+		}
+		for u := range brokenNow {
+			if !old[u] {
+				detail.Run.NewBroken++
+			}
+		}
+	} else {
+		detail.Run.NewBroken = len(brokenNow)
+	}
+	detail.Run.PagesCrawled = len(detail.Pages)
+	detail.Run.Status = "complete"
+	detail.Run.FinishedAt = store.Now()
+	_ = s.store.DB.Exec(`UPDATE crawl_runs SET status='complete',pages_crawled=?,internal_links=?,external_links=?,broken_internal=?,broken_external=?,new_broken=?,robots_found=?,sitemap_found=?,finished_at=? WHERE id=?`, detail.Run.PagesCrawled, detail.Run.InternalLinks, detail.Run.ExternalLinks, detail.Run.BrokenInternal, detail.Run.BrokenExternal, detail.Run.NewBroken, detail.Run.RobotsFound, detail.Run.SitemapFound, detail.Run.FinishedAt, runID)
+	full, e := s.Detail(runID)
+	if e == nil {
+		return full, nil
+	}
+	return detail, nil
+}
+func (s *Service) loadRobots(ctx context.Context, root *url.URL) ([]string, bool, []string) {
+	u := *root
+	u.Path = "/robots.txt"
+	u.RawQuery = ""
+	fr := s.fetch(ctx, http.MethodGet, u.String(), 256<<10)
+	if fr.err != nil || fr.status != 200 {
+		return nil, false, nil
+	}
+	var dis []string
+	var maps []string
+	active := false
+	for _, line := range strings.Split(string(fr.body), "\n") {
+		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(parts[0]))
+		v := strings.TrimSpace(parts[1])
+		switch k {
+		case "user-agent":
+			active = v == "*"
+		case "disallow":
+			if active && v != "" {
+				dis = append(dis, v)
+			}
+		case "sitemap":
+			if v != "" {
+				maps = append(maps, v)
+			}
+		}
+	}
+	return dis, true, maps
+}
+func (s *Service) loadSitemap(ctx context.Context, raw string, root *url.URL) []string {
+	u, e := url.Parse(raw)
+	if e != nil || !strings.EqualFold(u.Hostname(), root.Hostname()) {
+		return nil
+	}
+	fr := s.fetch(ctx, http.MethodGet, u.String(), MaxBodyBytes)
+	if fr.err != nil || fr.status != 200 {
+		return nil
+	}
+	out := []string{}
+	for _, m := range locRE.FindAllSubmatch(fr.body, MaxPages) {
+		x := strings.TrimSpace(string(m[1]))
+		v, e := url.Parse(x)
+		if e == nil && strings.EqualFold(v.Hostname(), root.Hostname()) {
+			v.Fragment = ""
+			out = append(out, v.String())
+		}
+	}
+	return out
+}
+func disallowed(rules []string, path string) bool {
+	for _, r := range rules {
+		if r != "/" && strings.HasPrefix(path, r) {
+			return true
+		}
+		if r == "/" {
+			return true
+		}
+	}
+	return false
+}
+func extractLinks(body []byte, base string) []string {
+	b, e := url.Parse(base)
+	if e != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
+		raw := strings.TrimSpace(string(m[1]))
+		u, e := url.Parse(raw)
+		if e != nil {
+			continue
+		}
+		u = b.ResolveReference(u)
+		if u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+		u.Fragment = ""
+		x := u.String()
+		if !seen[x] {
+			seen[x] = true
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func (s *Service) fetch(ctx context.Context, method, raw string, max int64) fetchResult {
+	u, e := url.Parse(raw)
+	if e != nil {
+		return fetchResult{err: e}
+	}
+	if e = s.guard.ValidateURL(ctx, u); e != nil {
+		return fetchResult{err: e}
+	}
+	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DialContext: s.guard.DialContext}
+	client := &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 8 {
+			return errors.New("too many redirects")
+		}
+		return s.guard.ValidateURL(req.Context(), req.URL)
+	}}
+	req, e := http.NewRequestWithContext(ctx, method, raw, nil)
+	if e != nil {
+		return fetchResult{err: e}
+	}
+	req.Header.Set("User-Agent", "WebFleet/0.1 crawler")
+	resp, e := client.Do(req)
+	if e != nil {
+		return fetchResult{err: e}
+	}
+	defer resp.Body.Close()
+	var body []byte
+	if method != http.MethodHead {
+		body, e = io.ReadAll(io.LimitReader(resp.Body, max))
+		if e != nil {
+			return fetchResult{status: resp.StatusCode, err: e}
+		}
+	}
+	return fetchResult{status: resp.StatusCode, body: body, final: resp.Request.URL.String(), header: resp.Header.Clone()}
+}
+func (s *Service) Latest(siteID int64) (Run, error) {
+	r, e := s.store.DB.Query(`SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
+	if e != nil || len(r) == 0 {
+		return Run{}, errors.New("no crawl run")
+	}
+	return runRow(r[0]), nil
+}
+func (s *Service) Detail(runID int64) (Detail, error) {
+	r, e := s.store.DB.Query(`SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE id=?`, runID)
+	if e != nil || len(r) == 0 {
+		return Detail{}, errors.New("crawl run not found")
+	}
+	d := Detail{Run: runRow(r[0])}
+	pr, e := s.store.DB.Query(`SELECT url,status_code,depth,error FROM crawl_pages WHERE run_id=? ORDER BY id`, runID)
+	if e != nil {
+		return Detail{}, e
+	}
+	for _, x := range pr {
+		d.Pages = append(d.Pages, Page{URL: x["url"].Text, StatusCode: int(x["status_code"].Int64), Depth: int(x["depth"].Int64), Error: x["error"].Text})
+	}
+	lr, e := s.store.DB.Query(`SELECT from_url,to_url,kind,status_code,broken,error FROM crawl_links WHERE run_id=? ORDER BY id LIMIT 1000`, runID)
+	if e != nil {
+		return Detail{}, e
+	}
+	for _, x := range lr {
+		d.Links = append(d.Links, Link{FromURL: x["from_url"].Text, ToURL: x["to_url"].Text, Kind: x["kind"].Text, StatusCode: int(x["status_code"].Int64), Broken: x["broken"].Int64 != 0, Error: x["error"].Text})
+	}
+	return d, nil
+}
+func (s *Service) LatestDetail(siteID int64) (Detail, error) {
+	r, e := s.Latest(siteID)
+	if e != nil {
+		return Detail{}, e
+	}
+	return s.Detail(r.ID)
+}
+func (s *Service) FleetRegressions() ([]Run, error) {
+	r, e := s.store.DB.Query(`SELECT c.id,c.site_id,c.status,c.pages_crawled,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id WHERE c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0 ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`)
+	if e != nil {
+		return nil, e
+	}
+	out := make([]Run, 0, len(r))
+	for _, x := range r {
+		out = append(out, runRow(x))
+	}
+	return out, nil
+}
+func runRow(r sqlite.Row) Run {
+	return Run{ID: r["id"].Int64, SiteID: r["site_id"].Int64, Status: r["status"].Text, PagesCrawled: int(r["pages_crawled"].Int64), InternalLinks: int(r["internal_links"].Int64), ExternalLinks: int(r["external_links"].Int64), BrokenInternal: int(r["broken_internal"].Int64), BrokenExternal: int(r["broken_external"].Int64), NewBroken: int(r["new_broken"].Int64), RobotsFound: r["robots_found"].Int64 != 0, SitemapFound: r["sitemap_found"].Int64 != 0, Error: r["error"].Text, StartedAt: r["started_at"].Text, FinishedAt: r["finished_at"].Text}
+}
+
+var _ = fmt.Sprintf
