@@ -1,9 +1,20 @@
-<main class="shell">
-  <header class="topbar"><div><span class="eyebrow">WEB FLEET</span><h1>Fleet console</h1></div><span class="status-dot">foundation</span></header>
-  <section class="hero-grid">
-    <article class="metric"><span>Sites</span><strong>0</strong><small>Add your first site after setup.</small></article>
-    <article class="metric"><span>Fleet health</span><strong>—</strong><small>Monitoring is not configured yet.</small></article>
-    <article class="metric"><span>Needs attention</span><strong>0</strong><small>No observations yet.</small></article>
-  </section>
-  <section class="panel"><div><span class="eyebrow">CP1</span><h2>Application foundation is running</h2><p>The dashboard is embedded in the Go binary and served from Web Fleet itself.</p></div></section>
-</main>
+<div id="app" class="app-shell">
+  <main class="auth-stage" id="auth-stage">
+    <section class="auth-panel">
+      <div class="brand-mark">WF</div>
+      <span class="eyebrow">WEB FLEET</span>
+      <h1 id="auth-title">Loading…</h1>
+      <p id="auth-copy">Checking local installation state.</p>
+      <form id="auth-form" hidden>
+        <label>Email<input id="email" type="email" autocomplete="username" required></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label>
+        <button type="submit" id="auth-submit">Continue</button>
+        <p class="form-error" id="auth-error" role="alert"></p>
+      </form>
+    </section>
+  </main>
+  <main id="dashboard" class="shell" hidden>
+    <header class="topbar"><div><span class="eyebrow">WEB FLEET</span><h1>Fleet console</h1></div><button class="quiet-button" id="logout">Log out</button></header>
+    <section class="hero-grid"><article class="metric"><span>Sites</span><strong>0</strong><small>Add your first site after setup.</small></article><article class="metric"><span>Fleet health</span><strong>—</strong><small>Monitoring is not configured yet.</small></article><article class="metric"><span>Needs attention</span><strong>0</strong><small>No observations yet.</small></article></section>
+  </main>
+</div>

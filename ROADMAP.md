@@ -18,7 +18,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** Go/CGO application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. The current build binds system SQLite through an internal CGO wrapper because this execution environment cannot download Go modules; portability is tracked for the later cross-platform hardening gate.
 
-### CP2 - First-admin authentication
+### CP2 - First-admin authentication ✅
 
 - Fresh-install setup flow.
 - First admin creation.
@@ -29,6 +29,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Authentication audit events.
 
 **Exit:** unauthenticated users cannot access the dashboard and session/security regression tests pass.
+
+**Completed:** first-run admin creation, Argon2id password hashing, strict session cookies, hashed session tokens, CSRF enforcement, logout/session expiry, authentication audit records, and setup/login UI. The current Argon2 binding uses the system `libargon2.so.1` because external Go modules are unavailable in this build environment; portable dependency packaging remains a later release-hardening obligation.
 
 ### CP3 - Site model and CRUD
 

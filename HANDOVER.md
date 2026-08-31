@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1 is complete: the Go application, SQLite migration foundation, embedded Nift dashboard, configuration, health endpoint, logging and graceful lifecycle are implemented.
+- CP1-CP2 are complete: the Go/SQLite foundation and first-admin authentication/session/CSRF flow are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP2 in `ROADMAP.md`.
+- The next implementation checkpoint is CP3 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP2 first-admin authentication. Preserve the CP1 one-binary + SQLite shape and keep the frontend generated through Nift.
+Continue with CP3 site/group CRUD. Large-fleet search, group filtering, page-number pagination and a stable site-detail route are now CP3 obligations rather than waiting until CP27; CP27 remains the accessibility/stress-hardening pass.

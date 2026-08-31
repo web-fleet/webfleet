@@ -4,6 +4,8 @@ package sqlite
 #cgo LDFLAGS: -lsqlite3
 #include <sqlite3.h>
 #include <stdlib.h>
+static int wf_bind_text(sqlite3_stmt *st, int idx, const char *v) { return sqlite3_bind_text(st, idx, v, -1, SQLITE_TRANSIENT); }
+static int wf_bind_blob(sqlite3_stmt *st, int idx, const void *v, int n) { return sqlite3_bind_blob(st, idx, v, n, SQLITE_TRANSIENT); }
 */
 import "C"
 
@@ -155,13 +157,13 @@ func (d *DB) bind(st *C.sqlite3_stmt, args []any) error {
 			rc = C.sqlite3_bind_null(st, idx)
 		case string:
 			c := C.CString(v)
-			rc = C.sqlite3_bind_text(st, idx, c, -1, nil)
+			rc = C.wf_bind_text(st, idx, c)
 			C.free(unsafe.Pointer(c))
 		case []byte:
 			if len(v) == 0 {
-				rc = C.sqlite3_bind_blob(st, idx, nil, 0, nil)
+				rc = C.wf_bind_blob(st, idx, nil, 0)
 			} else {
-				rc = C.sqlite3_bind_blob(st, idx, unsafe.Pointer(&v[0]), C.int(len(v)), nil)
+				rc = C.wf_bind_blob(st, idx, unsafe.Pointer(&v[0]), C.int(len(v)))
 			}
 		case int:
 			rc = C.sqlite3_bind_int64(st, idx, C.sqlite3_int64(v))
