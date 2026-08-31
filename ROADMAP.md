@@ -45,7 +45,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** persisted groups and sites, canonical HTTP/HTTPS URLs, create/edit/archive/delete flows, server-backed search/group filtering/page-number pagination, large-fleet inventory UX, and a stable SPA site-detail route. Search/pagination/grouping were deliberately promoted from the later large-fleet UX checkpoint because they are core inventory behaviour, while CP27 now focuses on accessibility and scale hardening rather than first implementation.
 
-### CP4 - HTTP monitor engine
+### CP4 - HTTP monitor engine ✅
 
 - Monitor definitions and check-result persistence.
 - HTTP/HTTPS request execution with timeout and redirect policy.
@@ -55,6 +55,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Unit and integration tests with controlled local HTTP fixtures.
 
 **Exit:** checks are correct, security-bounded and queryable from storage.
+
+**Completed:** persisted HTTP monitor definitions/results, timeout and redirect bounds, expected-status evaluation, latency/final-URL capture, structured DNS/connection/TLS/timeout/redirect/status error classes, and SSRF-safe DNS/dial/redirect validation. Private/reserved targets are blocked at resolved-address and dial time; controlled local fixtures use an explicit test-only private-network override.
 
 ### CP5 - Scheduler and fleet health
 

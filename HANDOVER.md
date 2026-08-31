@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP3 are complete: application/auth foundations plus persisted site/group inventory, search, filtering, page-number pagination and site-detail routing are implemented.
+- CP1-CP4 are complete: application/auth/inventory foundations plus persisted SSRF-bounded HTTP monitoring are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP4 in `ROADMAP.md`.
+- The next implementation checkpoint is CP5 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP4 HTTP monitoring. Preserve the existing inventory/search/group/pagination APIs and add monitoring data to the existing fleet/site views rather than creating a parallel UI.
+Continue with CP5 scheduler and fleet health. Wire the existing monitor service into bounded background scheduling/manual checks, derive current site/fleet health, and surface it through the existing fleet and site views.

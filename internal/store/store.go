@@ -9,7 +9,7 @@ import (
 
 type Store struct{ DB *sqlite.DB }
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 func Open(dataDir string) (*Store, error) {
 	db, err := sqlite.Open(filepath.Join(dataDir, "webfleet.db"))
@@ -87,6 +87,24 @@ func (s *Store) migrate() error {
 			}
 		}
 		if err = s.DB.Exec(`UPDATE schema_meta SET version=3`); err != nil {
+			return err
+		}
+	}
+
+	if v < 4 {
+		stmts := []string{
+			`CREATE TABLE monitors(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'http', timeout_ms INTEGER NOT NULL DEFAULT 10000, expected_min INTEGER NOT NULL DEFAULT 200, expected_max INTEGER NOT NULL DEFAULT 399, created_at TEXT NOT NULL);`,
+			`CREATE UNIQUE INDEX monitors_site_kind_idx ON monitors(site_id,kind);`,
+			`INSERT INTO monitors(site_id,kind,timeout_ms,expected_min,expected_max,created_at) SELECT id,'http',10000,200,399,datetime('now') FROM sites;`,
+			`CREATE TABLE check_results(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, ok INTEGER NOT NULL, status_code INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0, final_url TEXT NOT NULL DEFAULT '', error_class TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL);`,
+			`CREATE INDEX check_results_site_time_idx ON check_results(site_id,checked_at DESC);`,
+		}
+		for _, q := range stmts {
+			if err = s.DB.Exec(q); err != nil {
+				return err
+			}
+		}
+		if err = s.DB.Exec(`UPDATE schema_meta SET version=4`); err != nil {
 			return err
 		}
 	}

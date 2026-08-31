@@ -94,7 +94,11 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 	if e != nil {
 		return Site{}, e
 	}
-	return s.Get(r[0]["id"].Int64)
+	id := r[0]["id"].Int64
+	if e = s.store.DB.Exec(`INSERT INTO monitors(site_id,kind,timeout_ms,expected_min,expected_max,created_at) VALUES(?,'http',10000,200,399,?)`, id, now); e != nil {
+		return Site{}, e
+	}
+	return s.Get(id)
 }
 func (s *Service) Get(id int64) (Site, error) {
 	r, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id WHERE s.id=?`, id)
