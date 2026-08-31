@@ -6,31 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/web-fleet/webfleet/internal/incidents"
+	"github.com/web-fleet/webfleet/internal/netguard"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 )
 
-type Resolver interface {
-	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
-}
-type netResolver struct{ r *net.Resolver }
-
-func (n netResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
-	return n.r.LookupNetIP(ctx, network, host)
-}
-
 type Service struct {
-	store        *store.Store
-	resolver     Resolver
-	allowPrivate bool
+	store *store.Store
+	guard netguard.Guard
 }
 type Result struct {
 	ID, SiteID, MonitorID int64  `json:"id"`
@@ -43,11 +32,9 @@ type Result struct {
 	CheckedAt             string `json:"checked_at"`
 }
 
-func New(st *store.Store) *Service {
-	return &Service{store: st, resolver: netResolver{net.DefaultResolver}}
-}
-func NewForTests(st *store.Store, r Resolver, allowPrivate bool) *Service {
-	return &Service{store: st, resolver: r, allowPrivate: allowPrivate}
+func New(st *store.Store) *Service { return &Service{store: st, guard: netguard.New()} }
+func NewForTests(st *store.Store, r netguard.Resolver, allowPrivate bool) *Service {
+	return &Service{store: st, guard: netguard.Guard{Resolver: r, AllowPrivate: allowPrivate}}
 }
 
 func (s *Service) CheckSite(ctx context.Context, siteID int64) (Result, error) {
@@ -67,18 +54,18 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DialContext: s.safeDialer()}
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DialContext: s.guard.DialContext}
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
 		}
-		return s.validateURL(req.Context(), req.URL)
+		return s.guard.ValidateURL(req.Context(), req.URL)
 	}}
 	u, e := url.Parse(raw)
 	if e != nil {
 		return Result{}, e
 	}
-	if e = s.validateURL(ctx, u); e != nil {
+	if e = s.guard.ValidateURL(ctx, u); e != nil {
 		return s.persist(siteID, monitorID, Result{OK: false, FinalURL: raw, ErrorClass: "blocked", Error: e.Error(), CheckedAt: store.Now()})
 	}
 	start := time.Now()
@@ -184,70 +171,6 @@ func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
 }
 func resultRow(r sqlite.Row) Result {
 	return Result{ID: r["id"].Int64, SiteID: r["site_id"].Int64, MonitorID: r["monitor_id"].Int64, OK: r["ok"].Int64 != 0, StatusCode: int(r["status_code"].Int64), LatencyMS: r["latency_ms"].Int64, FinalURL: r["final_url"].Text, ErrorClass: r["error_class"].Text, Error: r["error"].Text, CheckedAt: r["checked_at"].Text}
-}
-func (s *Service) validateURL(ctx context.Context, u *url.URL) error {
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return errors.New("only http/https targets are allowed")
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("target has no hostname")
-	}
-	ips, e := s.resolver.LookupNetIP(ctx, "ip", host)
-	if e != nil {
-		return fmt.Errorf("resolve target: %w", e)
-	}
-	if len(ips) == 0 {
-		return errors.New("target resolved to no addresses")
-	}
-	for _, ip := range ips {
-		if !s.allowPrivate && blockedIP(ip) {
-			return fmt.Errorf("target resolved to blocked address %s", ip)
-		}
-	}
-	return nil
-}
-func (s *Service) safeDialer() func(context.Context, string, string) (net.Conn, error) {
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, e := net.SplitHostPort(address)
-		if e != nil {
-			return nil, e
-		}
-		ips, e := s.resolver.LookupNetIP(ctx, "ip", host)
-		if e != nil {
-			return nil, &net.DNSError{Err: e.Error(), Name: host}
-		}
-		d := net.Dialer{Timeout: 5 * time.Second}
-		var last error
-		for _, ip := range ips {
-			if !s.allowPrivate && blockedIP(ip) {
-				return nil, fmt.Errorf("blocked target address %s", ip)
-			}
-			c, e := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if e == nil {
-				return c, nil
-			}
-			last = e
-		}
-		if last == nil {
-			last = errors.New("no usable target addresses")
-		}
-		return nil, last
-	}
-}
-func blockedIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	blocks := []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "2001:db8::/32"}
-	for _, raw := range blocks {
-		p := netip.MustParsePrefix(raw)
-		if p.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 func classifyError(err error) string {
 	msg := strings.ToLower(err.Error())

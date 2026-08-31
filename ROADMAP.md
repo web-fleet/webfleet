@@ -85,12 +85,14 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 2 - understand websites as websites
 
-### CP7 - TLS health
+### CP7 - TLS health ✅
 
 - Certificate chain/hostname/expiry inspection.
 - Expiry thresholds and fleet warnings.
 - TLS failure classification and history.
 - Dashboard/site-detail presentation.
+
+**Completed:** shared public-target network guard reused by HTTP/TLS, certificate handshake/hostname validation, chain leaf metadata and expiry persistence, 30-day fleet warning query, manual inspection, 12-hour scheduler refresh, and site-detail TLS presentation.
 
 ### CP8 - DNS observation
 

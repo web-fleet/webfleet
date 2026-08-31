@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/web-fleet/webfleet/internal/tlshealth"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -16,6 +17,7 @@ type Checker interface {
 type Scheduler struct {
 	store       *store.Store
 	checker     Checker
+	tls         *tlshealth.Service
 	interval    time.Duration
 	concurrency int
 	log         *slog.Logger
@@ -23,14 +25,14 @@ type Scheduler struct {
 	wg          sync.WaitGroup
 }
 
-func New(st *store.Store, c Checker, interval time.Duration, concurrency int, log *slog.Logger) *Scheduler {
+func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, interval time.Duration, concurrency int, log *slog.Logger) *Scheduler {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &Scheduler{store: st, checker: c, interval: interval, concurrency: concurrency, log: log}
+	return &Scheduler{store: st, checker: c, tls: tlsSvc, interval: interval, concurrency: concurrency, log: log}
 }
 func (s *Scheduler) Start(ctx context.Context) {
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -77,6 +79,20 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 			}
 			if _, e := s.checker.CheckSite(ctx, id); e != nil {
 				s.log.Warn("site check failed", "site_id", id, "error", e)
+			}
+			if s.tls != nil {
+				due := true
+				rows, _ := s.store.DB.Query(`SELECT checked_at FROM tls_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, id)
+				if len(rows) > 0 {
+					if t, err := time.Parse(time.RFC3339Nano, rows[0]["checked_at"].Text); err == nil && time.Since(t) <= 12*time.Hour {
+						due = false
+					}
+				}
+				if due {
+					if _, e := s.tls.InspectSite(ctx, id); e != nil {
+						s.log.Warn("tls inspection failed", "site_id", id, "error", e)
+					}
+				}
 			}
 		}()
 	}

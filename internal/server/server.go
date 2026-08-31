@@ -18,6 +18,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/web-fleet/webfleet/internal/tlshealth"
 )
 
 //go:embed web/* web/assets/css/* web/assets/js/*
@@ -30,13 +31,14 @@ type Server struct {
 	sites     *sites.Service
 	monitor   *monitor.Service
 	incidents *incidents.Service
+	tls       *tlshealth.Service
 	log       *slog.Logger
 	http      *http.Server
 	mux       *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -61,6 +63,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/incidents", s.withSession(s.handleSiteIncidents, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/tls", s.withSession(s.handleSiteTLS, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/tls/inspect", s.withSession(s.handleInspectTLS, true))
+	s.mux.HandleFunc("GET /api/fleet/tls", s.withSession(s.handleFleetTLS, false))
 	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -112,6 +117,39 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleSiteTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	obs, err := s.tls.Latest(id)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"observation": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"observation": obs})
+}
+func (s *Server) handleInspectTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	obs, err := s.tls.InspectSite(r.Context(), id)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, obs)
+}
+func (s *Server) handleFleetTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	rows, err := s.tls.FleetWarnings(30)
+	if err != nil {
+		writeError(w, 500, "TLS warnings unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"warnings": rows})
+}
+
 func (s *Server) handleSiteIncidents(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
@@ -155,6 +193,7 @@ func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, sess au
 		writeError(w, 400, err.Error())
 		return
 	}
+	_, _ = s.tls.InspectSite(r.Context(), id)
 	writeJSON(w, 200, res)
 }
 func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess auth.Session) {

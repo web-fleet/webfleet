@@ -9,7 +9,7 @@ import (
 
 type Store struct{ DB *sqlite.DB }
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 func Open(dataDir string) (*Store, error) {
 	db, err := sqlite.Open(filepath.Join(dataDir, "webfleet.db"))
@@ -138,6 +138,18 @@ func (s *Store) migrate() error {
 			}
 		}
 		if err = s.DB.Exec(`UPDATE schema_meta SET version=6`); err != nil {
+			return err
+		}
+	}
+
+	if v < 7 {
+		if err = s.DB.Exec(`CREATE TABLE tls_observations(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, valid INTEGER NOT NULL, hostname_valid INTEGER NOT NULL, issuer TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '', not_before TEXT NOT NULL DEFAULT '', not_after TEXT NOT NULL DEFAULT '', days_remaining INTEGER NOT NULL DEFAULT 0, error_class TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL);`); err != nil {
+			return err
+		}
+		if err = s.DB.Exec(`CREATE INDEX tls_observations_site_idx ON tls_observations(site_id,id DESC);`); err != nil {
+			return err
+		}
+		if err = s.DB.Exec(`UPDATE schema_meta SET version=7`); err != nil {
 			return err
 		}
 	}

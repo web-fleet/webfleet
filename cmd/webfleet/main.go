@@ -8,6 +8,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/scheduler"
 	"github.com/web-fleet/webfleet/internal/server"
 	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/web-fleet/webfleet/internal/tlshealth"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,7 +31,8 @@ func main() {
 	}
 	defer st.Close()
 	mon := monitor.New(st)
-	sched := scheduler.New(st, mon, cfg.CheckInterval, cfg.CheckConcurrency, log)
+	tlsSvc := tlshealth.New(st)
+	sched := scheduler.New(st, mon, tlsSvc, cfg.CheckInterval, cfg.CheckConcurrency, log)
 	sched.Start(context.Background())
 	defer sched.Stop()
 	srv := server.New(cfg, st, log)

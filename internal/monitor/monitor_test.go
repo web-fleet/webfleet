@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"github.com/web-fleet/webfleet/internal/netguard"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 	"net"
@@ -55,7 +56,7 @@ func TestCheckPersistsHTTPResult(t *testing.T) {
 }
 func TestPrivateAndReservedAddressesBlocked(t *testing.T) {
 	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.1", "192.0.2.1", "198.51.100.2", "203.0.113.8", "::1", "fc00::1", "2001:db8::1"} {
-		if !blockedIP(netip.MustParseAddr(ip)) {
+		if !netguard.Blocked(netip.MustParseAddr(ip)) {
 			t.Fatalf("not blocked: %s", ip)
 		}
 	}
@@ -65,7 +66,7 @@ func TestRedirectToPrivateIsBlocked(t *testing.T) {
 	defer st.Close()
 	svc := NewForTests(st, fakeResolver{"public.example": {netip.MustParseAddr("93.184.216.34")}, "internal.example": {netip.MustParseAddr("127.0.0.1")}}, false)
 	u, _ := url.Parse("http://internal.example/admin")
-	if e := svc.validateURL(context.Background(), u); e == nil {
+	if e := svc.guard.ValidateURL(context.Background(), u); e == nil {
 		t.Fatal("private redirect target allowed")
 	}
 	_ = id

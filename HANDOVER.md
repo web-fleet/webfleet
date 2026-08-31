@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP6 are complete: application/auth/inventory, monitoring/scheduling/health, and coherent incident plus in-app alert history are implemented.
+- CP1-CP7 are complete: core monitoring/fleet health, incidents, and TLS certificate health are implemented on one shared network-safety boundary.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP7 in `ROADMAP.md`.
+- The next implementation checkpoint is CP8 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP7 TLS health. Reuse the secure monitor destination rules, persist certificate observations independently from uptime checks, and surface expiry/failure warnings at fleet and site level.
+Continue with CP8 DNS observation. Persist meaningful A/AAAA/CNAME sets and changes, distinguish failures from changes, and surface current/history data on site detail.
