@@ -45,9 +45,6 @@ func Load() (Config, error) {
 		}
 		c.CheckConcurrency = n
 	}
-	if err := os.MkdirAll(c.DataDir, 0o750); err != nil {
-		return c, fmt.Errorf("create data dir: %w", err)
-	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {
 		c.DataDir = abs

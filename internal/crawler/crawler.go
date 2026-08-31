@@ -85,7 +85,7 @@ var hrefRE = regexp.MustCompile(`(?i)\bhref\s*=\s*["']([^"'#]+)["']`)
 var locRE = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
 
 func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
-	rows, e := s.store.DB.Query(`SELECT primary_url FROM sites WHERE id=? AND archived_at IS NULL`, siteID)
+	rows, e := sqlite.Query(s.store.DB, `SELECT primary_url FROM sites WHERE id=? AND archived_at IS NULL`, siteID)
 	if e != nil || len(rows) == 0 {
 		return Detail{}, errors.New("site not found")
 	}
@@ -95,11 +95,11 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	}
 	root.Fragment = ""
 	prevID := int64(0)
-	if p, _ := s.store.DB.Query(`SELECT id FROM crawl_runs WHERE site_id=? AND status='complete' ORDER BY id DESC LIMIT 1`, siteID); len(p) > 0 {
+	if p, _ := sqlite.Query(s.store.DB, `SELECT id FROM crawl_runs WHERE site_id=? AND status='complete' ORDER BY id DESC LIMIT 1`, siteID); len(p) > 0 {
 		prevID = p[0]["id"].Int64
 	}
 	started := store.Now()
-	ridRows, e := s.store.DB.Query(`INSERT INTO crawl_runs(site_id,status,started_at) VALUES(?,'running',?) RETURNING id`, siteID, started)
+	ridRows, e := sqlite.Query(s.store.DB, `INSERT INTO crawl_runs(site_id,status,started_at) VALUES(?,'running',?) RETURNING id`, siteID, started)
 	if e != nil {
 		return Detail{}, e
 	}
@@ -149,7 +149,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 			page.Error = fr.err.Error()
 		}
 		detail.Pages = append(detail.Pages, page)
-		_, _ = s.store.DB.Query(`INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error) VALUES(?,?,?,?,?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error)
+		_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error) VALUES(?,?,?,?,?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error)
 		if fr.err != nil || fr.status >= 400 {
 			brokenNow[q.u] = true
 			continue
@@ -179,7 +179,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 					external[target] = Link{FromURL: q.u, ToURL: target, Kind: "external"}
 				}
 			}
-			_, _ = s.store.DB.Query(`INSERT INTO crawl_links(run_id,site_id,from_url,to_url,kind,status_code,broken,error) VALUES(?,?,?,?,?,0,0,'') RETURNING id`, runID, siteID, q.u, target, kind)
+			_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_links(run_id,site_id,from_url,to_url,kind,status_code,broken,error) VALUES(?,?,?,?,?,0,0,'') RETURNING id`, runID, siteID, q.u, target, kind)
 		}
 	}
 	// Internal broken links are pages that were linked and returned an error/status >=400.
@@ -222,14 +222,14 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	}
 	for _, target := range keys {
 		l := external[target]
-		_ = s.store.DB.Exec(`UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='external' AND to_url=?`, l.StatusCode, l.Broken, l.Error, runID, target)
+		_ = sqlite.Exec(s.store.DB, `UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='external' AND to_url=?`, l.StatusCode, l.Broken, l.Error, runID, target)
 	}
 	for target, p := range statusByURL {
 		broken := p.Error != "" || p.StatusCode >= 400
-		_ = s.store.DB.Exec(`UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='internal' AND to_url=?`, p.StatusCode, broken, p.Error, runID, target)
+		_ = sqlite.Exec(s.store.DB, `UPDATE crawl_links SET status_code=?,broken=?,error=? WHERE run_id=? AND kind='internal' AND to_url=?`, p.StatusCode, broken, p.Error, runID, target)
 	}
 	if prevID > 0 {
-		prev, _ := s.store.DB.Query(`SELECT DISTINCT to_url FROM crawl_links WHERE run_id=? AND broken=1`, prevID)
+		prev, _ := sqlite.Query(s.store.DB, `SELECT DISTINCT to_url FROM crawl_links WHERE run_id=? AND broken=1`, prevID)
 		old := map[string]bool{}
 		for _, r := range prev {
 			old[r["to_url"].Text] = true
@@ -245,7 +245,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	detail.Run.PagesCrawled = len(detail.Pages)
 	detail.Run.Status = "complete"
 	detail.Run.FinishedAt = store.Now()
-	_ = s.store.DB.Exec(`UPDATE crawl_runs SET status='complete',pages_crawled=?,internal_links=?,external_links=?,broken_internal=?,broken_external=?,new_broken=?,robots_found=?,sitemap_found=?,finished_at=? WHERE id=?`, detail.Run.PagesCrawled, detail.Run.InternalLinks, detail.Run.ExternalLinks, detail.Run.BrokenInternal, detail.Run.BrokenExternal, detail.Run.NewBroken, detail.Run.RobotsFound, detail.Run.SitemapFound, detail.Run.FinishedAt, runID)
+	_ = sqlite.Exec(s.store.DB, `UPDATE crawl_runs SET status='complete',pages_crawled=?,internal_links=?,external_links=?,broken_internal=?,broken_external=?,new_broken=?,robots_found=?,sitemap_found=?,finished_at=? WHERE id=?`, detail.Run.PagesCrawled, detail.Run.InternalLinks, detail.Run.ExternalLinks, detail.Run.BrokenInternal, detail.Run.BrokenExternal, detail.Run.NewBroken, detail.Run.RobotsFound, detail.Run.SitemapFound, detail.Run.FinishedAt, runID)
 	full, e := s.Detail(runID)
 	if e == nil {
 		return full, nil
@@ -378,26 +378,26 @@ func (s *Service) fetch(ctx context.Context, method, raw string, max int64) fetc
 	return fetchResult{status: resp.StatusCode, body: body, final: resp.Request.URL.String(), header: resp.Header.Clone()}
 }
 func (s *Service) Latest(siteID int64) (Run, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
 	if e != nil || len(r) == 0 {
 		return Run{}, errors.New("no crawl run")
 	}
 	return runRow(r[0]), nil
 }
 func (s *Service) Detail(runID int64) (Detail, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE id=?`, runID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE id=?`, runID)
 	if e != nil || len(r) == 0 {
 		return Detail{}, errors.New("crawl run not found")
 	}
 	d := Detail{Run: runRow(r[0])}
-	pr, e := s.store.DB.Query(`SELECT url,status_code,depth,error FROM crawl_pages WHERE run_id=? ORDER BY id`, runID)
+	pr, e := sqlite.Query(s.store.DB, `SELECT url,status_code,depth,error FROM crawl_pages WHERE run_id=? ORDER BY id`, runID)
 	if e != nil {
 		return Detail{}, e
 	}
 	for _, x := range pr {
 		d.Pages = append(d.Pages, Page{URL: x["url"].Text, StatusCode: int(x["status_code"].Int64), Depth: int(x["depth"].Int64), Error: x["error"].Text})
 	}
-	lr, e := s.store.DB.Query(`SELECT from_url,to_url,kind,status_code,broken,error FROM crawl_links WHERE run_id=? ORDER BY id LIMIT 1000`, runID)
+	lr, e := sqlite.Query(s.store.DB, `SELECT from_url,to_url,kind,status_code,broken,error FROM crawl_links WHERE run_id=? ORDER BY id LIMIT 1000`, runID)
 	if e != nil {
 		return Detail{}, e
 	}
@@ -414,7 +414,7 @@ func (s *Service) LatestDetail(siteID int64) (Detail, error) {
 	return s.Detail(r.ID)
 }
 func (s *Service) FleetRegressions() ([]Run, error) {
-	r, e := s.store.DB.Query(`SELECT c.id,c.site_id,c.status,c.pages_crawled,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id WHERE c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0 ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`)
+	r, e := sqlite.Query(s.store.DB, `SELECT c.id,c.site_id,c.status,c.pages_crawled,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id WHERE c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0 ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`)
 	if e != nil {
 		return nil, e
 	}

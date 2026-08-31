@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"github.com/web-fleet/webfleet/internal/sites"
+	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 )
 
@@ -16,7 +17,7 @@ type Summary struct {
 }
 
 func SummaryFor(st *store.Store) (Summary, error) {
-	r, e := st.DB.Query(`SELECT COUNT(*) total,SUM(CASE WHEN h.state='healthy' THEN 1 ELSE 0 END) healthy,SUM(CASE WHEN h.state='degraded' THEN 1 ELSE 0 END) degraded,SUM(CASE WHEN h.state='warning' THEN 1 ELSE 0 END) warning,SUM(CASE WHEN h.state='down' THEN 1 ELSE 0 END) down,SUM(CASE WHEN h.state IS NULL OR h.state='unknown' THEN 1 ELSE 0 END) unknown FROM sites s LEFT JOIN site_health h ON h.site_id=s.id WHERE s.archived_at IS NULL`)
+	r, e := sqlite.Query(st.DB, `SELECT COUNT(*) total,SUM(CASE WHEN h.state='healthy' THEN 1 ELSE 0 END) healthy,SUM(CASE WHEN h.state='degraded' THEN 1 ELSE 0 END) degraded,SUM(CASE WHEN h.state='warning' THEN 1 ELSE 0 END) warning,SUM(CASE WHEN h.state='down' THEN 1 ELSE 0 END) down,SUM(CASE WHEN h.state IS NULL OR h.state='unknown' THEN 1 ELSE 0 END) unknown FROM sites s LEFT JOIN site_health h ON h.site_id=s.id WHERE s.archived_at IS NULL`)
 	if e != nil {
 		return Summary{}, e
 	}

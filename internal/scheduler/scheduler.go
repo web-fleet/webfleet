@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"github.com/web-fleet/webfleet/internal/sqlite"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -75,7 +76,7 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) siteIDs() ([]int64, error) {
-	rows, err := s.store.DB.Query(`SELECT id FROM sites WHERE enabled=1 AND archived_at IS NULL ORDER BY id`)
+	rows, err := sqlite.Query(s.store.DB, `SELECT id FROM sites WHERE enabled=1 AND archived_at IS NULL ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +134,7 @@ func (s *Scheduler) RunCrawlOnce(ctx context.Context) {
 }
 
 func (s *Scheduler) observationDue(query string, siteID int64, maxAge time.Duration) bool {
-	rows, _ := s.store.DB.Query(query, siteID)
+	rows, _ := sqlite.Query(s.store.DB, query, siteID)
 	if len(rows) == 0 {
 		return true
 	}

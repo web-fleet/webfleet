@@ -16,7 +16,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Exit:** one binary starts from a fresh directory, initializes its database, serves the dashboard and exits cleanly.
 
-**Completed:** Go/CGO application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. The current build binds system SQLite through an internal CGO wrapper because this execution environment cannot download Go modules; portability is tracked for the later cross-platform hardening gate.
+**Completed:** Go application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. SQLite now follows the same storage pattern as Trestle: `database/sql`, the cgo-free `modernc.org/sqlite` driver, one owned SQLite connection, WAL, foreign-key enforcement, a five-second busy timeout, secured data-directory permissions, validated migration history and transactional migrations. A `sandbox_sqlite`-tagged system-SQLite driver exists only so the network-isolated development sandbox can exercise the same `database/sql` contract when module downloads are unavailable; it is not the normal build path.
 
 ### CP2 - First-admin authentication ✅
 

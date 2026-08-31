@@ -63,14 +63,14 @@ func (s *Service) CreateGroup(name string) (Group, error) {
 	if name == "" || len(name) > 80 {
 		return Group{}, errors.New("group name must be 1..80 characters")
 	}
-	r, e := s.store.DB.Query(`INSERT INTO groups(name,created_at) VALUES(?,?) RETURNING id`, name, store.Now())
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO groups(name,created_at) VALUES(?,?) RETURNING id`, name, store.Now())
 	if e != nil {
 		return Group{}, e
 	}
 	return Group{ID: r[0]["id"].Int64, Name: name}, nil
 }
 func (s *Service) Groups() ([]Group, error) {
-	r, e := s.store.DB.Query(`SELECT g.id,g.name,COUNT(s.id) site_count FROM groups g LEFT JOIN sites s ON s.group_id=g.id AND s.archived_at IS NULL GROUP BY g.id ORDER BY lower(g.name)`)
+	r, e := sqlite.Query(s.store.DB, `SELECT g.id,g.name,COUNT(s.id) site_count FROM groups g LEFT JOIN sites s ON s.group_id=g.id AND s.archived_at IS NULL GROUP BY g.id ORDER BY lower(g.name)`)
 	if e != nil {
 		return nil, e
 	}
@@ -90,32 +90,32 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 		return Site{}, e
 	}
 	if groupID > 0 {
-		r, e := s.store.DB.Query(`SELECT id FROM groups WHERE id=?`, groupID)
+		r, e := sqlite.Query(s.store.DB, `SELECT id FROM groups WHERE id=?`, groupID)
 		if e != nil || len(r) == 0 {
 			return Site{}, errors.New("group not found")
 		}
 	}
 	now := store.Now()
-	r, e := s.store.DB.Query(`INSERT INTO sites(organization_id,name,primary_url,enabled,group_id,created_at,updated_at) VALUES(1,?,?,1,NULLIF(?,0),?,?) RETURNING id`, name, u, groupID, now, now)
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO sites(organization_id,name,primary_url,enabled,group_id,created_at,updated_at) VALUES(1,?,?,1,NULLIF(?,0),?,?) RETURNING id`, name, u, groupID, now, now)
 	if e != nil {
 		return Site{}, e
 	}
 	id := r[0]["id"].Int64
-	if e = s.store.DB.Exec(`INSERT INTO monitors(site_id,kind,timeout_ms,expected_min,expected_max,created_at) VALUES(?,'http',10000,200,399,?)`, id, now); e != nil {
+	if e = sqlite.Exec(s.store.DB, `INSERT INTO monitors(site_id,kind,timeout_ms,expected_min,expected_max,created_at) VALUES(?,'http',10000,200,399,?)`, id, now); e != nil {
 		return Site{}, e
 	}
-	if e = s.store.DB.Exec(`INSERT INTO site_health(site_id,state,last_change_at) VALUES(?,'unknown',?)`, id, now); e != nil {
+	if e = sqlite.Exec(s.store.DB, `INSERT INTO site_health(site_id,state,last_change_at) VALUES(?,'unknown',?)`, id, now); e != nil {
 		return Site{}, e
 	}
 	for _, header := range []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "Referrer-Policy"} {
-		if e = s.store.DB.Exec(`INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,1)`, id, header); e != nil {
+		if e = sqlite.Exec(s.store.DB, `INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,1)`, id, header); e != nil {
 			return Site{}, e
 		}
 	}
 	return s.Get(id)
 }
 func (s *Service) Get(id int64) (Site, error) {
-	r, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id WHERE s.id=?`, id)
+	r, e := sqlite.Query(s.store.DB, `SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id WHERE s.id=?`, id)
 	if e != nil || len(r) == 0 {
 		return Site{}, errors.New("site not found")
 	}
@@ -133,7 +133,7 @@ func (s *Service) Update(id int64, name, rawURL string, groupID int64, enabled b
 	if e != nil {
 		return Site{}, e
 	}
-	if e = s.store.DB.Exec(`UPDATE sites SET name=?,primary_url=?,group_id=NULLIF(?,0),enabled=?,updated_at=? WHERE id=?`, name, u, groupID, enabled, store.Now(), id); e != nil {
+	if e = sqlite.Exec(s.store.DB, `UPDATE sites SET name=?,primary_url=?,group_id=NULLIF(?,0),enabled=?,updated_at=? WHERE id=?`, name, u, groupID, enabled, store.Now(), id); e != nil {
 		return Site{}, e
 	}
 	return s.Get(id)
@@ -143,7 +143,7 @@ func (s *Service) Archive(id int64, archived bool) error {
 	if archived {
 		at = store.Now()
 	}
-	return s.store.DB.Exec(`UPDATE sites SET archived_at=?,updated_at=? WHERE id=?`, at, store.Now(), id)
+	return sqlite.Exec(s.store.DB, `UPDATE sites SET archived_at=?,updated_at=? WHERE id=?`, at, store.Now(), id)
 }
 func (s *Service) Delete(id int64) error {
 	site, e := s.Get(id)
@@ -153,7 +153,7 @@ func (s *Service) Delete(id int64) error {
 	if !site.Archived {
 		return errors.New("archive site before deleting it")
 	}
-	return s.store.DB.Exec(`DELETE FROM sites WHERE id=?`, id)
+	return sqlite.Exec(s.store.DB, `DELETE FROM sites WHERE id=?`, id)
 }
 func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchived bool) (List, error) {
 	if page < 1 {
@@ -179,7 +179,7 @@ func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchi
 		where += ` AND s.group_id=?`
 		args = append(args, groupID)
 	}
-	cr, e := s.store.DB.Query(`SELECT COUNT(*) n FROM sites s`+where, args...)
+	cr, e := sqlite.Query(s.store.DB, `SELECT COUNT(*) n FROM sites s`+where, args...)
 	if e != nil {
 		return List{}, e
 	}
@@ -192,7 +192,7 @@ func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchi
 		page = pages
 	}
 	args = append(args, pageSize, (page-1)*pageSize)
-	rows, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id`+where+` ORDER BY lower(s.name) LIMIT ? OFFSET ?`, args...)
+	rows, e := sqlite.Query(s.store.DB, `SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id`+where+` ORDER BY lower(s.name) LIMIT ? OFFSET ?`, args...)
 	if e != nil {
 		return List{}, e
 	}

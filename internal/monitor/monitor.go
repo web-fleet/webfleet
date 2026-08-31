@@ -52,7 +52,7 @@ func NewForTests(st *store.Store, r netguard.Resolver, allowPrivate bool) *Servi
 }
 
 func (s *Service) CheckSite(ctx context.Context, siteID int64) (Result, error) {
-	rows, e := s.store.DB.Query(`SELECT m.id monitor_id,s.primary_url,m.timeout_ms,m.expected_min,m.expected_max FROM monitors m JOIN sites s ON s.id=m.site_id WHERE s.id=? AND s.enabled=1 AND s.archived_at IS NULL LIMIT 1`, siteID)
+	rows, e := sqlite.Query(s.store.DB, `SELECT m.id monitor_id,s.primary_url,m.timeout_ms,m.expected_min,m.expected_max FROM monitors m JOIN sites s ON s.id=m.site_id WHERE s.id=? AND s.enabled=1 AND s.archived_at IS NULL LIMIT 1`, siteID)
 	if e != nil {
 		return Result{}, e
 	}
@@ -120,7 +120,7 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 	return res, nil
 }
 func (s *Service) persist(siteID, monitorID int64, res Result) (Result, error) {
-	rows, e := s.store.DB.Query(`INSERT INTO check_results(site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, monitorID, res.OK, res.StatusCode, res.LatencyMS, res.FinalURL, res.ErrorClass, res.Error, res.CheckedAt)
+	rows, e := sqlite.Query(s.store.DB, `INSERT INTO check_results(site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, monitorID, res.OK, res.StatusCode, res.LatencyMS, res.FinalURL, res.ErrorClass, res.Error, res.CheckedAt)
 	if e != nil {
 		return Result{}, e
 	}
@@ -137,7 +137,7 @@ func (s *Service) persistHTTPObservation(res Result, redirects []string, h http.
 			selected[name] = v
 		}
 	}
-	exp, err := s.store.DB.Query(`SELECT name FROM header_expectations WHERE site_id=? AND required=1 ORDER BY lower(name)`, res.SiteID)
+	exp, err := sqlite.Query(s.store.DB, `SELECT name FROM header_expectations WHERE site_id=? AND required=1 ORDER BY lower(name)`, res.SiteID)
 	if err != nil {
 		return HTTPObservation{}, err
 	}
@@ -156,18 +156,18 @@ func (s *Service) persistHTTPObservation(res Result, redirects []string, h http.
 	headersJSON, _ := json.Marshal(selected)
 	missingText := strings.Join(missing, "\n")
 	changed := false
-	prev, _ := s.store.DB.Query(`SELECT redirect_chain,headers_json,missing_headers FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, res.SiteID)
+	prev, _ := sqlite.Query(s.store.DB, `SELECT redirect_chain,headers_json,missing_headers FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, res.SiteID)
 	if len(prev) > 0 {
 		changed = prev[0]["redirect_chain"].Text != string(chainJSON) || prev[0]["headers_json"].Text != string(headersJSON) || prev[0]["missing_headers"].Text != missingText
 	}
-	rows, err := s.store.DB.Query(`INSERT INTO http_observations(site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at) VALUES(?,?,?,?,?,?,?) RETURNING id`, res.SiteID, res.ID, string(chainJSON), string(headersJSON), missingText, changed, res.CheckedAt)
+	rows, err := sqlite.Query(s.store.DB, `INSERT INTO http_observations(site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at) VALUES(?,?,?,?,?,?,?) RETURNING id`, res.SiteID, res.ID, string(chainJSON), string(headersJSON), missingText, changed, res.CheckedAt)
 	if err != nil {
 		return HTTPObservation{}, err
 	}
 	return HTTPObservation{ID: rows[0]["id"].Int64, SiteID: res.SiteID, CheckID: res.ID, RedirectChain: redirects, Headers: selected, MissingHeaders: missing, Changed: changed, ObservedAt: res.CheckedAt}, nil
 }
 func (s *Service) HTTPHistory(siteID int64) ([]HTTPObservation, error) {
-	rows, err := s.store.DB.Query(`SELECT id,site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 50`, siteID)
+	rows, err := sqlite.Query(s.store.DB, `SELECT id,site_id,check_id,redirect_chain,headers_json,missing_headers,changed,observed_at FROM http_observations WHERE site_id=? ORDER BY id DESC LIMIT 50`, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func (s *Service) HTTPHistory(siteID int64) ([]HTTPObservation, error) {
 	return out, nil
 }
 func (s *Service) HeaderExpectations(siteID int64) (map[string]bool, error) {
-	rows, err := s.store.DB.Query(`SELECT name,required FROM header_expectations WHERE site_id=? ORDER BY lower(name)`, siteID)
+	rows, err := sqlite.Query(s.store.DB, `SELECT name,required FROM header_expectations WHERE site_id=? ORDER BY lower(name)`, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -200,11 +200,11 @@ func (s *Service) SetHeaderExpectation(siteID int64, name string, required bool)
 	if !allowed[name] {
 		return errors.New("unsupported header expectation")
 	}
-	return s.store.DB.Exec(`INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,?) ON CONFLICT(site_id,name) DO UPDATE SET required=excluded.required`, siteID, name, required)
+	return sqlite.Exec(s.store.DB, `INSERT INTO header_expectations(site_id,name,required) VALUES(?,?,?) ON CONFLICT(site_id,name) DO UPDATE SET required=excluded.required`, siteID, name, required)
 }
 
 func (s *Service) updateHealth(res Result) error {
-	rows, err := s.store.DB.Query(`SELECT state,consecutive_failures FROM site_health WHERE site_id=?`, res.SiteID)
+	rows, err := sqlite.Query(s.store.DB, `SELECT state,consecutive_failures FROM site_health WHERE site_id=?`, res.SiteID)
 	if err != nil {
 		return err
 	}
@@ -236,11 +236,11 @@ func (s *Service) updateHealth(res Result) error {
 	}
 	changed := next != state
 	if len(rows) == 0 {
-		err = s.store.DB.Exec(`INSERT INTO site_health(site_id,state,consecutive_failures,last_check_id,last_change_at,last_success_at,last_failure_at) VALUES(?,?,?,?,?,?,?)`, res.SiteID, next, fails, res.ID, now, success, failure)
+		err = sqlite.Exec(s.store.DB, `INSERT INTO site_health(site_id,state,consecutive_failures,last_check_id,last_change_at,last_success_at,last_failure_at) VALUES(?,?,?,?,?,?,?)`, res.SiteID, next, fails, res.ID, now, success, failure)
 	} else if changed {
-		err = s.store.DB.Exec(`UPDATE site_health SET state=?,consecutive_failures=?,last_check_id=?,last_change_at=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, next, fails, res.ID, now, success, failure, res.SiteID)
+		err = sqlite.Exec(s.store.DB, `UPDATE site_health SET state=?,consecutive_failures=?,last_check_id=?,last_change_at=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, next, fails, res.ID, now, success, failure, res.SiteID)
 	} else {
-		err = s.store.DB.Exec(`UPDATE site_health SET consecutive_failures=?,last_check_id=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, fails, res.ID, success, failure, res.SiteID)
+		err = sqlite.Exec(s.store.DB, `UPDATE site_health SET consecutive_failures=?,last_check_id=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, fails, res.ID, success, failure, res.SiteID)
 	}
 	if err != nil {
 		return err
@@ -258,7 +258,7 @@ func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
 	if limit > 200 {
 		limit = 200
 	}
-	rows, e := s.store.DB.Query(`SELECT id,site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at FROM check_results WHERE site_id=? ORDER BY id DESC LIMIT ?`, siteID, limit)
+	rows, e := sqlite.Query(s.store.DB, `SELECT id,site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at FROM check_results WHERE site_id=? ORDER BY id DESC LIMIT ?`, siteID, limit)
 	if e != nil {
 		return nil, e
 	}

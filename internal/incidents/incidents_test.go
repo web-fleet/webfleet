@@ -2,6 +2,7 @@ package incidents
 
 import (
 	"github.com/web-fleet/webfleet/internal/sites"
+	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"testing"
 )
@@ -34,7 +35,7 @@ func TestOneIncidentPerFailurePeriod(t *testing.T) {
 	if rows[0].ClosedAt == "" {
 		t.Fatal("incident not closed")
 	}
-	d, e := st.DB.Query(`SELECT kind FROM alert_deliveries WHERE incident_id=? ORDER BY id`, rows[0].ID)
+	d, e := sqlite.Query(st.DB, `SELECT kind FROM alert_deliveries WHERE incident_id=? ORDER BY id`, rows[0].ID)
 	if e != nil || len(d) != 2 || d[0]["kind"].Text != "open" || d[1]["kind"].Text != "recovery" {
 		t.Fatalf("deliveries=%+v err=%v", d, e)
 	}

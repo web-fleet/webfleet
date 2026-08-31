@@ -43,7 +43,7 @@ func NewForTests(st *store.Store, r Resolver, allowPrivate bool) *Service {
 	return &Service{store: st, resolver: r, guard: netguard.Guard{Resolver: r, AllowPrivate: allowPrivate}}
 }
 func (s *Service) ObserveSite(ctx context.Context, siteID int64) (Observation, error) {
-	r, e := s.store.DB.Query(`SELECT primary_url FROM sites WHERE id=?`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT primary_url FROM sites WHERE id=?`, siteID)
 	if e != nil || len(r) == 0 {
 		return Observation{}, errors.New("site not found")
 	}
@@ -83,7 +83,7 @@ func (s *Service) ObserveSite(ctx context.Context, siteID int64) (Observation, e
 	return s.persist(o)
 }
 func (s *Service) persist(o Observation) (Observation, error) {
-	r, e := s.store.DB.Query(`INSERT INTO dns_observations(site_id,a_records,aaaa_records,cname,status,changed,error,checked_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id`, o.SiteID, strings.Join(o.A, ","), strings.Join(o.AAAA, ","), o.CNAME, o.Status, o.Changed, o.Error, o.CheckedAt)
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO dns_observations(site_id,a_records,aaaa_records,cname,status,changed,error,checked_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id`, o.SiteID, strings.Join(o.A, ","), strings.Join(o.AAAA, ","), o.CNAME, o.Status, o.Changed, o.Error, o.CheckedAt)
 	if e != nil {
 		return Observation{}, e
 	}
@@ -91,21 +91,21 @@ func (s *Service) persist(o Observation) (Observation, error) {
 	return o, nil
 }
 func (s *Service) Latest(siteID int64) (Observation, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
 	if e != nil || len(r) == 0 {
 		return Observation{}, errors.New("no DNS observation")
 	}
 	return row(r[0]), nil
 }
 func (s *Service) LatestSuccessful(siteID int64) (Observation, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? AND status='ok' ORDER BY id DESC LIMIT 1`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? AND status='ok' ORDER BY id DESC LIMIT 1`, siteID)
 	if e != nil || len(r) == 0 {
 		return Observation{}, errors.New("no successful DNS observation")
 	}
 	return row(r[0]), nil
 }
 func (s *Service) History(siteID int64) ([]Observation, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 50`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,a_records,aaaa_records,cname,status,changed,error,checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 50`, siteID)
 	if e != nil {
 		return nil, e
 	}

@@ -30,7 +30,7 @@ The product observes websites. It does not host them and should not become a gen
 ## Initial technical direction
 
 - Go application server and workers.
-- SQLite default storage.
+- SQLite default storage. Use `database/sql` with the cgo-free `modernc.org/sqlite` driver, matching Trestle's proven SQLite pattern. Keep SQLite at one owned connection, enable WAL, enforce foreign keys, use a five-second busy timeout, secure the data directory to `0700`, and make schema migrations transactional and fail-closed.
 - PostgreSQL supported before broad production positioning.
 - Nift-built HTML/CSS/JavaScript dashboard with vanilla JavaScript unless a concrete requirement justifies another frontend stack.
 - Background scheduler for remote checks.
@@ -194,6 +194,7 @@ Monitoring arbitrary URLs is an SSRF-sensitive feature. Treat private/reserved a
 - Keep source and generated website repositories clean after website work.
 - Do not commit secrets, analytics signing keys, test credentials or operator data.
 - Prefer focused commits with tests/evidence for the behaviour changed.
+- Treat database lifecycle as a contract: restart persistence, PRAGMA enforcement, future-schema refusal, migration-history integrity and migration rollback must remain covered by tests.
 - Before declaring a checkpoint complete, run the relevant tests plus `git diff --check` and report the exact commit.
 
 ## Nift usage

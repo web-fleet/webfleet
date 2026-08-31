@@ -23,7 +23,7 @@ type Service struct{ store *store.Store }
 
 func New(s *store.Store) *Service { return &Service{store: s} }
 func (a *Service) NeedsSetup() (bool, error) {
-	r, e := a.store.DB.Query(`SELECT COUNT(*) n FROM users`)
+	r, e := sqlite.Query(a.store.DB, `SELECT COUNT(*) n FROM users`)
 	if e != nil {
 		return false, e
 	}
@@ -45,13 +45,13 @@ func (a *Service) CreateAdmin(email, pw string) error {
 	if e != nil {
 		return e
 	}
-	if e = a.store.DB.Exec(`INSERT INTO users(email,password_hash,role,created_at) VALUES(?,?, 'admin',?)`, email, h, store.Now()); e != nil {
+	if e = sqlite.Exec(a.store.DB, `INSERT INTO users(email,password_hash,role,created_at) VALUES(?,?, 'admin',?)`, email, h, store.Now()); e != nil {
 		return e
 	}
 	return a.audit("first_admin_created", email)
 }
 func (a *Service) Login(email, pw string) (string, Session, error) {
-	r, e := a.store.DB.Query(`SELECT id,email,password_hash FROM users WHERE email=? LIMIT 1`, strings.TrimSpace(strings.ToLower(email)))
+	r, e := sqlite.Query(a.store.DB, `SELECT id,email,password_hash FROM users WHERE email=? LIMIT 1`, strings.TrimSpace(strings.ToLower(email)))
 	if e != nil || len(r) == 0 {
 		return "", Session{}, errors.New("invalid credentials")
 	}
@@ -62,7 +62,7 @@ func (a *Service) Login(email, pw string) (string, Session, error) {
 	csrf := token(24)
 	sum := sha256.Sum256([]byte(raw))
 	exp := time.Now().UTC().Add(24 * time.Hour)
-	if e = a.store.DB.Exec(`INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,created_at) VALUES(?,?,?,?,?)`, sum[:], r[0]["id"].Int64, csrf, exp.Format(time.RFC3339Nano), store.Now()); e != nil {
+	if e = sqlite.Exec(a.store.DB, `INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,created_at) VALUES(?,?,?,?,?)`, sum[:], r[0]["id"].Int64, csrf, exp.Format(time.RFC3339Nano), store.Now()); e != nil {
 		return "", Session{}, e
 	}
 	_ = a.audit("login", r[0]["email"].Text)
@@ -73,24 +73,24 @@ func (a *Service) Session(raw string) (Session, error) {
 		return Session{}, errors.New("no session")
 	}
 	sum := sha256.Sum256([]byte(raw))
-	r, e := a.store.DB.Query(`SELECT s.user_id,s.csrf_token,s.expires_at,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? LIMIT 1`, sum[:])
+	r, e := sqlite.Query(a.store.DB, `SELECT s.user_id,s.csrf_token,s.expires_at,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? LIMIT 1`, sum[:])
 	if e != nil || len(r) == 0 {
 		return Session{}, errors.New("invalid session")
 	}
 	exp, e := time.Parse(time.RFC3339Nano, r[0]["expires_at"].Text)
 	if e != nil || time.Now().After(exp) {
-		_ = a.store.DB.Exec(`DELETE FROM sessions WHERE token_hash=?`, sum[:])
+		_ = sqlite.Exec(a.store.DB, `DELETE FROM sessions WHERE token_hash=?`, sum[:])
 		return Session{}, errors.New("expired session")
 	}
 	return Session{UserID: r[0]["user_id"].Int64, Email: r[0]["email"].Text, CSRF: r[0]["csrf_token"].Text, Expires: exp}, nil
 }
 func (a *Service) Logout(raw string) {
 	sum := sha256.Sum256([]byte(raw))
-	_ = a.store.DB.Exec(`DELETE FROM sessions WHERE token_hash=?`, sum[:])
+	_ = sqlite.Exec(a.store.DB, `DELETE FROM sessions WHERE token_hash=?`, sum[:])
 	_ = a.audit("logout", "")
 }
 func (a *Service) audit(kind, detail string) error {
-	return a.store.DB.Exec(`INSERT INTO audit_events(kind,detail,created_at) VALUES(?,?,?)`, kind, detail, store.Now())
+	return sqlite.Exec(a.store.DB, `INSERT INTO audit_events(kind,detail,created_at) VALUES(?,?,?)`, kind, detail, store.Now())
 }
 func token(n int) string {
 	b := make([]byte, n)

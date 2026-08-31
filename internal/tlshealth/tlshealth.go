@@ -39,7 +39,7 @@ func NewForTests(st *store.Store, g netguard.Guard, roots *x509.CertPool) *Servi
 	return &Service{store: st, guard: g, roots: roots}
 }
 func (s *Service) InspectSite(ctx context.Context, siteID int64) (Observation, error) {
-	r, e := s.store.DB.Query(`SELECT primary_url FROM sites WHERE id=?`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT primary_url FROM sites WHERE id=?`, siteID)
 	if e != nil || len(r) == 0 {
 		return Observation{}, errors.New("site not found")
 	}
@@ -100,7 +100,7 @@ func (s *Service) InspectSite(ctx context.Context, siteID int64) (Observation, e
 	return s.persist(obs)
 }
 func (s *Service) persist(o Observation) (Observation, error) {
-	r, e := s.store.DB.Query(`INSERT INTO tls_observations(site_id,valid,hostname_valid,issuer,subject,serial,not_before,not_after,days_remaining,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, o.SiteID, o.Valid, o.HostnameValid, o.Issuer, o.Subject, o.Serial, o.NotBefore, o.NotAfter, o.DaysRemaining, o.ErrorClass, o.Error, o.CheckedAt)
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO tls_observations(site_id,valid,hostname_valid,issuer,subject,serial,not_before,not_after,days_remaining,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, o.SiteID, o.Valid, o.HostnameValid, o.Issuer, o.Subject, o.Serial, o.NotBefore, o.NotAfter, o.DaysRemaining, o.ErrorClass, o.Error, o.CheckedAt)
 	if e != nil {
 		return Observation{}, e
 	}
@@ -108,7 +108,7 @@ func (s *Service) persist(o Observation) (Observation, error) {
 	return o, nil
 }
 func (s *Service) Latest(siteID int64) (Observation, error) {
-	r, e := s.store.DB.Query(`SELECT id,site_id,valid,hostname_valid,issuer,subject,serial,not_before,not_after,days_remaining,error_class,error,checked_at FROM tls_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,valid,hostname_valid,issuer,subject,serial,not_before,not_after,days_remaining,error_class,error,checked_at FROM tls_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
 	if e != nil || len(r) == 0 {
 		return Observation{}, errors.New("no TLS observation")
 	}
@@ -118,7 +118,7 @@ func (s *Service) FleetWarnings(days int) ([]Observation, error) {
 	if days < 1 {
 		days = 30
 	}
-	r, e := s.store.DB.Query(`SELECT t.id,t.site_id,t.valid,t.hostname_valid,t.issuer,t.subject,t.serial,t.not_before,t.not_after,t.days_remaining,t.error_class,t.error,t.checked_at FROM tls_observations t JOIN (SELECT site_id,MAX(id) id FROM tls_observations GROUP BY site_id) x ON x.id=t.id WHERE t.valid=0 OR t.days_remaining<=? ORDER BY t.days_remaining`, days)
+	r, e := sqlite.Query(s.store.DB, `SELECT t.id,t.site_id,t.valid,t.hostname_valid,t.issuer,t.subject,t.serial,t.not_before,t.not_after,t.days_remaining,t.error_class,t.error,t.checked_at FROM tls_observations t JOIN (SELECT site_id,MAX(id) id FROM tls_observations GROUP BY site_id) x ON x.id=t.id WHERE t.valid=0 OR t.days_remaining<=? ORDER BY t.days_remaining`, days)
 	if e != nil {
 		return nil, e
 	}
