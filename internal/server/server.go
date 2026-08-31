@@ -13,6 +13,8 @@ import (
 
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/fleet"
+	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 )
@@ -21,17 +23,18 @@ import (
 var embedded embed.FS
 
 type Server struct {
-	cfg   config.Config
-	store *store.Store
-	auth  *auth.Service
-	sites *sites.Service
-	log   *slog.Logger
-	http  *http.Server
-	mux   *http.ServeMux
+	cfg     config.Config
+	store   *store.Store
+	auth    *auth.Service
+	sites   *sites.Service
+	monitor *monitor.Service
+	log     *slog.Logger
+	http    *http.Server
+	mux     *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -52,6 +55,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/sites/{id}", s.withSession(s.handleUpdateSite, true))
 	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
 	s.mux.HandleFunc("DELETE /api/sites/{id}", s.withSession(s.handleDeleteSite, true))
+	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 }
@@ -102,6 +108,39 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	sum, err := fleet.SummaryFor(s.store)
+	if err != nil {
+		writeError(w, 500, "fleet summary unavailable")
+		return
+	}
+	writeJSON(w, 200, sum)
+}
+func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.monitor.CheckSite(r.Context(), id)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, res)
+}
+func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.monitor.Recent(id, 50)
+	if err != nil {
+		writeError(w, 500, "check history unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"checks": rows})
+}
+
 func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	groups, err := s.sites.Groups()
 	if err != nil {

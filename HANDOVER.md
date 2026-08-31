@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP4 are complete: application/auth/inventory foundations plus persisted SSRF-bounded HTTP monitoring are implemented.
+- CP1-CP5 are complete: application/auth/inventory plus SSRF-bounded monitoring, scheduling and fleet/site health views are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP5 in `ROADMAP.md`.
+- The next implementation checkpoint is CP6 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP5 scheduler and fleet health. Wire the existing monitor service into bounded background scheduling/manual checks, derive current site/fleet health, and surface it through the existing fleet and site views.
+Continue with CP6 incident history and alert foundations. Preserve one incident across a failure period, close it on recovery, and keep notification transport deliberately simple.

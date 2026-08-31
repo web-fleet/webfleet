@@ -71,3 +71,35 @@ func TestRedirectToPrivateIsBlocked(t *testing.T) {
 	_ = id
 	_ = time.Second
 }
+
+func TestHealthTransitions(t *testing.T) {
+	status := 503
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	st, id := setupSite(t, srv.URL)
+	defer st.Close()
+	svc := NewForTests(st, fakeResolver{u.Hostname(): {netip.MustParseAddr("127.0.0.1")}}, true)
+	if _, e := svc.CheckSite(context.Background(), id); e != nil {
+		t.Fatal(e)
+	}
+	site, e := sites.New(st).Get(id)
+	if e != nil || site.Health != "degraded" {
+		t.Fatalf("first failure site=%+v err=%v", site, e)
+	}
+	if _, e = svc.CheckSite(context.Background(), id); e != nil {
+		t.Fatal(e)
+	}
+	site, _ = sites.New(st).Get(id)
+	if site.Health != "down" || site.ConsecutiveFailures != 2 {
+		t.Fatalf("second failure site=%+v", site)
+	}
+	status = 204
+	if _, e = svc.CheckSite(context.Background(), id); e != nil {
+		t.Fatal(e)
+	}
+	site, _ = sites.New(st).Get(id)
+	if site.Health != "healthy" || site.ConsecutiveFailures != 0 {
+		t.Fatalf("recovery site=%+v", site)
+	}
+}

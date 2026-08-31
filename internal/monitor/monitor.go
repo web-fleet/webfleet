@@ -111,8 +111,52 @@ func (s *Service) persist(siteID, monitorID int64, res Result) (Result, error) {
 		return Result{}, e
 	}
 	res.ID = rows[0]["id"].Int64
+	if err := s.updateHealth(res); err != nil {
+		return Result{}, err
+	}
 	return res, nil
 }
+func (s *Service) updateHealth(res Result) error {
+	rows, err := s.store.DB.Query(`SELECT state,consecutive_failures FROM site_health WHERE site_id=?`, res.SiteID)
+	if err != nil {
+		return err
+	}
+	state := "unknown"
+	fails := int64(0)
+	if len(rows) > 0 {
+		state = rows[0]["state"].Text
+		fails = rows[0]["consecutive_failures"].Int64
+	}
+	next := state
+	now := res.CheckedAt
+	var success any = nil
+	var failure any = nil
+	if res.OK {
+		fails = 0
+		next = "healthy"
+		success = now
+	} else {
+		fails++
+		failure = now
+		if fails == 1 {
+			next = "warning"
+		} else {
+			next = "down"
+		}
+		if res.ErrorClass == "http_status" && fails == 1 {
+			next = "degraded"
+		}
+	}
+	changed := next != state
+	if len(rows) == 0 {
+		return s.store.DB.Exec(`INSERT INTO site_health(site_id,state,consecutive_failures,last_check_id,last_change_at,last_success_at,last_failure_at) VALUES(?,?,?,?,?,?,?)`, res.SiteID, next, fails, res.ID, now, success, failure)
+	}
+	if changed {
+		return s.store.DB.Exec(`UPDATE site_health SET state=?,consecutive_failures=?,last_check_id=?,last_change_at=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, next, fails, res.ID, now, success, failure, res.SiteID)
+	}
+	return s.store.DB.Exec(`UPDATE site_health SET consecutive_failures=?,last_check_id=?,last_success_at=COALESCE(?,last_success_at),last_failure_at=COALESCE(?,last_failure_at) WHERE site_id=?`, fails, res.ID, success, failure, res.SiteID)
+}
+
 func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
 	if limit < 1 {
 		limit = 20

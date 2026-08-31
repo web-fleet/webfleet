@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/scheduler"
 	"github.com/web-fleet/webfleet/internal/server"
 	"github.com/web-fleet/webfleet/internal/store"
 	"log/slog"
@@ -27,6 +29,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	mon := monitor.New(st)
+	sched := scheduler.New(st, mon, cfg.CheckInterval, cfg.CheckConcurrency, log)
+	sched.Start(context.Background())
+	defer sched.Stop()
 	srv := server.New(cfg, st, log)
 	errc := make(chan error, 1)
 	go func() {

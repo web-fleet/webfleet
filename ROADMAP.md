@@ -58,7 +58,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** persisted HTTP monitor definitions/results, timeout and redirect bounds, expected-status evaluation, latency/final-URL capture, structured DNS/connection/TLS/timeout/redirect/status error classes, and SSRF-safe DNS/dial/redirect validation. Private/reserved targets are blocked at resolved-address and dial time; controlled local fixtures use an explicit test-only private-network override.
 
-### CP5 - Scheduler and fleet health
+### CP5 - Scheduler and fleet health ✅
 
 - Background scheduler with bounded concurrency and jitter.
 - Manual "check now" action.
@@ -68,6 +68,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Site overview with recent history.
 
 **Exit:** adding a URL results in periodic checks and an immediately useful fleet dashboard.
+
+**Completed:** bounded-concurrency scheduler with interval jitter, manual Check now, persisted healthy/degraded/warning/down/unknown state, consecutive failure and recovery transitions, fleet health counts, attention queue, health-aware site inventory, and recent check history on the individual site page.
 
 ### CP6 - Incident history and alerts foundation
 

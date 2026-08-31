@@ -18,15 +18,18 @@ type Group struct {
 	SiteCount int64  `json:"site_count"`
 }
 type Site struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	PrimaryURL string `json:"primary_url"`
-	Enabled    bool   `json:"enabled"`
-	GroupID    int64  `json:"group_id"`
-	GroupName  string `json:"group_name"`
-	Archived   bool   `json:"archived"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
+	ID                  int64  `json:"id"`
+	Name                string `json:"name"`
+	PrimaryURL          string `json:"primary_url"`
+	Enabled             bool   `json:"enabled"`
+	GroupID             int64  `json:"group_id"`
+	GroupName           string `json:"group_name"`
+	Archived            bool   `json:"archived"`
+	Health              string `json:"health"`
+	ConsecutiveFailures int64  `json:"consecutive_failures"`
+	LastCheckedAt       string `json:"last_checked_at"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 type List struct {
 	Sites                        []Site `json:"sites"`
@@ -98,10 +101,13 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 	if e = s.store.DB.Exec(`INSERT INTO monitors(site_id,kind,timeout_ms,expected_min,expected_max,created_at) VALUES(?,'http',10000,200,399,?)`, id, now); e != nil {
 		return Site{}, e
 	}
+	if e = s.store.DB.Exec(`INSERT INTO site_health(site_id,state,last_change_at) VALUES(?,'unknown',?)`, id, now); e != nil {
+		return Site{}, e
+	}
 	return s.Get(id)
 }
 func (s *Service) Get(id int64) (Site, error) {
-	r, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id WHERE s.id=?`, id)
+	r, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id WHERE s.id=?`, id)
 	if e != nil || len(r) == 0 {
 		return Site{}, errors.New("site not found")
 	}
@@ -178,7 +184,7 @@ func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchi
 		page = pages
 	}
 	args = append(args, pageSize, (page-1)*pageSize)
-	rows, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id`+where+` ORDER BY lower(s.name) LIMIT ? OFFSET ?`, args...)
+	rows, e := s.store.DB.Query(`SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id`+where+` ORDER BY lower(s.name) LIMIT ? OFFSET ?`, args...)
 	if e != nil {
 		return List{}, e
 	}
@@ -189,7 +195,7 @@ func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchi
 	return out, nil
 }
 func rowSite(r sqlite.Row) Site {
-	return Site{ID: r["id"].Int64, Name: r["name"].Text, PrimaryURL: r["primary_url"].Text, Enabled: r["enabled"].Int64 != 0, GroupID: r["group_id"].Int64, GroupName: r["group_name"].Text, Archived: !r["archived_at"].Null, CreatedAt: r["created_at"].Text, UpdatedAt: r["updated_at"].Text}
+	return Site{ID: r["id"].Int64, Name: r["name"].Text, PrimaryURL: r["primary_url"].Text, Enabled: r["enabled"].Int64 != 0, GroupID: r["group_id"].Int64, GroupName: r["group_name"].Text, Archived: !r["archived_at"].Null, Health: r["health"].Text, ConsecutiveFailures: r["consecutive_failures"].Int64, LastCheckedAt: r["last_checked_at"].Text, CreatedAt: r["created_at"].Text, UpdatedAt: r["updated_at"].Text}
 }
 func ParseID(raw string) (int64, error) {
 	id, e := strconv.ParseInt(raw, 10, 64)
