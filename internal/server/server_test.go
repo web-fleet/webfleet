@@ -24,7 +24,7 @@ func TestHealthAndEmbeddedDashboard(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "Fleet console") {
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "WEB FLEET") {
 		t.Fatalf("dashboard: %d", rr.Code)
 	}
 }

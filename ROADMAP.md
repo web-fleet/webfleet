@@ -32,7 +32,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** first-run admin creation, Argon2id password hashing, strict session cookies, hashed session tokens, CSRF enforcement, logout/session expiry, authentication audit records, and setup/login UI. The current Argon2 binding uses the system `libargon2.so.1` because external Go modules are unavailable in this build environment; portable dependency packaging remains a later release-hardening obligation.
 
-### CP3 - Site model and CRUD
+### CP3 - Site model and CRUD ✅
 
 - Organization foundation with a simple single-organization default UX.
 - Site records with name, primary URL, enabled state and optional tags/group.
@@ -42,6 +42,8 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Search/filter foundation for future large fleets.
 
 **Exit:** a user can add and manage several sites without monitoring yet.
+
+**Completed:** persisted groups and sites, canonical HTTP/HTTPS URLs, create/edit/archive/delete flows, server-backed search/group filtering/page-number pagination, large-fleet inventory UX, and a stable SPA site-detail route. Search/pagination/grouping were deliberately promoted from the later large-fleet UX checkpoint because they are core inventory behaviour, while CP27 now focuses on accessibility and scale hardening rather than first implementation.
 
 ### CP4 - HTTP monitor engine
 

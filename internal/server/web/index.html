@@ -9,25 +9,24 @@
 		<script defer src="assets/js/script.js"></script>
 	</head>
 	<body>
-<div id="app" class="app-shell">
+<div id="app">
   <main class="auth-stage" id="auth-stage">
-    <section class="auth-panel">
-      <div class="brand-mark">WF</div>
-      <span class="eyebrow">WEB FLEET</span>
-      <h1 id="auth-title">Loading…</h1>
-      <p id="auth-copy">Checking local installation state.</p>
-      <form id="auth-form" hidden>
-        <label>Email<input id="email" type="email" autocomplete="username" required></label>
-        <label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label>
-        <button type="submit" id="auth-submit">Continue</button>
-        <p class="form-error" id="auth-error" role="alert"></p>
-      </form>
-    </section>
+    <section class="auth-panel"><div class="brand-mark">WF</div><span class="eyebrow">WEB FLEET</span><h1 id="auth-title">Loading…</h1><p id="auth-copy">Checking local installation state.</p><form id="auth-form" hidden><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label><button type="submit" id="auth-submit">Continue</button><p class="form-error" id="auth-error" role="alert"></p></form></section>
   </main>
-  <main id="dashboard" class="shell" hidden>
-    <header class="topbar"><div><span class="eyebrow">WEB FLEET</span><h1>Fleet console</h1></div><button class="quiet-button" id="logout">Log out</button></header>
-    <section class="hero-grid"><article class="metric"><span>Sites</span><strong>0</strong><small>Add your first site after setup.</small></article><article class="metric"><span>Fleet health</span><strong>—</strong><small>Monitoring is not configured yet.</small></article><article class="metric"><span>Needs attention</span><strong>0</strong><small>No observations yet.</small></article></section>
-  </main>
+  <div id="dashboard" class="dashboard" hidden>
+    <aside class="rail">
+      <a class="brand" href="#/fleet"><span class="brand-mark small">WF</span><span>WEB FLEET</span></a>
+      <nav><a href="#/fleet" data-nav="fleet">Fleet</a><a href="#/sites" data-nav="sites">Sites</a></nav>
+      <div class="rail-foot"><span id="user-email"></span><button class="text-button" id="logout">Log out</button></div>
+    </aside>
+    <main class="workspace">
+      <header class="workspace-head"><div><span class="eyebrow" id="view-kicker">FLEET</span><h1 id="view-title">Overview</h1></div><div class="head-actions" id="head-actions"></div></header>
+      <div id="flash" class="flash" hidden></div>
+      <section id="view"></section>
+    </main>
+  </div>
+  <dialog id="site-dialog"><form method="dialog" id="site-form" class="dialog-form"><div class="dialog-head"><div><span class="eyebrow">SITE</span><h2>Add website</h2></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div><label>Name<input id="site-name" required maxlength="120"></label><label>Primary URL<input id="site-url" type="url" placeholder="https://example.com" required></label><label>Group<select id="site-group"><option value="0">No group</option></select></label><div class="dialog-actions"><button type="button" class="secondary" id="new-group">New group</button><button type="submit">Save website</button></div><p class="form-error" id="site-error"></p></form></dialog>
+  <dialog id="group-dialog"><form method="dialog" id="group-form" class="dialog-form compact"><div class="dialog-head"><div><span class="eyebrow">GROUP</span><h2>Create group</h2></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div><label>Name<input id="group-name" required maxlength="80"></label><div class="dialog-actions"><button type="submit">Create group</button></div><p class="form-error" id="group-error"></p></form></dialog>
 </div>
 	</body>
 </html>

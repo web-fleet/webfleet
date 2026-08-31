@@ -208,10 +208,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP2 are complete: the Go/SQLite foundation and first-admin authentication/session/CSRF flow are implemented.
+- CP1-CP3 are complete: application/auth foundations plus persisted site/group inventory, search, filtering, page-number pagination and site-detail routing are implemented.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP3 in `ROADMAP.md`.
+- The next implementation checkpoint is CP4 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP3 site/group CRUD. Large-fleet search, group filtering, page-number pagination and a stable site-detail route are now CP3 obligations rather than waiting until CP27; CP27 remains the accessibility/stress-hardening pass.
+Continue with CP4 HTTP monitoring. Preserve the existing inventory/search/group/pagination APIs and add monitoring data to the existing fleet/site views rather than creating a parallel UI.

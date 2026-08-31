@@ -7,11 +7,13 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 )
 
@@ -22,13 +24,14 @@ type Server struct {
 	cfg   config.Config
 	store *store.Store
 	auth  *auth.Service
+	sites *sites.Service
 	log   *slog.Logger
 	http  *http.Server
 	mux   *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -41,6 +44,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
 	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
+	s.mux.HandleFunc("GET /api/groups", s.withSession(s.handleGroups, false))
+	s.mux.HandleFunc("POST /api/groups", s.withSession(s.handleCreateGroup, true))
+	s.mux.HandleFunc("GET /api/sites", s.withSession(s.handleSites, false))
+	s.mux.HandleFunc("POST /api/sites", s.withSession(s.handleCreateSite, true))
+	s.mux.HandleFunc("GET /api/sites/{id}", s.withSession(s.handleSite, false))
+	s.mux.HandleFunc("PUT /api/sites/{id}", s.withSession(s.handleUpdateSite, true))
+	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
+	s.mux.HandleFunc("DELETE /api/sites/{id}", s.withSession(s.handleDeleteSite, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 }
@@ -91,6 +102,126 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	groups, err := s.sites.Groups()
+	if err != nil {
+		writeError(w, 500, "groups unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"groups": groups})
+}
+func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	g, err := s.sites.CreateGroup(in.Name)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 201, g)
+}
+func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	q := r.URL.Query()
+	group, _ := strconv.ParseInt(q.Get("group"), 10, 64)
+	page, _ := strconv.Atoi(q.Get("page"))
+	size, _ := strconv.Atoi(q.Get("page_size"))
+	out, err := s.sites.List(q.Get("q"), group, page, size, q.Get("archived") == "1")
+	if err != nil {
+		writeError(w, 500, "sites unavailable")
+		return
+	}
+	writeJSON(w, 200, out)
+}
+func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var in struct {
+		Name       string `json:"name"`
+		PrimaryURL string `json:"primary_url"`
+		GroupID    int64  `json:"group_id"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	site, err := s.sites.Create(in.Name, in.PrimaryURL, in.GroupID)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 201, site)
+}
+func pathSiteID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := sites.ParseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 400, "invalid site id")
+		return 0, false
+	}
+	return id, true
+}
+func (s *Server) handleSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	site, err := s.sites.Get(id)
+	if err != nil {
+		writeError(w, 404, "site not found")
+		return
+	}
+	writeJSON(w, 200, site)
+}
+func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Name       string `json:"name"`
+		PrimaryURL string `json:"primary_url"`
+		GroupID    int64  `json:"group_id"`
+		Enabled    bool   `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	site, err := s.sites.Update(id, in.Name, in.PrimaryURL, in.GroupID, in.Enabled)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, site)
+}
+func (s *Server) handleArchiveSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Archived bool `json:"archived"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if err := s.sites.Archive(id, in.Archived); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sites.Delete(id); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	writeJSON(w, 200, map[string]any{"email": sess.Email, "csrf": sess.CSRF, "role": "admin"})
 }
