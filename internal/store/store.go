@@ -10,12 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/web-fleet/webfleet/internal/database"
+	_ "github.com/web-fleet/webfleet/internal/postgresdriver"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	_ "github.com/web-fleet/webfleet/internal/sqlitedriver"
 )
 
 type Store struct {
-	DB   *sql.DB
+	DB   *database.DB
 	path string
 }
 
@@ -133,13 +135,100 @@ func OpenContext(ctx context.Context, dataDir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	s := &Store{DB: db, path: path}
+	s := &Store{DB: &database.DB{DB: db, Dialect: "sqlite"}, path: path}
 	if err := s.initialize(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
 }
+
+func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("postgres DSN is required")
+	}
+	raw, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	raw.SetMaxOpenConns(20)
+	raw.SetMaxIdleConns(5)
+	raw.SetConnMaxLifetime(30 * time.Minute)
+	s := &Store{DB: &database.DB{DB: raw, Dialect: "postgres"}, path: "postgres"}
+	if err := raw.PingContext(ctx); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	if err := s.initializePostgres(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return s, nil
+}
+func postgresSQL(q string) string {
+	q = strings.ReplaceAll(q, "INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY")
+	q = strings.ReplaceAll(q, "datetime('now')", "CURRENT_TIMESTAMP::text")
+	return q
+}
+func (s *Store) initializePostgres(ctx context.Context) error {
+	if _, err := s.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _webfleet_schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT version,name FROM _webfleet_schema_migrations ORDER BY version`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	version := 0
+	for rows.Next() {
+		var v int
+		var n string
+		if err := rows.Scan(&v, &n); err != nil {
+			return err
+		}
+		if v < 1 || v > len(migrations) || migrations[v-1].name != n {
+			return fmt.Errorf("postgres migration history mismatch at %d", v)
+		}
+		version = v
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, m := range migrations {
+		if m.version <= version {
+			continue
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		ok := false
+		defer func() {
+			if !ok {
+				_ = tx.Rollback()
+			}
+		}()
+		for _, q := range m.stmts {
+			if strings.Contains(q, "CREATE TABLE _webfleet_schema_migrations") {
+				continue
+			}
+			if _, err = tx.ExecContext(ctx, postgresSQL(q)); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply postgres migration %d: %w", m.version, err)
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO _webfleet_schema_migrations(version,name,applied_at) VALUES(?,?,?)`, m.version, m.name, Now()); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		ok = true
+	}
+	return nil
+}
+func (s *Store) Dialect() string { return s.DB.DialectName() }
 
 func (s *Store) Close() error { return s.DB.Close() }
 func (s *Store) Path() string { return s.path }

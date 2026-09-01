@@ -2,7 +2,10 @@ module github.com/web-fleet/webfleet
 
 go 1.23
 
-require modernc.org/sqlite v1.33.1
+require (
+	modernc.org/sqlite v1.33.1
+	github.com/jackc/pgx/v5 v5.7.2
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

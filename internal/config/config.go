@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	DataDir          string
+	DatabaseURL      string
 	Listen           string
 	CheckInterval    time.Duration
 	CrawlInterval    time.Duration
@@ -18,6 +19,9 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{DataDir: "./data", Listen: "127.0.0.1:8090", CheckInterval: time.Minute, CrawlInterval: 6 * time.Hour, CheckConcurrency: 8}
+	if v := os.Getenv("WEBFLEET_DATABASE_URL"); v != "" {
+		c.DatabaseURL = v
+	}
 	if v := os.Getenv("WEBFLEET_DATA_DIR"); v != "" {
 		c.DataDir = v
 	}

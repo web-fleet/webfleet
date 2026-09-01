@@ -85,7 +85,12 @@ func main() {
 		log.Info("restore complete", "source", os.Args[2])
 		return
 	}
-	st, err := store.Open(cfg.DataDir)
+	var st *store.Store
+	if cfg.DatabaseURL != "" {
+		st, err = store.OpenPostgres(context.Background(), cfg.DatabaseURL)
+	} else {
+		st, err = store.Open(cfg.DataDir)
+	}
 	if err != nil {
 		log.Error("database failed", "error", err)
 		os.Exit(1)

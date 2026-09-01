@@ -211,7 +211,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP19 - PostgreSQL
+### CP19 - PostgreSQL [COMPLETE]
 
 - Storage abstraction only where necessary.
 - PostgreSQL migrations and integration tests.
