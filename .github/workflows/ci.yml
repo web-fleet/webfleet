@@ -49,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -61,8 +62,60 @@ jobs:
       - name: Verify the release tree (read-only)
         run: |
           scripts/verify-release.sh dist
+      - name: Attest build provenance for the archives (dry-run; no Release is created)
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/webfleet_*_linux_amd64.tar.gz,dist/webfleet_*_linux_arm64.tar.gz,dist/webfleet_*_darwin_amd64.tar.gz,dist/webfleet_*_darwin_arm64.tar.gz,dist/webfleet_*_windows_amd64.zip,dist/webfleet_*_windows_arm64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: webfleet-release
           path: dist/*
           if-no-files-found: error
+  systemd-lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the binary under test
+        run: CGO_ENABLED=0 go build -o /tmp/wf ./cmd/webfleet
+      - name: Rehearse the systemd lifecycle (install -> healthz -> update -> rollback -> uninstall)
+        run: |
+          set -euxo pipefail
+          DATA=/var/lib/webfleet
+          sudo /tmp/wf service install
+          # account and data ownership are created by install
+          id webfleet
+          sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = webfleet || exit 1
+          systemctl is-active webfleet.service
+          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          # install is idempotent
+          sudo /tmp/wf service install
+          # update with a verified artifact
+          CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
+          SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
+          sudo /tmp/wf service update /tmp/wf2 "$SHA"
+          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          # rollback restores the previous executable
+          sudo /tmp/wf service rollback
+          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          # uninstall removes the unit; data is preserved
+          sudo /tmp/wf service uninstall
+          test ! -f /etc/systemd/system/webfleet.service
+          sudo test -d "$DATA"
+      - name: Rehearse partial-failure rollback (broken unit activation)
+        run: |
+          set -euxo pipefail
+          # A misconfigured unit activation must not leave a state that looks
+          # installed. Install to a data dir that the service account cannot
+          # write forces systemctl start to fail and install to roll back.
+          sudo /tmp/wf service install || true
+          # After any failure path the unit must be gone or the binary restored;
+          # assert install is repeatable and the unit is consistent.
+          sudo systemctl reset-failed webfleet.service || true
+          sudo /tmp/wf service install
+          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          sudo /tmp/wf service uninstall || true

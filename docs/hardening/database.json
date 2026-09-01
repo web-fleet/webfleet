@@ -24,10 +24,12 @@
     "boundedSubprocess": "pg_dump/pg_restore run under a bounded context (10 minutes).",
     "rehearsals": "SQLite round-trip covered by store_test; PostgreSQL backup -> destructive change -> restore rehearsal covered by TestPostgresBackupRestoreRehearsal. Bad/incompatible input fails safely (TestPostgresBackupRestoreBadInputFailsSafely, SQLite ValidateDatabase)."
   },
-  "schedulerLease": {
-    "architecture": "job_leases table (migration 26) with PK(lease_kind, resource_id). AcquireLease is an atomic upsert that grants a lease only when it is unheld, held by the same owner, or expired; two workers can never hold the same lease at once.",
-    "expiry": "Leases carry an owner identity and an expiry; a crashed worker's lease expires and the work is reclaimed (no stranded work).",
-    "duplicateSemantics": "Scheduled checks and crawls are claimed per site; a lease lasts longer than the operation so a second worker observes the holder and skips. On lease expiry after a crash the work may be redone (at-least-once) by a healthy worker; manual actions are not lease-governed.",
-    "evidence": "store lease tests (exclusion, renewal, expiry takeover, release, cleanup) and scheduler two-worker tests prove each site is checked once per interval and that recovery after expiry works, on both SQLite and PostgreSQL."
+  "schedulerClaim": {
+    "architecture": "scheduler_claims table (migration 27) models persistent per-kind/per-site due state: next_due_at, owner, generation (fencing token) and lease_until. ClaimDue atomically claims a unit only when it is actually due and unclaimed/expired, bumping the generation; RenewClaim extends the lease only for the same owner+generation; CompleteClaim advances next_due_at and releases the claim only for the same owner+generation, so a stale owner can neither renew nor complete the newer owner's slot.",
+    "dueSchedule": "next_due_at is advanced on completion to now+interval, so a configured interval longer than any lease TTL cannot create duplicate due work; a unit is claimable again only when due. Check and crawl claims are independent kinds.",
+    "fencing": "Generation is a fencing token: forced ownership transfer (lease expiry) bumps it, and the old owner's renewal/completion fail. In-flight work runs with a cancellable context renewed on a heartbeat; if renewal fails because ownership moved, the operation context is cancelled so a stale worker stops writing.",
+    "duplicateSemantics": "One worker executes each due slot per interval. After a process crash the lease expires and the slot is reclaimed and re-run (at-least-once); a crash between claim and completion cannot corrupt the schedule because completion is ownership+generation qualified.",
+    "evidence": "store tests prove exclusion, expiry recovery, renewal-prevents-takeover, fencing-prevents-stale-completion, completion-advances-next-due and check/crawl independence; scheduler two-worker tests prove one execution per due slot and crash recovery. Equivalent tests run on real PostgreSQL via the parity suite.",
+    "manualSemantics": "Manual Check-now/Crawl-now actions are user-intended and not lease-governed."
   }
 }

@@ -3,9 +3,14 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,13 +18,19 @@ import (
 	"github.com/web-fleet/webfleet/internal/apitokens"
 	"github.com/web-fleet/webfleet/internal/audit"
 	"github.com/web-fleet/webfleet/internal/auth"
+	"github.com/web-fleet/webfleet/internal/crawler"
+	"github.com/web-fleet/webfleet/internal/databasesetup"
 	"github.com/web-fleet/webfleet/internal/deployments"
+	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
+	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/netguard"
 	"github.com/web-fleet/webfleet/internal/notifications"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/web-fleet/webfleet/internal/tlshealth"
 )
 
 // openFreshPG creates a unique database on a real PostgreSQL server (configured
@@ -216,11 +227,11 @@ func TestPostgresCoreParity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ok, err := st.AcquireLease(ctx, "check", site.ID, "worker-a", time.Minute); err != nil || !ok {
-		t.Fatalf("lease: ok=%v err=%v", ok, err)
+	if _, ok, err := st.ClaimDue(ctx, "check", site.ID, "worker-a", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if ok, _ := st.AcquireLease(ctx, "check", site.ID, "worker-b", time.Minute); ok {
-		t.Fatal("second worker claimed the same postgres lease")
+	if _, ok, _ := st.ClaimDue(ctx, "check", site.ID, "worker-b", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); ok {
+		t.Fatal("second worker claimed the same postgres due slot")
 	}
 }
 
@@ -301,4 +312,234 @@ func TestProviderDetection(t *testing.T) {
 	if store.Provider("postgres://u@h/db") != "postgres" {
 		t.Fatal("postgres url must be postgres")
 	}
+}
+
+// TestPostgresParityExtended covers the remaining explicitly-requested storage
+// paths against real PostgreSQL: monitoring check results, incident
+// acknowledgement, TLS/DNS/crawler observation persistence, audit history
+// behavior and scheduler due/claim state.
+func TestPostgresParityExtended(t *testing.T) {
+	st, _ := openFreshPG(t)
+	ctx := context.Background()
+	if err := auth.New(st).CreateAdmin("admin@example.com", "secret7"); err != nil {
+		t.Fatal(err)
+	}
+	org, err := st.PrimaryOrgID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Monitoring check-result persistence through the real service path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	defer srv.Close()
+	hostport := strings.TrimPrefix(srv.URL, "http://")
+	host := strings.Split(hostport, ":")[0]
+	mSite, err := sites.New(st).Create(org, "mon", "http://"+hostport+"/", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := netguard.New()
+	g.Resolver = mapResolver{host: {netip.MustParseAddr("127.0.0.1")}}
+	g.AllowPrivate = true
+	mon := monitor.NewForTests(st, g.Resolver, true)
+	res, err := mon.CheckSite(ctx, mSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.StatusCode != 204 {
+		t.Fatalf("check result: %+v", res)
+	}
+	hist, err := mon.Recent(mSite.ID, 5)
+	if err != nil || len(hist) != 1 {
+		t.Fatalf("check history on postgres: %v %v", hist, err)
+	}
+
+	// Incident acknowledgement.
+	inc := incidents.New(st)
+	if err := inc.Transition(mSite.ID, "unknown", "down", store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	il, _ := inc.List(mSite.ID)
+	if len(il) != 1 {
+		t.Fatalf("incidents: %v", il)
+	}
+	if err := inc.Acknowledge(org, il[0].ID, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	il2, _ := inc.List(mSite.ID)
+	if il2[0].AcknowledgedAt == "" {
+		t.Fatal("acknowledgement not persisted on postgres")
+	}
+
+	// TLS observation persistence.
+	if err := sqlite.Exec(st.DB, `INSERT INTO tls_observations(site_id,valid,hostname_valid,issuer,subject,serial,not_before,not_after,days_remaining,error_class,error,checked_at) VALUES(?,1,1,'iss','sub','ser','2026-01-01T00:00:00Z','2027-01-01T00:00:00Z',120,'','',?)`, mSite.ID, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	tlsSvc := tlshealth.New(st)
+	if obs, err := tlsSvc.Latest(mSite.ID); err != nil || !obs.Valid {
+		t.Fatalf("tls observation on postgres: %+v %v", obs, err)
+	}
+
+	// DNS observation persistence.
+	if err := sqlite.Exec(st.DB, `INSERT INTO dns_observations(site_id,a_records,aaaa_records,cname,status,changed,error,checked_at) VALUES(?,'1.1.1.1','','','ok',0,'',?)`, mSite.ID, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	dnsSvc := dnsobs.New(st)
+	if rows, err := dnsSvc.History(mSite.ID); err != nil || len(rows) != 1 {
+		t.Fatalf("dns observation on postgres: %v %v", rows, err)
+	}
+
+	// Crawler persistence.
+	r, err := sqlite.Query(st.DB, `INSERT INTO crawl_runs(site_id,status,started_at) VALUES(?,'complete',?) RETURNING id`, mSite.ID, store.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := r[0]["id"].Int64
+	if err := sqlite.Exec(st.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth) VALUES(?,?,'https://example.com/',200,0)`, runID, mSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	crawlSvc := crawler.New(st)
+	if d, err := crawlSvc.Detail(runID); err != nil || len(d.Pages) != 1 {
+		t.Fatalf("crawl persistence on postgres: %+v %v", d, err)
+	}
+
+	// Audit history opt-in accumulates runs on postgres.
+	auditSvc := audit.NewWithRunner(st, fakeAuditRunner{})
+	if err := auditSvc.SetHistory(mSite.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auditSvc.Run(ctx, mSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auditSvc.Run(ctx, mSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	ah, _ := auditSvc.History(mSite.ID)
+	if len(ah) != 2 {
+		t.Fatalf("audit history on postgres: %d runs", len(ah))
+	}
+
+	// Scheduler due/claim state persists and fences on postgres.
+	now := time.Now().UTC()
+	gen, ok, err := st.ClaimDue(ctx, "check", mSite.ID, "worker-a", now, now.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := st.ClaimDue(ctx, "check", mSite.ID, "worker-b", now, now.Add(time.Minute)); ok {
+		t.Fatal("second worker claimed the same postgres due slot")
+	}
+	if ok, _ := st.RenewClaim(ctx, "check", mSite.ID, "worker-a", gen, now.Add(2*time.Minute)); !ok {
+		t.Fatal("postgres renewal failed")
+	}
+	if err := st.CompleteClaim(ctx, "check", mSite.ID, "worker-a", gen, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPostgresFirstRunLifecycle proves the real first-run database-selection
+// lifecycle against a real PostgreSQL server: SQLite default, choose PG,
+// restart-required, reopen on PG, admin creation, stable restart.
+func TestPostgresFirstRunLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	base := os.Getenv("WEBFLEET_TEST_POSTGRES_URL")
+	if base == "" {
+		t.Skip("WEBFLEET_TEST_POSTGRES_URL not set")
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("wf_fr_%d", time.Now().UnixNano())
+	admin, err := store.OpenPostgres(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.DB.ExecContext(context.Background(), "CREATE DATABASE "+name); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	admin.Close()
+	u.Path = "/" + name
+	pgDSN := u.String()
+	t.Cleanup(func() {
+		admin, err := store.OpenPostgres(context.Background(), base)
+		if err != nil {
+			return
+		}
+		defer admin.Close()
+		_, _ = admin.DB.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	})
+
+	// 1. Initial SQLite/default state: chooser selectable.
+	sqliteSt, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre, err := databasesetup.StateFor(sqliteSt, dir)
+	if err != nil || !pre.Selectable || pre.Provider != "sqlite" {
+		t.Fatalf("sqlite default state: %+v %v", pre, err)
+	}
+	// 2/3. Choose the real PostgreSQL URL; connection+schema validation succeeds.
+	applied, err := databasesetup.Apply(context.Background(), sqliteSt, dir, "postgres", pgDSN)
+	if err != nil {
+		t.Fatalf("apply postgres: %v", err)
+	}
+	// 4. Persisted state reports restart required, provider locked.
+	if !applied.RestartRequired || applied.Selectable || applied.Provider != "postgres" {
+		t.Fatalf("applied state: %+v", applied)
+	}
+	post, _ := databasesetup.StateFor(sqliteSt, dir)
+	if !post.RestartRequired || post.Selectable {
+		t.Fatalf("persisted pre-restart state: %+v", post)
+	}
+	sqliteSt.Close()
+	// 5. Reopen the application store on the real PostgreSQL database.
+	pgSt, err := store.OpenPostgres(context.Background(), pgDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pgSt.Close()
+	// 6. Setup state now permits first-admin creation while provider remains
+	// locked (running postgres, not restart-required).
+	post2, err := databasesetup.StateFor(pgSt, dir)
+	if err != nil || post2.Selectable || post2.RestartRequired || post2.Provider != "postgres" {
+		t.Fatalf("post-restart state: %+v %v", post2, err)
+	}
+	// 7. Create the first administrator on PostgreSQL.
+	a := auth.New(pgSt)
+	if err := a.CreateAdmin("admin@example.com", "secret7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Login("admin@example.com", "secret7"); err != nil {
+		t.Fatal(err)
+	}
+	// 8. Restart again and prove the deployment is stable.
+	pgSt.Close()
+	pgSt2, err := store.OpenPostgres(context.Background(), pgDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pgSt2.Close()
+	if need, _ := auth.New(pgSt2).NeedsSetup(); need {
+		t.Fatal("setup reappeared after restart on postgres")
+	}
+	// 9. Environment-provisioned path behaves consistently.
+	envSt, err := store.OpenPostgres(context.Background(), pgDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer envSt.Close()
+	env, err := databasesetup.StateFor(envSt, dir)
+	if err != nil || env.Selectable {
+		t.Fatalf("env-provisioned state: %+v %v", env, err)
+	}
+}
+
+type mapResolver map[string][]netip.Addr
+
+func (m mapResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	if ips, ok := m[host]; ok {
+		return ips, nil
+	}
+	return nil, &net.DNSError{Err: "no such host", Name: host}
 }

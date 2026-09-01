@@ -197,81 +197,87 @@ func TestPostgresMigrationSQL(t *testing.T) {
 	}
 }
 
-func TestLeaseAcquireExcludesOtherOwners(t *testing.T) {
+func TestClaimDueExcludesOtherOwnersUntilExpiry(t *testing.T) {
 	st, e := Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer st.Close()
 	ctx := context.Background()
-	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); e != nil || !ok {
-		t.Fatalf("first acquire: ok=%v err=%v", ok, e)
+	now := time.Now().UTC()
+	if _, ok, e := st.ClaimDue(ctx, "check", 1, "worker-a", now, now.Add(time.Minute)); e != nil || !ok {
+		t.Fatalf("first claim: ok=%v err=%v", ok, e)
 	}
 	// A second worker cannot claim the same unit while the lease is unexpired.
-	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || ok {
-		t.Fatalf("second worker acquired: ok=%v err=%v", ok, e)
+	if _, ok, e := st.ClaimDue(ctx, "check", 1, "worker-b", now, now.Add(time.Minute)); e != nil || ok {
+		t.Fatalf("second worker claimed: ok=%v err=%v", ok, e)
 	}
-	// The same owner renews.
-	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); e != nil || !ok {
-		t.Fatalf("owner renewal: ok=%v err=%v", ok, e)
+	// A different unit is independent.
+	if _, ok, e := st.ClaimDue(ctx, "check", 2, "worker-b", now, now.Add(time.Minute)); e != nil || !ok {
+		t.Fatalf("independent unit: ok=%v err=%v", ok, e)
 	}
-	// A different resource is independent.
-	if ok, e := st.AcquireLease(ctx, "check", 2, "worker-b", time.Minute); e != nil || !ok {
-		t.Fatalf("independent resource: ok=%v err=%v", ok, e)
+	// A unit is not claimable again before its next_due_at.
+	if _, ok, _ := st.ClaimDue(ctx, "check", 2, "worker-a", now, now.Add(time.Minute)); ok {
+		t.Fatal("unit claimed again before due")
 	}
 }
 
-func TestLeaseExpiryAllowsTakeover(t *testing.T) {
+func TestClaimExpiryAllowsRecovery(t *testing.T) {
 	st, e := Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer st.Close()
 	ctx := context.Background()
-	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", 30*time.Millisecond); !ok {
-		t.Fatal("initial acquire failed")
+	now := time.Now().UTC()
+	gen, ok, _ := st.ClaimDue(ctx, "check", 1, "worker-a", now, now.Add(30*time.Millisecond))
+	if !ok {
+		t.Fatal("initial claim failed")
 	}
 	time.Sleep(60 * time.Millisecond)
-	// A crashed worker's lease expires; another worker can claim the work.
-	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || !ok {
+	// A crashed worker's lease expires; another worker can claim (generation bumps).
+	gen2, ok, e := st.ClaimDue(ctx, "check", 1, "worker-b", now.Add(100*time.Millisecond), now.Add(time.Minute))
+	if e != nil || !ok {
 		t.Fatalf("takeover after expiry: ok=%v err=%v", ok, e)
 	}
+	if gen2 <= gen {
+		t.Fatalf("fencing generation did not advance: %d -> %d", gen, gen2)
+	}
+	// The stale owner's completion is a no-op and cannot corrupt next_due_at.
+	if e := st.CompleteClaim(ctx, "check", 1, "worker-a", gen, now.Add(time.Hour)); e != nil {
+		t.Fatal(e)
+	}
+	rows, e := sqlite.Query(st.DB, `SELECT owner,generation FROM scheduler_claims WHERE claim_kind='check' AND site_id=1`)
+	if e != nil || len(rows) != 1 || rows[0]["owner"].Text != "worker-b" {
+		t.Fatalf("stale owner corrupted the claim: %v %v", rows, e)
+	}
 }
 
-func TestLeaseRelease(t *testing.T) {
+func TestClaimCompletionAdvancesNextDue(t *testing.T) {
 	st, e := Open(t.TempDir())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer st.Close()
 	ctx := context.Background()
-	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); !ok {
-		t.Fatal("acquire failed")
+	now := time.Now().UTC()
+	gen, ok, _ := st.ClaimDue(ctx, "check", 1, "worker-a", now, now.Add(time.Minute))
+	if !ok {
+		t.Fatal("claim failed")
 	}
-	if e := st.ReleaseLease(ctx, "check", 1, "worker-a"); e != nil {
+	nextDue := now.Add(30 * time.Second)
+	if e := st.CompleteClaim(ctx, "check", 1, "worker-a", gen, nextDue); e != nil {
 		t.Fatal(e)
 	}
-	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || !ok {
-		t.Fatalf("acquire after release: ok=%v err=%v", ok, e)
+	rows, e := sqlite.Query(st.DB, `SELECT next_due_at,owner FROM scheduler_claims WHERE claim_kind='check' AND site_id=1`)
+	if e != nil || len(rows) != 1 || rows[0]["owner"].Text != "" {
+		t.Fatalf("completion did not release claim: %v %v", rows, e)
 	}
-}
-
-func TestExpireLeasesCleanup(t *testing.T) {
-	st, e := Open(t.TempDir())
-	if e != nil {
-		t.Fatal(e)
+	// Not due until next_due_at passes.
+	if _, ok, _ := st.ClaimDue(ctx, "check", 1, "worker-b", now.Add(10*time.Second), now.Add(time.Minute)); ok {
+		t.Fatal("claimed before next_due_at")
 	}
-	defer st.Close()
-	ctx := context.Background()
-	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", 30*time.Millisecond); !ok {
-		t.Fatal("acquire failed")
-	}
-	time.Sleep(60 * time.Millisecond)
-	if e := st.ExpireLeases(ctx); e != nil {
-		t.Fatal(e)
-	}
-	rows, e := sqlite.Query(st.DB, `SELECT COUNT(*) n FROM job_leases`)
-	if e != nil || rows[0]["n"].Int64 != 0 {
-		t.Fatalf("expired leases not cleaned: %v %v", rows, e)
+	if _, ok, _ := st.ClaimDue(ctx, "check", 1, "worker-b", nextDue.Add(time.Second), nextDue.Add(time.Minute)); !ok {
+		t.Fatal("not claimable at next_due_at")
 	}
 }

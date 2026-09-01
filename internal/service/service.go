@@ -108,6 +108,29 @@ func Install(exe, dataDir, listen string) error {
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found")
 	}
+	// Preserve any existing binary so activation failure can roll back cleanly.
+	hadBinary := false
+	if _, e := os.Stat(BinaryPath); e == nil {
+		hadBinary = true
+		if e := copyFile(BinaryPath, BinaryPath+".preinstall", 0o755); e != nil {
+			return e
+		}
+	}
+	installOK := false
+	defer func() {
+		// Partial failure must not leave a state that looks successfully
+		// installed: restore the previous binary and remove the unit.
+		if !installOK {
+			_ = exec.Command("systemctl", "disable", "webfleet.service").Run()
+			_ = os.Remove(UnitPath)
+			if hadBinary {
+				_ = copyFile(BinaryPath+".preinstall", BinaryPath, 0o755)
+			} else {
+				_ = os.Remove(BinaryPath)
+			}
+			_ = os.Remove(BinaryPath + ".preinstall")
+		}
+	}()
 	if e := copyFile(exe, BinaryPath, 0o755); e != nil {
 		return e
 	}
@@ -116,9 +139,11 @@ func Install(exe, dataDir, listen string) error {
 	}
 	for _, a := range [][]string{{"daemon-reload"}, {"enable", "--now", "webfleet.service"}} {
 		if out, e := exec.Command("systemctl", a...).CombinedOutput(); e != nil {
-			return fmt.Errorf("systemctl %s: %s: %w", strings.Join(a, " "), strings.TrimSpace(string(out)), e)
+			return fmt.Errorf("systemctl %s: %s: %w (installation rolled back)", strings.Join(a, " "), strings.TrimSpace(string(out)), e)
 		}
 	}
+	installOK = true
+	_ = os.Remove(BinaryPath + ".preinstall")
 	return nil
 }
 

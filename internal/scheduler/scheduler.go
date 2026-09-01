@@ -48,7 +48,15 @@ func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, dnsSvc *dnsobs.S
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &Scheduler{store: st, checker: c, tls: tlsSvc, dns: dnsSvc, crawler: crawlSvc, interval: interval, crawlInterval: crawlInterval, concurrency: concurrency, log: log, owner: newOwnerID(), checkLeaseTTL: 5 * time.Minute, crawlLeaseTTL: time.Hour}
+	checkTTL := 2 * interval
+	if checkTTL < time.Minute {
+		checkTTL = time.Minute
+	}
+	crawlTTL := crawlInterval / 4
+	if crawlTTL < 30*time.Minute {
+		crawlTTL = 30 * time.Minute
+	}
+	return &Scheduler{store: st, checker: c, tls: tlsSvc, dns: dnsSvc, crawler: crawlSvc, interval: interval, crawlInterval: crawlInterval, concurrency: concurrency, log: log, owner: newOwnerID(), checkLeaseTTL: checkTTL, crawlLeaseTTL: crawlTTL}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -93,38 +101,45 @@ func (s *Scheduler) siteIDs() ([]int64, error) {
 }
 
 func (s *Scheduler) RunOnce(ctx context.Context) {
-	// Opportunistically drop expired leases so the table does not grow without
-	// bound and reclaimed work is visible to any owner.
-	_ = s.store.ExpireLeases(ctx)
 	ids, err := s.siteIDs()
 	if err != nil {
 		s.log.Error("scheduler list failed", "error", err)
 		return
 	}
 	s.runBounded(ctx, ids, s.concurrency, func(id int64) {
-		// A database lease ensures two worker-capable processes never check the
-		// same site at the same time; the loser observes the other owner's
-		// unexpired lease and skips.
-		ok, err := s.store.AcquireLease(ctx, "check", id, s.owner, s.checkLeaseTTL)
+		// Fenced due-work claim: the unit is claimed atomically only when it is
+		// actually due and unclaimed/expired. A second worker observing the same
+		// row cannot claim it, and a stale owner cannot renew or complete it
+		// after ownership moves (generation fencing).
+		now := time.Now().UTC()
+		gen, ok, err := s.store.ClaimDue(ctx, "check", id, s.owner, now, now.Add(s.checkLeaseTTL))
 		if err != nil {
-			s.log.Warn("lease acquire failed", "site_id", id, "error", err)
+			s.log.Warn("claim failed", "site_id", id, "error", err)
 			return
 		}
 		if !ok {
 			return
 		}
-		if _, err := s.checker.CheckSite(ctx, id); err != nil {
+		opCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		s.renewLoop(opCtx, cancel, "check", id, gen)
+		if _, err := s.checker.CheckSite(opCtx, id); err != nil {
 			s.log.Warn("site check failed", "site_id", id, "error", err)
 		}
 		if s.tls != nil && s.observationDue(`SELECT checked_at FROM tls_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, id, 12*time.Hour) {
-			if _, err := s.tls.InspectSite(ctx, id); err != nil {
+			if _, err := s.tls.InspectSite(opCtx, id); err != nil {
 				s.log.Warn("tls inspection failed", "site_id", id, "error", err)
 			}
 		}
 		if s.dns != nil && s.observationDue(`SELECT checked_at FROM dns_observations WHERE site_id=? ORDER BY id DESC LIMIT 1`, id, time.Hour) {
-			if _, err := s.dns.ObserveSite(ctx, id); err != nil {
+			if _, err := s.dns.ObserveSite(opCtx, id); err != nil {
 				s.log.Warn("dns observation failed", "site_id", id, "error", err)
 			}
+		}
+		// Ownership-qualified completion: advances next_due_at for the slot and
+		// is a no-op for a stale owner, so the due schedule stays correct.
+		if err := s.store.CompleteClaim(ctx, "check", id, s.owner, gen, time.Now().UTC().Add(s.interval)); err != nil {
+			s.log.Warn("claim completion failed", "site_id", id, "error", err)
 		}
 	})
 }
@@ -146,18 +161,51 @@ func (s *Scheduler) RunCrawlOnce(ctx context.Context) {
 		workers = 4
 	}
 	s.runBounded(ctx, ids, workers, func(id int64) {
-		ok, err := s.store.AcquireLease(ctx, "crawl", id, s.owner, s.crawlLeaseTTL)
+		now := time.Now().UTC()
+		gen, ok, err := s.store.ClaimDue(ctx, "crawl", id, s.owner, now, now.Add(s.crawlLeaseTTL))
 		if err != nil {
-			s.log.Warn("crawl lease acquire failed", "site_id", id, "error", err)
+			s.log.Warn("crawl claim failed", "site_id", id, "error", err)
 			return
 		}
 		if !ok {
 			return
 		}
-		if _, err := s.crawler.CrawlSite(ctx, id); err != nil {
+		opCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		s.renewLoop(opCtx, cancel, "crawl", id, gen)
+		if _, err := s.crawler.CrawlSite(opCtx, id); err != nil {
 			s.log.Warn("site crawl failed", "site_id", id, "error", err)
 		}
+		if err := s.store.CompleteClaim(ctx, "crawl", id, s.owner, gen, time.Now().UTC().Add(s.crawlInterval)); err != nil {
+			s.log.Warn("crawl claim completion failed", "site_id", id, "error", err)
+		}
 	})
+}
+
+// renewLoop keeps the claim's lease alive while work is in flight and cancels
+// the operation if ownership is lost (renewal fails because another owner
+// took over), fencing a stale worker from continuing to write.
+func (s *Scheduler) renewLoop(ctx context.Context, cancel context.CancelFunc, kind string, id int64, gen int64) {
+	ttl := s.checkLeaseTTL
+	if kind == "crawl" {
+		ttl = s.crawlLeaseTTL
+	}
+	go func() {
+		t := time.NewTicker(ttl / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				ok, err := s.store.RenewClaim(ctx, kind, id, s.owner, gen, time.Now().UTC().Add(ttl))
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (s *Scheduler) observationDue(query string, siteID int64, maxAge time.Duration) bool {

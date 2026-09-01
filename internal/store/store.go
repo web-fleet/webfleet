@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 26
+const schemaVersion = 27
 
 type migration struct {
 	version int
@@ -151,6 +151,9 @@ var migrations = []migration{
 	{26, "scheduler job leases", []string{
 		`CREATE TABLE job_leases(lease_kind TEXT NOT NULL, resource_id INTEGER NOT NULL, owner TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(lease_kind, resource_id));`,
 	}},
+	{27, "scheduler due claims", []string{
+		`CREATE TABLE scheduler_claims(claim_kind TEXT NOT NULL, site_id INTEGER NOT NULL, next_due_at TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', generation INTEGER NOT NULL DEFAULT 0, lease_until TEXT NOT NULL DEFAULT '', PRIMARY KEY(claim_kind, site_id));`,
+	}},
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -272,14 +275,27 @@ func (s *Store) initializePostgres(ctx context.Context) error {
 }
 func (s *Store) Dialect() string { return s.DB.DialectName() }
 
-// AcquireLease atomically claims a unit of work for one owner. A lease is
-// granted only if it is unheld or held by the same owner (renewal) or its
-// expiry has passed, so two workers can never hold the same lease at once and
-// a crashed worker's lease expires without stranding the work. The upsert is
-// atomic on both SQLite (single owned connection) and PostgreSQL.
-func (s *Store) AcquireLease(ctx context.Context, kind string, resourceID int64, owner string, ttl time.Duration) (bool, error) {
-	now := time.Now().UTC()
-	res, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(lease_kind,resource_id,owner,expires_at,created_at) VALUES(?,?,?,?,?) ON CONFLICT(lease_kind,resource_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,created_at=excluded.created_at WHERE job_leases.owner=excluded.owner OR job_leases.expires_at<?`, kind, resourceID, owner, now.Add(ttl).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+// ClaimDue atomically claims a unit of scheduled work for one owner when it is
+// actually due and either unclaimed or expired. Each successful claim bumps the
+// generation (fencing token); a stale owner holding an older generation can
+// never renew or complete the newer owner's slot. The upsert is atomic on both
+// SQLite (single owned connection) and PostgreSQL.
+func (s *Store) ClaimDue(ctx context.Context, kind string, siteID int64, owner string, now, leaseUntil time.Time) (int64, bool, error) {
+	rows, err := sqlite.Query(s.DB, `INSERT INTO scheduler_claims(claim_kind,site_id,next_due_at,owner,generation,lease_until) VALUES(?,?,?,?,1,?) ON CONFLICT(claim_kind,site_id) DO UPDATE SET owner=excluded.owner,generation=scheduler_claims.generation+1,lease_until=excluded.lease_until WHERE scheduler_claims.next_due_at<=? AND (scheduler_claims.owner='' OR scheduler_claims.lease_until<=?) RETURNING generation`, kind, siteID, now.Format(time.RFC3339Nano), owner, leaseUntil.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, false, err
+	}
+	if len(rows) == 0 {
+		return 0, false, nil
+	}
+	return rows[0]["generation"].Int64, true, nil
+}
+
+// RenewClaim extends the lease only when the caller still owns the claim with
+// the same generation. A false result means ownership moved and the caller's
+// in-flight work must be cancelled (fencing).
+func (s *Store) RenewClaim(ctx context.Context, kind string, siteID int64, owner string, generation int64, leaseUntil time.Time) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE scheduler_claims SET lease_until=? WHERE claim_kind=? AND site_id=? AND owner=? AND generation=?`, leaseUntil.Format(time.RFC3339Nano), kind, siteID, owner, generation)
 	if err != nil {
 		return false, err
 	}
@@ -290,16 +306,11 @@ func (s *Store) AcquireLease(ctx context.Context, kind string, resourceID int64,
 	return n == 1, nil
 }
 
-// ReleaseLease drops a lease held by a specific owner.
-func (s *Store) ReleaseLease(ctx context.Context, kind string, resourceID int64, owner string) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE lease_kind=? AND resource_id=? AND owner=?`, kind, resourceID, owner)
-	return err
-}
-
-// ExpireLeases removes expired lease rows opportunistically.
-func (s *Store) ExpireLeases(ctx context.Context) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE expires_at<?`, now)
+// CompleteClaim advances next_due_at and releases the claim only when the
+// caller still owns it with the same generation. A stale owner's completion is
+// a no-op, so it cannot mark the newer owner's slot complete.
+func (s *Store) CompleteClaim(ctx context.Context, kind string, siteID int64, owner string, generation int64, nextDue time.Time) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE scheduler_claims SET next_due_at=?,owner='',lease_until='' WHERE claim_kind=? AND site_id=? AND owner=? AND generation=?`, nextDue.Format(time.RFC3339Nano), kind, siteID, owner, generation)
 	return err
 }
 
