@@ -339,9 +339,9 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Release provenance/checksums.
 - Documentation/public website audit against actual shipped behaviour.
 
-### CP31 - Stable public preview
+### CP31 - Stable public preview [BLOCKED ON CP30]
 
-- Signed/tagged release.
+- Signed/tagged release. Do not create it until every `RELEASE.md` evidence gate passes.
 - Install/update instructions tested by an ordinary-user dogfood pass.
 - Public website points only at real release artifacts and truthful features.
 - Known limitations published.

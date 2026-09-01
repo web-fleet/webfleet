@@ -240,6 +240,6 @@ As of this handover revision:
 
 ## Immediate next step
 
-Continue with CP26 deployment observations. Keep Web Fleet observational: ingest deployment metadata from external systems and correlate it with health/performance/Audit/analytics changes rather than turning Web Fleet into a deployment platform.
+The implementation campaign is complete through CP29. CP30 is now explicitly handed to DeepSeek/Cortex for adversarial testing and battle hardening. Use `SECURITY.md`, `SCALE.md`, `RELEASE.md`, the roadmap and existing regressions as the attack/review contract.
 
-CP30 is the dedicated battle-hardening gate for real PostgreSQL parity, external OIDC interoperability, cross-platform packaging, security review and measured scale evidence. `SCALE.md` records the current decision not to add distributed infrastructure without measurements.
+Do not tag or announce the public preview while CP31 is blocked on CP30. After the hardening campaign, repair every release blocker, rerun the exact release gates, then perform an ordinary-user dogfood install from the public website before deciding whether to tag the preview.
