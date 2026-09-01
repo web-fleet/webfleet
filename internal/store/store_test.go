@@ -184,3 +184,12 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("probe=%d err=%v", n, e)
 	}
 }
+
+func TestPostgresMigrationSQL(t *testing.T) {
+	q := postgresSQL(`CREATE TABLE x(id INTEGER PRIMARY KEY, token BLOB NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`)
+	for _, want := range []string{"SERIAL PRIMARY KEY", "BYTEA", "CURRENT_TIMESTAMP::text"} {
+		if !strings.Contains(q, want) {
+			t.Fatalf("missing %s in %s", want, q)
+		}
+	}
+}
