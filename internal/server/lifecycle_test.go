@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -895,4 +896,110 @@ func TestA11yDeleteDialogLayout(t *testing.T) {
 	if !wrapped {
 		t.Fatal("delete row did not wrap below the input at 320px")
 	}
+}
+
+// TestA11yDialogCloseButton proves the Add website dialog's top-right × actually
+// closes it (rendered open state), returns focus to the Add website control and
+// leaves the background interactive - not merely that a close control exists.
+func TestA11yDialogCloseButton(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	a11ySetup(t, ctx, srv)
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title') !== null && document.getElementById('add-site-head') !== null`) {
+		t.Fatal("fleet view did not render")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#add-site-head`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('site-dialog').open === true`) {
+		t.Fatal("site dialog did not open")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#site-dialog .icon-button`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `!document.getElementById('site-dialog').open && document.getElementById('site-dialog').getBoundingClientRect().width === 0`) {
+		t.Fatal("site dialog did not close via the × button")
+	}
+	var focusID string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.activeElement.id||''`, &focusID)); err != nil {
+		t.Fatal(err)
+	}
+	if focusID != "add-site-head" {
+		t.Fatalf("focus after × close = %q (want add-site-head)", focusID)
+	}
+	// Background is interactive again: reopening works.
+	if err := chromedp.Run(ctx, chromedp.Click(`#add-site-head`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('site-dialog').open === true`) {
+		t.Fatal("site dialog could not be reopened after close")
+	}
+}
+
+// TestFaviconReferencedAndEmbedded proves the application HTML references the
+// Web Fleet favicon and the embedded asset exists (three-copy sync retained).
+func TestFaviconReferencedAndEmbedded(t *testing.T) {
+	html, e := os.ReadFile("web/index.html")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(string(html), `rel="icon" href="assets/images/web-fleet-mark.svg"`) {
+		t.Fatal("embedded index.html does not reference the Web Fleet favicon")
+	}
+	svg, e := os.ReadFile("web/assets/images/web-fleet-mark.svg")
+	if e != nil {
+		t.Fatalf("embedded favicon asset missing: %v", e)
+	}
+	if !strings.Contains(string(svg), "Web Fleet mark") {
+		t.Fatal("favicon asset is not the Web Fleet mark")
+	}
+}
+
+// TestA11ySelectChevronAndAnalyticsLayout proves the global select treatment
+// (custom inset chevron, appearance:none, roomy right padding) applies, and the
+// Analytics empty-state button sits below its explanatory text.
+func TestA11ySelectChevronAndAnalyticsLayout(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	a11ySetup(t, ctx, srv)
+	siteID := a11yAddSite(t, srv)
+	// Sites list: the group filter select uses the corrected treatment.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`location.hash='#/sites'`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `!!document.getElementById('group-filter')`) {
+		t.Fatal("sites view did not render")
+	}
+	var appearance, padRight string
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`getComputedStyle(document.getElementById('group-filter')).appearance`, &appearance),
+		chromedp.Evaluate(`getComputedStyle(document.getElementById('group-filter')).paddingRight`, &padRight),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if appearance != "none" {
+		t.Fatalf("group-filter appearance=%q want none (custom chevron)", appearance)
+	}
+	if strings.TrimSuffix(padRight, "px") == "" || parseFloat(padRight) < 24 {
+		t.Fatalf("group-filter padding-right=%q want >=24px for chevron inset", padRight)
+	}
+	// Site detail: the Analytics empty-state stacks text above the button.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`location.hash="#/sites/%d"`, siteID), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `!!document.getElementById('enable-analytics') && !!document.querySelector('.empty-copy')`) {
+		t.Fatal("analytics empty state did not render")
+	}
+	var below bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){var b=document.getElementById('enable-analytics'),t=document.querySelector('.empty-copy');return b.getBoundingClientRect().top>=t.getBoundingClientRect().bottom+4})()`, &below)); err != nil {
+		t.Fatal(err)
+	}
+	if !below {
+		t.Fatal("Enable tracker is not stacked below the analytics text")
+	}
+}
+
+func parseFloat(s string) float64 {
+	v, _ := strconv.ParseFloat(strings.TrimSuffix(s, "px"), 64)
+	return v
 }
