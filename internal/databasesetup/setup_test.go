@@ -82,3 +82,44 @@ func TestSQLiteDefaultIsSelectableAndEnvironmentPostgresIsNot(t *testing.T) {
 		t.Fatalf("env-postgres state = %+v, want locked and no restart notice", env)
 	}
 }
+
+// TestPendingPostgresChoiceHidesAdminEvenWhenAdminExists guards the first-run
+// contract that a database transition pending a restart must be reported even
+// when an administrator already exists in the currently running database, so
+// the UI never offers login/administrator actions against the old database.
+func TestPendingPostgresChoiceHidesAdminEvenWhenAdminExists(t *testing.T) {
+	dir := t.TempDir()
+	st, e := store.Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	if _, e := st.DB.Exec(`INSERT INTO users(email,password_hash,role,created_at) VALUES('admin@example.com','x','admin','2026-01-01T00:00:00Z')`); e != nil {
+		t.Fatal(e)
+	}
+	if e = config.SaveDatabaseChoice(dir, config.DatabaseChoice{Provider: "postgres", URL: "postgres://configured"}); e != nil {
+		t.Fatal(e)
+	}
+	// Running SQLite with an admin present AND a pending PostgreSQL choice:
+	// restart-required must be reported, and the database must not be selectable.
+	x, e := StateFor(st, dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !x.RestartRequired {
+		t.Fatalf("pending postgres choice with existing admin = %+v, want restart_required", x)
+	}
+	if x.Selectable {
+		t.Fatalf("pending postgres choice with existing admin = %+v, want not selectable", x)
+	}
+	// After restarting onto PostgreSQL the same admin-free transition rule
+	// clears: running on the chosen provider, no restart notice.
+	st.DB.Dialect = "postgres"
+	y, e := StateFor(st, dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if y.RestartRequired || y.Selectable {
+		t.Fatalf("post-restart state = %+v, want no restart notice", y)
+	}
+}

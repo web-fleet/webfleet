@@ -50,7 +50,6 @@ func StateFor(st *store.Store, dataDir string) (State, error) {
 			// administrator form appears. Both cases keep the admin form hidden
 			// until the process actually runs on the chosen provider.
 			state.Selectable = false
-			state.RestartRequired = running != "postgres"
 		default:
 			// SQLite is the default choice and needs no restart. When the
 			// process is already running on PostgreSQL (provisioned by
@@ -58,6 +57,12 @@ func StateFor(st *store.Store, dataDir string) (State, error) {
 			state.Selectable = running == "sqlite"
 		}
 	}
+	// A committed PostgreSQL choice that the running process has not yet
+	// restarted onto is ALWAYS a pending database transition, independent of
+	// whether an administrator already exists in the running database. The UI
+	// must therefore never offer login or administrator actions against the old
+	// database while the switch is pending: it shows the restart notice only.
+	state.RestartRequired = chosen == "postgres" && running != "postgres"
 	return state, nil
 }
 func Apply(ctx context.Context, st *store.Store, dataDir, provider, url string) (State, error) {

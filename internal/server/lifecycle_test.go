@@ -494,3 +494,172 @@ func TestA11ySingleSubmitAuthProvesOneRequest(t *testing.T) {
 		t.Fatalf("one Sign in click issued %d POST /api/login (want 1)", got)
 	}
 }
+
+// assertFirstRunPanels asserts the exact mutually-exclusive first-run panel
+// state: chooser/auth/restart are each visible/hidden as required, the auth
+// mode matches when the auth form is shown, and no impossible combination
+// (chooser+auth, restart+auth, chooser+restart) is ever rendered.
+func assertFirstRunPanels(t *testing.T, ctx context.Context, chooser, auth, restart bool, wantMode string) {
+	t.Helper()
+	var c, a, r bool
+	var mode string
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('database-stage').hidden === false`, &c),
+		chromedp.Evaluate(`document.getElementById('auth-form').hidden === false`, &a),
+		chromedp.Evaluate(`document.getElementById('restart-stage').hidden === false`, &r),
+		chromedp.Evaluate(`(document.getElementById('auth-form').dataset.mode||'')`, &mode),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if c && a {
+		t.Fatal("impossible state: database chooser and auth form both visible")
+	}
+	if r && a {
+		t.Fatal("impossible state: restart-required notice and auth form both visible")
+	}
+	if c && r {
+		t.Fatal("impossible state: database chooser and restart-required notice both visible")
+	}
+	if c != chooser {
+		t.Fatalf("chooser visible=%v want=%v", c, chooser)
+	}
+	if a != auth {
+		t.Fatalf("auth form visible=%v want=%v", a, auth)
+	}
+	if r != restart {
+		t.Fatalf("restart notice visible=%v want=%v", r, restart)
+	}
+	if auth && wantMode != "" && mode != wantMode {
+		t.Fatalf("auth form mode=%q want=%q", mode, wantMode)
+	}
+}
+
+// TestA11yFirstRunStateMatrixSQLite walks the full SQLite first-run state
+// matrix with mutual-exclusivity assertions at every step.
+func TestA11yFirstRunStateMatrixSQLite(t *testing.T) {
+	ctx := a11yContext(t)
+	srv, _ := startRealServer(t, t.TempDir(), "")
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv)); err != nil {
+		t.Fatal(err)
+	}
+	// STATE A: fresh, database not chosen -> chooser only.
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render")
+	}
+	assertFirstRunPanels(t, ctx, true, false, false, "")
+	// STATE B: SQLite chosen -> create-administrator form in setup mode.
+	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("administrator form did not appear after SQLite choice")
+	}
+	assertFirstRunPanels(t, ctx, false, true, false, "setup")
+	// Create administrator -> automatic dashboard transition.
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("administrator creation did not reach the dashboard")
+	}
+	// STATE F: established installation -> login form only after logout.
+	if err := a11yEvalTrue(ctx, `document.getElementById('logout').click()`); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'login' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("login form did not appear after logout")
+	}
+	assertFirstRunPanels(t, ctx, false, true, false, "login")
+}
+
+// TestA11yFirstRunStateMatrixPostgres walks the PostgreSQL first-run matrix:
+// configuring a URL keeps the auth form hidden, a valid choice commits to the
+// restart-required stage, and after restarting onto PostgreSQL the
+// create-administrator form appears in setup mode and succeeds.
+func TestA11yFirstRunStateMatrixPostgres(t *testing.T) {
+	ctx := a11yContext(t)
+	dsn := openFreshPGForServer(t)
+	sqliteData := t.TempDir()
+	srv, stop := startRealServer(t, sqliteData, "")
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv)); err != nil {
+		t.Fatal(err)
+	}
+	// STATE A: fresh -> chooser only.
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render")
+	}
+	assertFirstRunPanels(t, ctx, true, false, false, "")
+	// STATE C: configure PostgreSQL URL; auth stays hidden while entering it.
+	if err := chromedp.Run(ctx, chromedp.Click(`input[name="database"][value="postgres"]`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#postgres-setup`)); err != nil {
+		t.Fatal(err)
+	}
+	assertFirstRunPanels(t, ctx, true, false, false, "")
+	if err := chromedp.Run(ctx, chromedp.SetValue(`#postgres-url`, dsn, chromedp.ByID)); err != nil {
+		t.Fatal(err)
+	}
+	assertFirstRunPanels(t, ctx, true, false, false, "")
+	// STATE D: commit -> restart-required only.
+	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('restart-stage').hidden === false`) {
+		t.Fatal("restart-required stage did not appear after postgres choice")
+	}
+	assertFirstRunPanels(t, ctx, false, false, true, "")
+	// STATE E: restart onto PostgreSQL -> create-administrator form (setup).
+	stop()
+	srv2, _ := startRealServer(t, "", dsn)
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv2)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("create-administrator form did not appear after postgres restart")
+	}
+	assertFirstRunPanels(t, ctx, false, true, false, "setup")
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("postgres administrator creation did not reach the dashboard")
+	}
+}
+
+// TestA11yPendingRestartHidesAuthEvenWithAdmin is the regression for the
+// owner's "invalid credentials" finding: a committed PostgreSQL choice that
+// still requires a restart must hide ALL auth/setup actions against the old
+// running database, even when an administrator already exists there.
+func TestA11yPendingRestartHidesAuthEvenWithAdmin(t *testing.T) {
+	ctx := a11yContext(t)
+	dsn := openFreshPGForServer(t)
+	dataDir := t.TempDir()
+	srv, _ := startRealServer(t, dataDir, "")
+	// Create an administrator on the running SQLite database through the UI.
+	completeSQLiteFirstRun(t, ctx, srv)
+	// Commit a PostgreSQL choice without restarting: a pending transition.
+	if err := config.SaveDatabaseChoice(dataDir, config.DatabaseChoice{Provider: "postgres", URL: dsn}); err != nil {
+		t.Fatal(err)
+	}
+	// Reload: even with a valid session, boot must show ONLY the restart
+	// notice - never the dashboard, login or admin form against the old DB.
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('restart-stage').hidden === false`) {
+		t.Fatal("pending postgres transition did not show the restart notice")
+	}
+	assertFirstRunPanels(t, ctx, false, false, true, "")
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === false`) {
+		t.Fatal("dashboard was not hidden during the pending transition")
+	}
+}
