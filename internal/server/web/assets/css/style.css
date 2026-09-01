@@ -10,3 +10,7 @@
 .database-choice{border:1px solid var(--line);padding:1rem;margin:1rem 0}.database-choice label{display:flex;gap:.7rem;padding:.7rem 0}.database-choice small{display:block;color:var(--muted);margin-top:.2rem}.database-choice input{width:auto}.restart-notice{border:2px solid var(--accent);padding:1rem;margin-top:1rem}.restart-notice strong,.restart-notice span{display:block}.restart-notice span{margin-top:.45rem;color:var(--muted)}
 #postgres-apply:disabled,#postgres-apply:disabled:hover,#postgres-apply:disabled:focus{opacity:.38;cursor:not-allowed;background:var(--surface-2);border-color:var(--line);color:var(--muted);transform:none}
 #postgres-apply:not(:disabled):hover{opacity:1}
+
+.mobile-nav{display:none;position:fixed;z-index:30;top:.7rem;left:.7rem}.workspace{min-width:0;overflow-x:hidden}.site-table{overflow-x:auto}
+@media(max-width:799px){.mobile-nav{display:block}.rail{position:fixed;inset:0;z-index:25;width:100%;transform:translateX(-105%);transition:transform .16s ease}.rail.mobile-open{transform:none}.workspace{margin-left:0;padding-top:4rem}.metric-strip,.fleet-columns{grid-template-columns:1fr!important}.filter-row{display:grid;grid-template-columns:1fr}.section{max-width:100%}}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}

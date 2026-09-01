@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 22
+const schemaVersion = 23
 
 type migration struct {
 	version int
@@ -137,6 +137,10 @@ var migrations = []migration{
 	{22, "notification integrations", []string{
 		`CREATE TABLE notification_webhooks(id INTEGER PRIMARY KEY, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);`,
 		`CREATE TABLE notification_deliveries(id INTEGER PRIMARY KEY, webhook_id INTEGER NOT NULL REFERENCES notification_webhooks(id) ON DELETE CASCADE, event_kind TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, delivered_at TEXT);`,
+	}},
+	{23, "site tags", []string{
+		`CREATE TABLE site_tags(site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY(site_id,tag));`,
+		`CREATE INDEX site_tags_tag_idx ON site_tags(tag);`,
 	}},
 }
 

@@ -307,7 +307,7 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Clear retry/delivery history.
 - Secret handling and redaction tests.
 
-### CP28 - Accessibility, mobile and large-fleet UX
+### CP28 - Accessibility, mobile and large-fleet UX [COMPLETE]
 
 - Keyboard navigation and screen-reader review.
 - Responsive/mobile fleet management.

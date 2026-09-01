@@ -105,6 +105,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/groups", s.withSession(s.handleCreateGroup, true))
 	s.mux.HandleFunc("GET /api/sites", s.withSession(s.handleSites, false))
 	s.mux.HandleFunc("POST /api/sites", s.withSession(s.handleCreateSite, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/tags", s.withSession(s.handleSiteTags, false))
+	s.mux.HandleFunc("PUT /api/sites/{id}/tags", s.withSession(s.handleSiteTagsUpdate, true))
 	s.mux.HandleFunc("GET /api/sites/{id}", s.withSession(s.handleSite, false))
 	s.mux.HandleFunc("PUT /api/sites/{id}", s.withSession(s.handleUpdateSite, true))
 	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
@@ -868,6 +870,35 @@ func pathSiteID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+func (s *Server) handleSiteTags(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	x, e := s.sites.Tags(id)
+	if e != nil {
+		writeError(w, 500, "tags unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tags": x})
+}
+func (s *Server) handleSiteTagsUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Tags []string `json:"tags"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if e := s.sites.SetTags(id, in.Tags); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)

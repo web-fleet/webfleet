@@ -212,3 +212,83 @@ func ParseID(raw string) (int64, error) {
 	}
 	return id, nil
 }
+
+func (s *Service) Tags(siteID int64) ([]string, error) {
+	r, e := sqlite.Query(s.store.DB, `SELECT tag FROM site_tags WHERE site_id=? ORDER BY lower(tag)`, siteID)
+	if e != nil {
+		return nil, e
+	}
+	out := []string{}
+	for _, x := range r {
+		out = append(out, x["tag"].Text)
+	}
+	return out, nil
+}
+func (s *Service) SetTags(siteID int64, tags []string) error {
+	if e := sqlite.Exec(s.store.DB, `DELETE FROM site_tags WHERE site_id=?`, siteID); e != nil {
+		return e
+	}
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" || seen[tag] {
+			continue
+		}
+		if len(tag) > 40 {
+			return errors.New("tag too long")
+		}
+		seen[tag] = true
+		if e := sqlite.Exec(s.store.DB, `INSERT INTO site_tags(site_id,tag) VALUES(?,?)`, siteID, tag); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+func (s *Service) ListByTag(q string, groupID int64, tag string, page, pageSize int) (List, error) {
+	if strings.TrimSpace(tag) == "" {
+		return s.List(q, groupID, page, pageSize, false)
+	}
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	where := ` WHERE s.archived_at IS NULL AND EXISTS(SELECT 1 FROM site_tags st WHERE st.site_id=s.id AND st.tag=?)`
+	args := []any{tag}
+	if strings.TrimSpace(q) != "" {
+		where += ` AND (lower(s.name) LIKE ? OR lower(s.primary_url) LIKE ?)`
+		term := "%" + strings.ToLower(strings.TrimSpace(q)) + "%"
+		args = append(args, term, term)
+	}
+	if groupID > 0 {
+		where += ` AND s.group_id=?`
+		args = append(args, groupID)
+	}
+	cr, e := sqlite.Query(s.store.DB, `SELECT COUNT(*) n FROM sites s`+where, args...)
+	if e != nil {
+		return List{}, e
+	}
+	total := int(cr[0]["n"].Int64)
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	pages := (total + pageSize - 1) / pageSize
+	if pages < 1 {
+		pages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, e := sqlite.Query(s.store.DB, `SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id`+where+` ORDER BY lower(s.name) LIMIT ? OFFSET ?`, args...)
+	if e != nil {
+		return List{}, e
+	}
+	out := List{Sites: make([]Site, 0, len(rows)), Page: page, PageSize: pageSize, Total: total, Pages: pages}
+	for _, r := range rows {
+		out.Sites = append(out.Sites, rowSite(r))
+	}
+	return out, nil
+}
