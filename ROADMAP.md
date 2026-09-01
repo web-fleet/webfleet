@@ -347,7 +347,7 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Release provenance/checksums.
 - Documentation/public website audit against actual shipped behaviour.
 
-**Campaign 1 (in progress):** project-truth correction and the identity/RBAC foundation. CP30 confirmed that RBAC was decorative (only four handlers consulted it), the fresh-install first administrator had no organization membership, organization ids were hard-coded in user-facing queries, and the first-admin setup path was not race-atomic. The route/permission inventory lives in `docs/hardening/route-inventory.json` and is enforced by a route-table contract test.
+**Campaign 1 (complete):** project-truth correction and the identity/RBAC foundation. CP30 confirmed that RBAC was decorative (only four handlers consulted it), the fresh-install first administrator had no organization membership, organization ids were hard-coded in user-facing queries, and the first-admin setup path was not race-atomic. Campaign 1 repaired all of these: first-admin user + owner membership are now created atomically with a concurrency guard; route-level RBAC is enforced from one route table; site/group/list/fleet and audit-batch data paths filter by the acting organization resolved from membership; and the first-run restart-required state survives reload. The route/permission inventory lives in `docs/hardening/route-inventory.json`, is enforced by a route-inventory contract test that runs in isolation, and records the policy decision that operators may archive sites but only admin/owner may permanently delete them. CP30 remains blocked on Campaigns 2-8.
 
 ### CP31 - Stable public preview [BLOCKED ON CP30]
 

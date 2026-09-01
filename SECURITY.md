@@ -34,13 +34,18 @@ Do not waive a failed gate because the feature worked in the implementation envi
 
 ## Current enforcement status (CP30 audit, Campaign 1)
 
-The boundaries below were implemented in earlier checkpoints but were not yet enforced or wired when CP30 began. Each is a live obligation; the route/permission inventory in `docs/hardening/route-inventory.json` and the roadmap track their repair.
+The boundaries below were implemented in earlier checkpoints but were not yet enforced or wired when CP30 began. Repaired items are marked `[repaired in CP30 Campaign 1]`; the route/permission inventory in `docs/hardening/route-inventory.json` and the roadmap track the rest.
 
-- RBAC role checks were consulted by only four handlers; most authenticated routes were session-only. Authorization is being enforced per route from the inventory, with viewer/operator/admin/owner boundaries proven by server-level tests.
-- The fresh-install first administrator had no organization membership. First-admin user creation and owner membership are now a single atomic transaction with a race guard.
-- Organization ids were hard-coded as `1` in user-facing queries. Site/group/list/fleet queries now filter by the acting organization derived from the session membership.
-- API tokens were hashed at rest but no HTTP route accepted them; no endpoint rate limiting existed.
-- Webhook delivery was never invoked by product events (`notifications.Deliver` had no callers).
+- RBAC role checks were consulted by only four handlers; most authenticated routes were session-only. `[repaired]` Every authenticated route now declares a permission and CSRF posture in one route table and is enforced by the central `authorize` guard, with viewer/operator/admin/owner boundaries proven by server-level adversarial tests. No route is owner-only; the owner-only `organization.delete` action is deliberately not exposed over HTTP.
+- The fresh-install first administrator had no organization membership. `[repaired]` First-admin user creation and owner membership are now a single atomic transaction with a concurrency guard.
+- Organization ids were hard-coded as `1` in user-facing queries. `[repaired]` Site/group/list/fleet and audit-batch queries now filter by the acting organization resolved from the session membership; site-scoped handlers reject cross-organization access.
+- API tokens were hashed at rest but no HTTP route accepted them; no endpoint rate limiting existed. (CP30 Campaign 4 obligation.)
+- Webhook delivery was never invoked by product events (`notifications.Deliver` had no callers). (CP30 Campaign 4 obligation.)
 - Audit launched Chromium with `--no-sandbox` without the public-network guard (CP30 Campaign 2 blocker).
 - Cookie `Secure` and OIDC redirect schemes derived from `r.TLS`, so TLS-terminating reverse proxies produced non-secure cookies and `http` redirect URIs (CP30 Campaign 3 blocker).
 - `webfleet backup`/`restore` always addressed the SQLite path regardless of the configured provider (CP30 Campaign 5/6 blocker).
+
+## Role policy decisions (CP30 Campaign 1)
+
+- **Operators may archive sites but may not permanently delete them.** `site.archive` is reversible and available to operators; `site.delete` is admin/owner only because permanent deletion cascades through check history, analytics, audit and deployments. This is enforced by `rbac.Can` and covered by the rbac matrix and server-level denial/allowance tests.
+- **Admin and owner share the shipped API surface.** The only owner-only action, `organization.delete`, is reserved and not routed. The admin/owner distinction is proven at the `rbac` matrix boundary rather than inventing an endpoint solely for the test.
