@@ -18,7 +18,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 13
+const schemaVersion = 14
 
 type migration struct {
 	version int
@@ -100,6 +100,10 @@ var migrations = []migration{
 		`CREATE TABLE analytics_properties(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL UNIQUE REFERENCES sites(id) ON DELETE CASCADE, public_key TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, allowed_origin TEXT NOT NULL, created_at TEXT NOT NULL);`,
 		`CREATE TABLE analytics_events(id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES analytics_properties(id) ON DELETE CASCADE, kind TEXT NOT NULL, path TEXT NOT NULL DEFAULT '/', referrer TEXT NOT NULL DEFAULT '', visitor_key TEXT NOT NULL DEFAULT '', user_agent_class TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL DEFAULT '{}', occurred_at TEXT NOT NULL);`,
 		`CREATE INDEX analytics_events_property_time_idx ON analytics_events(property_id,occurred_at DESC);`,
+	}},
+	{14, "analytics rollups", []string{
+		`CREATE TABLE analytics_daily(property_id INTEGER NOT NULL REFERENCES analytics_properties(id) ON DELETE CASCADE, day TEXT NOT NULL, pageviews INTEGER NOT NULL DEFAULT 0, visitors INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(property_id,day));`,
+		`CREATE TABLE analytics_daily_visitors(property_id INTEGER NOT NULL REFERENCES analytics_properties(id) ON DELETE CASCADE, day TEXT NOT NULL, visitor_key TEXT NOT NULL, PRIMARY KEY(property_id,day,visitor_key));`,
 	}},
 }
 

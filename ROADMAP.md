@@ -168,7 +168,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - No-cookie default.
 - Privacy review of every collected field.
 
-### CP14 - Analytics storage and rollups
+### CP14 - Analytics storage and rollups [COMPLETE]
 
 - Raw-event retention policy.
 - Privacy-preserving visitor estimation.

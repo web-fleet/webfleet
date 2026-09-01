@@ -94,7 +94,22 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	h := sha256.Sum256([]byte(day + "|" + s.salt + "|" + ip + "|" + ua))
 	visitor := hex.EncodeToString(h[:12])
 	class := clientClass(ua)
-	return sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, x["id"].Int64, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, store.Now())
+	if class == "bot" {
+		return nil
+	}
+	pid := x["id"].Int64
+	if e := sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, pid, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, store.Now()); e != nil {
+		return e
+	}
+	if ev.Kind == "pageview" {
+		_ = sqlite.Exec(s.st.DB, `INSERT INTO analytics_daily(property_id,day,pageviews,visitors) VALUES(?,?,1,0) ON CONFLICT(property_id,day) DO UPDATE SET pageviews=pageviews+1`, pid, day)
+		before, _ := sqlite.Query(s.st.DB, `SELECT 1 FROM analytics_daily_visitors WHERE property_id=? AND day=? AND visitor_key=?`, pid, day, visitor)
+		if len(before) == 0 {
+			_ = sqlite.Exec(s.st.DB, `INSERT INTO analytics_daily_visitors(property_id,day,visitor_key) VALUES(?,?,?)`, pid, day, visitor)
+			_ = sqlite.Exec(s.st.DB, `UPDATE analytics_daily SET visitors=visitors+1 WHERE property_id=? AND day=?`, pid, day)
+		}
+	}
+	return nil
 }
 func clientClass(ua string) string {
 	l := strings.ToLower(ua)
@@ -106,6 +121,53 @@ func clientClass(ua string) string {
 	default:
 		return "desktop"
 	}
+}
+
+type Daily struct {
+	Day       string `json:"day"`
+	Pageviews int64  `json:"pageviews"`
+	Visitors  int64  `json:"visitors"`
+}
+type Summary struct {
+	Pageviews  int64            `json:"pageviews"`
+	Visitors   int64            `json:"visitors"`
+	Daily      []Daily          `json:"daily"`
+	TopPages   []map[string]any `json:"top_pages"`
+	TopSources []map[string]any `json:"top_sources"`
+}
+
+func (s *Service) Summary(siteID int64, days int) (Summary, error) {
+	if days < 1 {
+		days = 7
+	}
+	if days > 365 {
+		days = 365
+	}
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return Summary{}, e
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	rows, e := sqlite.Query(s.st.DB, `SELECT day,pageviews,visitors FROM analytics_daily WHERE property_id=? AND day>=? ORDER BY day`, p.ID, since)
+	if e != nil {
+		return Summary{}, e
+	}
+	out := Summary{Daily: []Daily{}, TopPages: []map[string]any{}, TopSources: []map[string]any{}}
+	for _, r := range rows {
+		d := Daily{r["day"].Text, r["pageviews"].Int64, r["visitors"].Int64}
+		out.Daily = append(out.Daily, d)
+		out.Pageviews += d.Pageviews
+		out.Visitors += d.Visitors
+	}
+	pages, _ := sqlite.Query(s.st.DB, `SELECT path,COUNT(*) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? GROUP BY path ORDER BY n DESC LIMIT 10`, p.ID, since)
+	for _, r := range pages {
+		out.TopPages = append(out.TopPages, map[string]any{"path": r["path"].Text, "count": r["n"].Int64})
+	}
+	src, _ := sqlite.Query(s.st.DB, `SELECT referrer,COUNT(*) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND referrer<>'' GROUP BY referrer ORDER BY n DESC LIMIT 10`, p.ID, since)
+	for _, r := range src {
+		out.TopSources = append(out.TopSources, map[string]any{"source": r["referrer"].Text, "count": r["n"].Int64})
+	}
+	return out, nil
 }
 
 const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const e={key:k,kind:"pageview",path:location.pathname,referrer:document.referrer,payload:"{}"};try{navigator.sendBeacon(s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),new Blob([JSON.stringify(e)],{type:"application/json"}))}catch(_){}})();`
