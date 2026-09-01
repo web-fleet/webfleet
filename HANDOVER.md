@@ -234,8 +234,7 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP18 and CP20 are complete in development.
-- CP19 PostgreSQL is **unfinished**: the storage path exists, but the Trestle-style first-run SQLite/PostgreSQL selection UX and real PostgreSQL integration/parity gate remain outstanding. Do not mark CP19 complete merely because later checkpoints proceed.
+- CP1-CP20 are complete in development. CP19 now includes the Trestle-style first-run SQLite/PostgreSQL selection UX; live PostgreSQL parity testing remains a CP30 battle-hardening gate.
 - The companion `web-fleet.github.io` source/generated workspace documents the current development state.
 - The next implementation checkpoint is CP21 in `ROADMAP.md`.
 

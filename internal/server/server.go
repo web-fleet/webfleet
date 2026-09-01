@@ -17,6 +17,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
+	"github.com/web-fleet/webfleet/internal/databasesetup"
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
@@ -60,6 +61,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /wf.js", s.handleTracker)
 	s.mux.HandleFunc("POST /api/analytics/event", s.handleAnalyticsEvent)
 	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
+	s.mux.HandleFunc("GET /api/setup/database", s.handleDatabaseSetupStatus)
+	s.mux.HandleFunc("POST /api/setup/database", s.handleDatabaseSetup)
 	s.mux.HandleFunc("POST /api/setup", s.handleSetup)
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
@@ -301,6 +304,8 @@ func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, 200, map[string]any{"results": s.audit.RunBatch(r.Context(), in.SiteIDs)})
 }
 
+func(s *Server)handleDatabaseSetupStatus(w http.ResponseWriter,r *http.Request){x,e:=databasesetup.StateFor(s.store,s.cfg.DataDir);if e!=nil{writeError(w,500,"database setup unavailable");return};writeJSON(w,200,x)}
+func(s *Server)handleDatabaseSetup(w http.ResponseWriter,r *http.Request){var in struct{Provider string `json:"provider"`;URL string `json:"url"`};if !decodeJSON(w,r,&in){return};x,e:=databasesetup.Apply(r.Context(),s.store,s.cfg.DataDir,in.Provider,in.URL);if e!=nil{writeError(w,400,e.Error());return};writeJSON(w,200,x)}
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	need, err := s.auth.NeedsSetup()
 	if err != nil {

@@ -18,6 +18,7 @@
   ],
   "reqs": [
     "public/assets/css/style.css",
+    "public/assets/js/database-setup-state.js",
     "public/assets/js/script.js"
   ]
 }

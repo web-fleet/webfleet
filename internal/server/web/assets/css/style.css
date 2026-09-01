@@ -6,3 +6,7 @@
 @media(max-width:900px){.fleet-columns{grid-template-columns:1fr}.crawl-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.crawl-summary>div:nth-child(2){border-right:0}.crawl-summary>div:nth-child(-n+2){border-bottom:1px solid var(--border)}}
 
 .inline-toggle{display:inline-flex;align-items:center;gap:.45rem;font-size:.8rem;color:var(--muted)}.inline-toggle input{width:auto}.section-head>div{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap}
+
+.database-choice{border:1px solid var(--line);padding:1rem;margin:1rem 0}.database-choice label{display:flex;gap:.7rem;padding:.7rem 0}.database-choice small{display:block;color:var(--muted);margin-top:.2rem}.database-choice input{width:auto}.restart-notice{border:2px solid var(--accent);padding:1rem;margin-top:1rem}.restart-notice strong,.restart-notice span{display:block}.restart-notice span{margin-top:.45rem;color:var(--muted)}
+#postgres-apply:disabled,#postgres-apply:disabled:hover,#postgres-apply:disabled:focus{opacity:.38;cursor:not-allowed;background:var(--surface-2);border-color:var(--line);color:var(--muted);transform:none}
+#postgres-apply:not(:disabled):hover{opacity:1}

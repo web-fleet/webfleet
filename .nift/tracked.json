@@ -16,6 +16,12 @@
       "title": "script",
       "content-ext": ".js",
       "output-ext": ".js"
+    },
+    {
+      "name": "assets/js/database-setup-state",
+      "title": "database setup state",
+      "content-ext": ".js",
+      "output-ext": ".js"
     }
   ]
 }

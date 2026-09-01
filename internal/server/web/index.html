@@ -6,12 +6,19 @@
 		<meta name="color-scheme" content="dark">
 		<title>Web Fleet</title>
 		<link rel="stylesheet" href="assets/css/style.css">
+		<script src="assets/js/database-setup-state.js"></script>
 		<script defer src="assets/js/script.js"></script>
 	</head>
 	<body>
 <div id="app">
   <main class="auth-stage" id="auth-stage">
-    <section class="auth-panel"><div class="brand-mark">WF</div><span class="eyebrow">WEB FLEET</span><h1 id="auth-title">Loading…</h1><p id="auth-copy">Checking local installation state.</p><form id="auth-form" hidden><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label><button type="submit" id="auth-submit">Continue</button><p class="form-error" id="auth-error" role="alert"></p></form></section>
+    <section class="auth-panel"><div class="brand-mark">WF</div><span class="eyebrow">WEB FLEET</span><h1 id="auth-title">Loading…</h1><p id="auth-copy">Checking local installation state.</p>
+<div id="database-setup" hidden>
+  <fieldset class="database-choice"><legend>Database</legend><label><input type="radio" name="database" value="sqlite" checked> <span><strong>SQLite</strong><small>Simplest self-hosted setup. No database server required.</small></span></label><label><input type="radio" name="database" value="postgres"> <span><strong>PostgreSQL</strong><small>Use an existing PostgreSQL database.</small></span></label></fieldset>
+  <div id="postgres-setup" hidden><label>PostgreSQL URL<input id="postgres-url" type="password" autocomplete="off" placeholder="postgres://webfleet:password@db:5432/webfleet"></label><button id="postgres-apply" type="button" disabled>Test and use PostgreSQL</button></div>
+  <div id="database-result" class="restart-notice" hidden></div>
+</div>
+<form id="auth-form" hidden><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label><button type="submit" id="auth-submit">Continue</button><p class="form-error" id="auth-error" role="alert"></p></form></section>
   </main>
   <div id="dashboard" class="dashboard" hidden>
     <aside class="rail">

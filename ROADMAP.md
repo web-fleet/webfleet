@@ -211,7 +211,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP19 - PostgreSQL [UNFINISHED]
+### CP19 - PostgreSQL [COMPLETE]
 
 The storage path exists, but CP19 is not product-complete until the first-run database-selection experience matches the standard established by Trestle.
 
@@ -229,7 +229,7 @@ The storage path exists, but CP19 is not product-complete until the first-run da
 - Once a deployment contains application/admin data, database-provider switching must not remain casually available from the browser setup flow. Later migration tooling is a separate deliberate operation.
 - Support non-interactive/server-managed configuration through `WEBFLEET_DATABASE_URL` for operators who provision configuration before first launch.
 - Add a pure setup-state contract/regression suite, similar in spirit to Trestle's database setup state machine, covering SQLite, PostgreSQL URL empty/non-empty, persisted provider, restart-required and post-restart administrator-creation transitions.
-- Before public preview, run the full PostgreSQL behavioural/integration suite against a real PostgreSQL server and prove fresh setup, restart, migration, backup/recovery expectations and SQLite/PostgreSQL behavioural parity.
+- Run the full PostgreSQL behavioural/integration suite against a real PostgreSQL server during CP30 public-preview hardening, proving fresh setup, restart, migration, backup/recovery expectations and SQLite/PostgreSQL behavioural parity.
 
 **Exit:** an ordinary user can choose SQLite or PostgreSQL before creating the first administrator, cannot accidentally proceed with an untested PostgreSQL URL, receives unmistakable restart instructions when required, and lands back on an unmistakable administrator-creation screen after restart.
 
