@@ -28,6 +28,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/oidc"
 	"github.com/web-fleet/webfleet/internal/performance"
 	"github.com/web-fleet/webfleet/internal/rbac"
+	"github.com/web-fleet/webfleet/internal/requestmeta"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
@@ -156,10 +157,13 @@ type Server struct {
 	log           *slog.Logger
 	http          *http.Server
 	mux           *http.ServeMux
+	proxy         requestmeta.Config
+	loginLim      *rateLimiter
+	setupLim      *rateLimiter
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000)}
 	s.oidc = oidc.New(st, s.auth)
 	s.notifications = notifications.New(st)
 	s.routes()
@@ -482,11 +486,7 @@ func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request, _ p
 	writeJSON(w, 200, x)
 }
 func (s *Server) oidcRedirect(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host + "/api/oidc/callback"
+	return s.proxy.Scheme(r) + "://" + r.Host + "/api/oidc/callback"
 }
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ principal) {
 	u, e := s.oidc.Begin(r.Context(), s.oidcRedirect(r))
@@ -497,12 +497,16 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ princ
 	http.Redirect(w, r, u, http.StatusFound)
 }
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, _ principal) {
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		writeError(w, 401, "OIDC authorization failed")
+		return
+	}
 	tok, _, e := s.oidc.Callback(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), s.oidcRedirect(r))
 	if e != nil {
 		writeError(w, 401, e.Error())
 		return
 	}
-	setSessionCookie(w, r, tok)
+	s.setSessionCookie(w, r, tok)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, p principal) {
@@ -533,6 +537,10 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request, _ pri
 	writeJSON(w, 200, map[string]any{"needs_setup": need, "min_password_length": auth.MinPasswordLength})
 }
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, _ principal) {
+	if !s.setupLim.Allow("setup:" + s.proxy.ClientIP(r)) {
+		writeError(w, 429, "too many setup attempts, try again later")
+		return
+	}
 	var in struct{ Email, Password string }
 	if !decodeJSON(w, r, &in) {
 		return
@@ -546,10 +554,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, _ principal
 		writeError(w, 500, "admin created but login failed")
 		return
 	}
-	setSessionCookie(w, r, token)
+	s.setSessionCookie(w, r, token)
 	writeJSON(w, 201, map[string]any{"email": sess.Email, "csrf": sess.CSRF})
 }
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, _ principal) {
+	if !s.loginLim.Allow("login:" + s.proxy.ClientIP(r)) {
+		writeError(w, 429, "too many login attempts, try again later")
+		return
+	}
 	var in struct{ Email, Password string }
 	if !decodeJSON(w, r, &in) {
 		return
@@ -559,7 +571,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, _ principal
 		writeError(w, 401, "invalid credentials")
 		return
 	}
-	setSessionCookie(w, r, token)
+	s.setSessionCookie(w, r, token)
 	writeJSON(w, 200, map[string]any{"email": sess.Email, "csrf": sess.CSRF})
 }
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, p principal) {
@@ -567,7 +579,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, p principa
 	if c != nil {
 		s.auth.Logout(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.proxy.Secure(r), MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, p principal) {
@@ -1129,8 +1141,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, p princip
 	writeJSON(w, 200, map[string]any{"email": p.Email, "csrf": p.CSRF, "role": p.Role, "org_id": p.OrgID})
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Value: token, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Value: token, Path: "/", HttpOnly: true, Secure: s.proxy.Secure(r), SameSite: http.SameSiteStrictMode, MaxAge: 86400})
 }
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)

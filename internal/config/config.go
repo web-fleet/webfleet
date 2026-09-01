@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,7 @@ type Config struct {
 	CrawlInterval    time.Duration
 	CheckConcurrency int
 	AuditSandbox     string
+	TrustedProxies   []netip.Prefix
 }
 
 func Load() (Config, error) {
@@ -58,6 +60,13 @@ func Load() (Config, error) {
 		}
 		c.AuditSandbox = v
 	}
+	if v := os.Getenv("WEBFLEET_TRUSTED_PROXIES"); v != "" {
+		prefixes, err := ParsePrefixList(v)
+		if err != nil {
+			return c, fmt.Errorf("WEBFLEET_TRUSTED_PROXIES: %w", err)
+		}
+		c.TrustedProxies = prefixes
+	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {
 		c.DataDir = abs
@@ -73,6 +82,32 @@ func Load() (Config, error) {
 type DatabaseChoice struct {
 	Provider string `json:"provider"`
 	URL      string `json:"url,omitempty"`
+}
+
+// ParsePrefixList parses a comma-separated list of IP addresses or CIDR
+// prefixes. A bare IP becomes a host prefix (/32 for IPv4, /128 for IPv6).
+func ParsePrefixList(raw string) ([]netip.Prefix, error) {
+	out := []netip.Prefix{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			pfx, err := netip.ParsePrefix(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid prefix %q", part)
+			}
+			out = append(out, pfx.Masked())
+			continue
+		}
+		ip, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address %q", part)
+		}
+		out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
+	}
+	return out, nil
 }
 
 func DatabaseChoicePath(dataDir string) string { return filepath.Join(dataDir, "database.json") }
