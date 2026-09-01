@@ -13,12 +13,15 @@
 <div id="app">
   <main class="auth-stage" id="auth-stage">
     <section class="auth-panel"><div class="brand-mark">WF</div><span class="eyebrow">WEB FLEET</span><h1 id="auth-title">Loading…</h1><p id="auth-copy">Checking local installation state.</p>
-<div id="database-setup" hidden>
-  <fieldset class="database-choice"><legend>Database</legend><label><input type="radio" name="database" value="sqlite" checked> <span><strong>SQLite</strong><small>Simplest self-hosted setup. No database server required.</small></span></label><label><input type="radio" name="database" value="postgres"> <span><strong>PostgreSQL</strong><small>Use an existing PostgreSQL database.</small></span></label></fieldset>
-  <div id="postgres-setup" hidden><label>PostgreSQL URL<input id="postgres-url" type="password" autocomplete="off" placeholder="postgres://webfleet:password@db:5432/webfleet"></label><button id="postgres-apply" type="button" disabled>Test and use PostgreSQL</button></div>
-  <div id="database-result" class="restart-notice" hidden></div>
-</div>
-<form id="auth-form" hidden><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label><button type="submit" id="auth-submit">Continue</button><p class="form-error" id="auth-error" role="alert"></p></form></section>
+    <div id="boot-error" class="boot-error" hidden><button type="button" class="secondary" id="boot-retry">Retry</button></div>
+    <div id="database-stage" hidden>
+      <fieldset class="database-choice"><legend>Choose your database</legend><label class="db-option"><input type="radio" name="database" value="sqlite" checked> <span><strong>SQLite</strong><small>Simplest self-hosted setup. No database server required.</small></span></label><label class="db-option"><input type="radio" name="database" value="postgres"> <span><strong>PostgreSQL</strong><small>Use an existing PostgreSQL database.</small></span></label></fieldset>
+      <div id="postgres-setup" hidden><label>PostgreSQL URL<input id="postgres-url" type="password" autocomplete="off" placeholder="postgres://webfleet:password@db:5432/webfleet"></label></div>
+      <div class="db-actions"><button type="button" id="db-action">Continue</button></div>
+      <p class="form-error" id="db-error" role="alert"></p>
+    </div>
+    <div id="restart-stage" class="restart-notice" hidden><strong>Restart required</strong><span>PostgreSQL is configured. Restart Web Fleet, then reload this page to create the administrator account.</span><button type="button" class="secondary" id="db-reload">Reload</button></div>
+    <form id="auth-form" hidden><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Password<input id="password" type="password" autocomplete="current-password" minlength="7" required></label><button type="submit" id="auth-submit">Continue</button><p class="form-error" id="auth-error" role="alert"></p></form></section>
   </main>
   <div id="dashboard" class="dashboard" hidden>
     <button id="mobile-nav" class="mobile-nav" aria-expanded="false" aria-controls="primary-rail">Menu</button><aside class="rail" id="primary-rail">

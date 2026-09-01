@@ -57,12 +57,13 @@ func a11yContext(t *testing.T) context.Context {
 
 func a11yServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	st, e := store.Open(t.TempDir())
+	dir := t.TempDir()
+	st, e := store.Open(dir)
 	if e != nil {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	s := New(config.Config{}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := New(config.Config{DataDir: dir}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv
@@ -158,6 +159,8 @@ func TestA11yFormErrorAnnounced(t *testing.T) {
 	srv := a11yServer(t)
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(srv.URL),
+		chromedp.WaitVisible(`#database-stage`),
+		chromedp.Click(`#db-action`),
 		chromedp.WaitVisible(`#auth-form`),
 		chromedp.Evaluate(`document.getElementById('email').removeAttribute('required');document.getElementById('password').removeAttribute('required');document.getElementById('password').removeAttribute('minlength');true`, nil),
 		chromedp.SetValue(`#email`, "admin@example.com"),
@@ -656,16 +659,20 @@ func TestA11yBrowserAuthFlow(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Navigate(srv.URL)); err != nil {
 		t.Fatal(err)
 	}
-	// Fresh instance: the auth form appears in setup mode.
-	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#auth-form`)); err != nil {
+	// Fresh instance: the two-stage flow shows the database stage first, then
+	// the administrator stage after the SQLite decision is committed.
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
 		t.Fatal(err)
 	}
-	var mode string
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-form').dataset.mode`, &mode)); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "setup" {
-		t.Fatalf("fresh instance auth form mode = %q (want setup)", mode)
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
+		var dberr, dbHidden, actionLabel string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(document.getElementById('db-error')||{}).textContent||''`, &dberr))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('database-stage').hidden`, &dbHidden))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('db-action').textContent`, &actionLabel))
+		t.Fatalf("fresh instance did not reach the administrator form in setup mode (db-error=%q dbHidden=%v action=%q)", dberr, dbHidden, actionLabel)
 	}
 	// Complete first-admin setup through the browser.
 	if err := chromedp.Run(ctx,
@@ -681,17 +688,14 @@ func TestA11yBrowserAuthFlow(t *testing.T) {
 		t.Fatal("auth stage still visible after successful setup")
 	}
 	// Log out via the browser control; the login form appears.
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('logout').click()`, nil)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){document.getElementById('logout').click();return true})()`, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === false`) {
 		t.Fatal("auth stage did not reappear after logout")
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-form').dataset.mode`, &mode)); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "login" {
-		t.Fatalf("post-logout auth form mode = %q (want login)", mode)
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'login' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("post-logout auth form did not reach login mode")
 	}
 	// Log back in through the browser login form.
 	if err := chromedp.Run(ctx,
