@@ -17,7 +17,7 @@ webfleet
 
 CP24 also exposes optional `webfleet serve`, `webfleet worker`, and `webfleet analytics-ingest` process roles. These are operational separation points, not mandatory microservices.
 
-**CP30 correction:** the optional roles exist, but the scheduler has no claim/lease mechanism, so running two worker processes would both schedule the full fleet and duplicate checks, crawls and incidents. "PostgreSQL-backed coordination" is not yet implemented; it is a CP30 obligation and must be proven (or replaced with single-owner scheduling) before split-worker operation is claimed. `SCALE.md` previously implied PostgreSQL was the multi-process coordination path; that claim was ahead of the implementation.
+**CP30 status:** the optional roles exist and the scheduler now uses a database-backed claim/lease (`job_leases`, migration 26) so two worker-capable processes cannot perform the same due work merely because they observe the same rows. Leases carry a unique owner identity and expire, so a crashed worker's work is reclaimed without stranding it, and lease semantics are equivalent on SQLite and PostgreSQL. "PostgreSQL-backed coordination" is therefore implemented as an atomic per-site lease; the campaign must still measure single-owner scheduling and duplicate-execution behaviour at 100/1,000/10,000 sites.
 
 ## Evidence threshold
 
