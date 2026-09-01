@@ -840,7 +840,13 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, sess auth.S
 	group, _ := strconv.ParseInt(q.Get("group"), 10, 64)
 	page, _ := strconv.Atoi(q.Get("page"))
 	size, _ := strconv.Atoi(q.Get("page_size"))
-	out, err := s.sites.List(q.Get("q"), group, page, size, q.Get("archived") == "1")
+	var out sites.List
+	var err error
+	if tag := q.Get("tag"); tag != "" && q.Get("archived") != "1" {
+		out, err = s.sites.ListByTag(q.Get("q"), group, tag, page, size)
+	} else {
+		out, err = s.sites.List(q.Get("q"), group, page, size, q.Get("archived") == "1")
+	}
 	if err != nil {
 		writeError(w, 500, "sites unavailable")
 		return
