@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/web-fleet/webfleet/internal/sqlite"
 )
 
 func TestFreshOpenRestartAndPragmas(t *testing.T) {
@@ -191,5 +194,84 @@ func TestPostgresMigrationSQL(t *testing.T) {
 		if !strings.Contains(q, want) {
 			t.Fatalf("missing %s in %s", want, q)
 		}
+	}
+}
+
+func TestLeaseAcquireExcludesOtherOwners(t *testing.T) {
+	st, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); e != nil || !ok {
+		t.Fatalf("first acquire: ok=%v err=%v", ok, e)
+	}
+	// A second worker cannot claim the same unit while the lease is unexpired.
+	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || ok {
+		t.Fatalf("second worker acquired: ok=%v err=%v", ok, e)
+	}
+	// The same owner renews.
+	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); e != nil || !ok {
+		t.Fatalf("owner renewal: ok=%v err=%v", ok, e)
+	}
+	// A different resource is independent.
+	if ok, e := st.AcquireLease(ctx, "check", 2, "worker-b", time.Minute); e != nil || !ok {
+		t.Fatalf("independent resource: ok=%v err=%v", ok, e)
+	}
+}
+
+func TestLeaseExpiryAllowsTakeover(t *testing.T) {
+	st, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", 30*time.Millisecond); !ok {
+		t.Fatal("initial acquire failed")
+	}
+	time.Sleep(60 * time.Millisecond)
+	// A crashed worker's lease expires; another worker can claim the work.
+	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || !ok {
+		t.Fatalf("takeover after expiry: ok=%v err=%v", ok, e)
+	}
+}
+
+func TestLeaseRelease(t *testing.T) {
+	st, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", time.Minute); !ok {
+		t.Fatal("acquire failed")
+	}
+	if e := st.ReleaseLease(ctx, "check", 1, "worker-a"); e != nil {
+		t.Fatal(e)
+	}
+	if ok, e := st.AcquireLease(ctx, "check", 1, "worker-b", time.Minute); e != nil || !ok {
+		t.Fatalf("acquire after release: ok=%v err=%v", ok, e)
+	}
+}
+
+func TestExpireLeasesCleanup(t *testing.T) {
+	st, e := Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if ok, _ := st.AcquireLease(ctx, "check", 1, "worker-a", 30*time.Millisecond); !ok {
+		t.Fatal("acquire failed")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if e := st.ExpireLeases(ctx); e != nil {
+		t.Fatal(e)
+	}
+	rows, e := sqlite.Query(st.DB, `SELECT COUNT(*) n FROM job_leases`)
+	if e != nil || rows[0]["n"].Int64 != 0 {
+		t.Fatalf("expired leases not cleaned: %v %v", rows, e)
 	}
 }

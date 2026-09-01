@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 25
+const schemaVersion = 26
 
 type migration struct {
 	version int
@@ -148,6 +148,9 @@ var migrations = []migration{
 	{25, "oidc browser binding", []string{
 		`ALTER TABLE oidc_states ADD COLUMN browser TEXT NOT NULL DEFAULT '';`,
 	}},
+	{26, "scheduler job leases", []string{
+		`CREATE TABLE job_leases(lease_kind TEXT NOT NULL, resource_id INTEGER NOT NULL, owner TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(lease_kind, resource_id));`,
+	}},
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -268,6 +271,37 @@ func (s *Store) initializePostgres(ctx context.Context) error {
 	return nil
 }
 func (s *Store) Dialect() string { return s.DB.DialectName() }
+
+// AcquireLease atomically claims a unit of work for one owner. A lease is
+// granted only if it is unheld or held by the same owner (renewal) or its
+// expiry has passed, so two workers can never hold the same lease at once and
+// a crashed worker's lease expires without stranding the work. The upsert is
+// atomic on both SQLite (single owned connection) and PostgreSQL.
+func (s *Store) AcquireLease(ctx context.Context, kind string, resourceID int64, owner string, ttl time.Duration) (bool, error) {
+	now := time.Now().UTC()
+	res, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(lease_kind,resource_id,owner,expires_at,created_at) VALUES(?,?,?,?,?) ON CONFLICT(lease_kind,resource_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,created_at=excluded.created_at WHERE job_leases.owner=excluded.owner OR job_leases.expires_at<?`, kind, resourceID, owner, now.Add(ttl).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// ReleaseLease drops a lease held by a specific owner.
+func (s *Store) ReleaseLease(ctx context.Context, kind string, resourceID int64, owner string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE lease_kind=? AND resource_id=? AND owner=?`, kind, resourceID, owner)
+	return err
+}
+
+// ExpireLeases removes expired lease rows opportunistically.
+func (s *Store) ExpireLeases(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE expires_at<?`, now)
+	return err
+}
 
 // PrimaryOrgID returns the deployment's bootstrap organization created by
 // migration 1. Identity bootstrap (first administrator, OIDC auto-provision)

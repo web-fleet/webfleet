@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"log/slog"
 	"math/rand"
@@ -31,6 +33,9 @@ type Scheduler struct {
 	log           *slog.Logger
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	owner         string
+	checkLeaseTTL  time.Duration
+	crawlLeaseTTL  time.Duration
 }
 
 func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, dnsSvc *dnsobs.Service, crawlSvc *crawler.Service, interval, crawlInterval time.Duration, concurrency int, log *slog.Logger) *Scheduler {
@@ -43,7 +48,7 @@ func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, dnsSvc *dnsobs.S
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &Scheduler{store: st, checker: c, tls: tlsSvc, dns: dnsSvc, crawler: crawlSvc, interval: interval, crawlInterval: crawlInterval, concurrency: concurrency, log: log}
+	return &Scheduler{store: st, checker: c, tls: tlsSvc, dns: dnsSvc, crawler: crawlSvc, interval: interval, crawlInterval: crawlInterval, concurrency: concurrency, log: log, owner: newOwnerID(), checkLeaseTTL: 5 * time.Minute, crawlLeaseTTL: time.Hour}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -88,12 +93,26 @@ func (s *Scheduler) siteIDs() ([]int64, error) {
 }
 
 func (s *Scheduler) RunOnce(ctx context.Context) {
+	// Opportunistically drop expired leases so the table does not grow without
+	// bound and reclaimed work is visible to any owner.
+	_ = s.store.ExpireLeases(ctx)
 	ids, err := s.siteIDs()
 	if err != nil {
 		s.log.Error("scheduler list failed", "error", err)
 		return
 	}
 	s.runBounded(ctx, ids, s.concurrency, func(id int64) {
+		// A database lease ensures two worker-capable processes never check the
+		// same site at the same time; the loser observes the other owner's
+		// unexpired lease and skips.
+		ok, err := s.store.AcquireLease(ctx, "check", id, s.owner, s.checkLeaseTTL)
+		if err != nil {
+			s.log.Warn("lease acquire failed", "site_id", id, "error", err)
+			return
+		}
+		if !ok {
+			return
+		}
 		if _, err := s.checker.CheckSite(ctx, id); err != nil {
 			s.log.Warn("site check failed", "site_id", id, "error", err)
 		}
@@ -127,6 +146,14 @@ func (s *Scheduler) RunCrawlOnce(ctx context.Context) {
 		workers = 4
 	}
 	s.runBounded(ctx, ids, workers, func(id int64) {
+		ok, err := s.store.AcquireLease(ctx, "crawl", id, s.owner, s.crawlLeaseTTL)
+		if err != nil {
+			s.log.Warn("crawl lease acquire failed", "site_id", id, "error", err)
+			return
+		}
+		if !ok {
+			return
+		}
 		if _, err := s.crawler.CrawlSite(ctx, id); err != nil {
 			s.log.Warn("site crawl failed", "site_id", id, "error", err)
 		}
@@ -168,4 +195,13 @@ func jitter(d time.Duration) time.Duration {
 		spread = time.Second
 	}
 	return d - spread + time.Duration(rand.Int63n(int64(2*spread)))
+}
+
+// newOwnerID returns a unique lease-owner identity per scheduler instance so
+// two workers never share an owner and a crashed worker's leases are
+// attributable to that worker only.
+func newOwnerID() string {
+	b := make([]byte, 12)
+	_, _ = cryptorand.Read(b)
+	return "worker-" + hex.EncodeToString(b)
 }

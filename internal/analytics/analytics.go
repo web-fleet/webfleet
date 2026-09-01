@@ -114,7 +114,7 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 		return e
 	}
 	if ev.Kind == "pageview" {
-		_ = sqlite.Exec(s.st.DB, `INSERT INTO analytics_daily(property_id,day,pageviews,visitors) VALUES(?,?,1,0) ON CONFLICT(property_id,day) DO UPDATE SET pageviews=pageviews+1`, pid, day)
+		_ = sqlite.Exec(s.st.DB, `INSERT INTO analytics_daily(property_id,day,pageviews,visitors) VALUES(?,?,1,0) ON CONFLICT(property_id,day) DO UPDATE SET pageviews=analytics_daily.pageviews+1`, pid, day)
 		before, _ := sqlite.Query(s.st.DB, `SELECT 1 FROM analytics_daily_visitors WHERE property_id=? AND day=? AND visitor_key=?`, pid, day, visitor)
 		if len(before) == 0 {
 			_ = sqlite.Exec(s.st.DB, `INSERT INTO analytics_daily_visitors(property_id,day,visitor_key) VALUES(?,?,?)`, pid, day, visitor)

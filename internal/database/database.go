@@ -39,23 +39,40 @@ func (d *DB) query(q string) string {
 	}
 	return q
 }
+
+// normalizeArgs coerces Go bools to int64 so INTEGER columns receive a value
+// both providers accept (the SQLite driver tolerates bools; PostgreSQL does
+// not).
+func normalizeArgs(args []any) []any {
+	for i, a := range args {
+		if b, ok := a.(bool); ok {
+			if b {
+				args[i] = int64(1)
+			} else {
+				args[i] = int64(0)
+			}
+		}
+	}
+	return args
+}
+
 func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
-	return d.DB.Exec(d.query(query), args...)
+	return d.DB.Exec(d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) Query(query string, args ...any) (*sql.Rows, error) {
-	return d.DB.Query(d.query(query), args...)
+	return d.DB.Query(d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) QueryRow(query string, args ...any) *sql.Row {
-	return d.DB.QueryRow(d.query(query), args...)
+	return d.DB.QueryRow(d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return d.DB.ExecContext(ctx, d.query(query), args...)
+	return d.DB.ExecContext(ctx, d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return d.DB.QueryContext(ctx, d.query(query), args...)
+	return d.DB.QueryContext(ctx, d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return d.DB.QueryRowContext(ctx, d.query(query), args...)
+	return d.DB.QueryRowContext(ctx, d.query(query), normalizeArgs(args)...)
 }
 func (d *DB) BeginTx(ctx context.Context, o *sql.TxOptions) (*Tx, error) {
 	tx, e := d.DB.BeginTx(ctx, o)
@@ -77,14 +94,14 @@ func (t *Tx) query(q string) string {
 	return q
 }
 func (t *Tx) Exec(query string, args ...any) (sql.Result, error) {
-	return t.Tx.Exec(t.query(query), args...)
+	return t.Tx.Exec(t.query(query), normalizeArgs(args)...)
 }
 func (t *Tx) Query(query string, args ...any) (*sql.Rows, error) {
-	return t.Tx.Query(t.query(query), args...)
+	return t.Tx.Query(t.query(query), normalizeArgs(args)...)
 }
 func (t *Tx) QueryRow(query string, args ...any) *sql.Row {
-	return t.Tx.QueryRow(t.query(query), args...)
+	return t.Tx.QueryRow(t.query(query), normalizeArgs(args)...)
 }
 func (t *Tx) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	return t.Tx.ExecContext(ctx, t.query(q), args...)
+	return t.Tx.ExecContext(ctx, t.query(q), normalizeArgs(args)...)
 }

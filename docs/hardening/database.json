@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "checkpoint": "CP30-campaign5",
+  "description": "Machine-readable evidence for Web Fleet database/concurrency correctness: real PostgreSQL parity, provider-aware backup/restore and scheduler claim/lease. Real-PostgreSQL tests run when WEBFLEET_TEST_POSTGRES_URL points at a live server; without it they skip (they are never satisfied by mocked SQL).",
+  "postgresParity": {
+    "evidence": "internal/store/pg_test.go runs the product's normal storage paths against a real PostgreSQL server (fresh migrations, restart idempotency, future-schema refusal, first-admin/org/membership, sessions, sites/groups/tags, incidents + outbox, audit history, analytics, deployments, API tokens, webhooks, maintenance, scheduler leases).",
+    "dialectBugsFoundAndFixed": [
+      "Go bools bound to INTEGER columns: SQLite tolerated them, PostgreSQL rejected them. The database layer now coerces bool args to int64 for both providers.",
+      "Analytics daily rollup used an unqualified conflict-update RHS (pageviews=pageviews+1): PostgreSQL rejects it as ambiguous, SQLite accepted it. Now qualified as analytics_daily.pageviews+1 for both."
+    ],
+    "placeholderRebinding": "? -> $n covered by database.Rebind for every statement path (DB and Tx)."
+  },
+  "migrations": {
+    "freshSqlite": "covered by store_test (fresh open, PRAGMAs, history validation, rollback).",
+    "freshPostgres": "covered by TestPostgresFreshMigrationAndRestartIdempotent.",
+    "restartIdempotent": "covered for both providers (postgres restart idempotency test; sqlite fresh/restart test).",
+    "futureSchemaRefusal": "covered for both providers (TestRefusesFutureSchema, TestPostgresRefusesFutureSchema).",
+    "failedMigration": "SQLite rollback covered by store_test; PG migration failure rolls back the transaction and surfaces the error."
+  },
+  "backupRestore": {
+    "providerContract": "The CLI routes by the active provider (WEBFLEET_DATABASE_URL / first-run choice). SQLite uses the native VACUUM INTO path and validates integrity + schema on restore. PostgreSQL uses provider-native pg_dump (custom format) and pg_restore; pg_dump/pg_restore absence is detected cleanly.",
+    "credentials": "The password is passed to pg_dump/pg_restore via PGPASSWORD, never on the command line, so it is not exposed in process listings or logs.",
+    "temfiles": "Backup writes through a temp file secured to 0600 and renamed atomically; the temp is removed on failure.",
+    "boundedSubprocess": "pg_dump/pg_restore run under a bounded context (10 minutes).",
+    "rehearsals": "SQLite round-trip covered by store_test; PostgreSQL backup -> destructive change -> restore rehearsal covered by TestPostgresBackupRestoreRehearsal. Bad/incompatible input fails safely (TestPostgresBackupRestoreBadInputFailsSafely, SQLite ValidateDatabase)."
+  },
+  "schedulerLease": {
+    "architecture": "job_leases table (migration 26) with PK(lease_kind, resource_id). AcquireLease is an atomic upsert that grants a lease only when it is unheld, held by the same owner, or expired; two workers can never hold the same lease at once.",
+    "expiry": "Leases carry an owner identity and an expiry; a crashed worker's lease expires and the work is reclaimed (no stranded work).",
+    "duplicateSemantics": "Scheduled checks and crawls are claimed per site; a lease lasts longer than the operation so a second worker observes the holder and skips. On lease expiry after a crash the work may be redone (at-least-once) by a healthy worker; manual actions are not lease-governed.",
+    "evidence": "store lease tests (exclusion, renewal, expiry takeover, release, cleanup) and scheduler two-worker tests prove each site is checked once per interval and that recovery after expiry works, on both SQLite and PostgreSQL."
+  }
+}

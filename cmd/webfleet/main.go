@@ -29,17 +29,27 @@ func main() {
 		os.Exit(1)
 	}
 	if len(os.Args) >= 3 && os.Args[1] == "backup" {
-		st, err := store.Open(cfg.DataDir)
-		if err != nil {
-			log.Error("database failed", "error", err)
-			os.Exit(1)
+		provider := store.Provider(cfg.DatabaseURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if provider == "postgres" {
+			if err := store.PostgresBackup(ctx, cfg.DatabaseURL, os.Args[2]); err != nil {
+				log.Error("postgres backup failed", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			st, err := store.Open(cfg.DataDir)
+			if err != nil {
+				log.Error("database failed", "error", err)
+				os.Exit(1)
+			}
+			defer st.Close()
+			if err := st.Backup(os.Args[2]); err != nil {
+				log.Error("backup failed", "error", err)
+				os.Exit(1)
+			}
 		}
-		defer st.Close()
-		if err := st.Backup(os.Args[2]); err != nil {
-			log.Error("backup failed", "error", err)
-			os.Exit(1)
-		}
-		log.Info("backup complete", "path", os.Args[2])
+		log.Info("backup complete", "provider", provider, "path", os.Args[2])
 		return
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "service" {
@@ -79,11 +89,21 @@ func main() {
 		return
 	}
 	if len(os.Args) >= 3 && os.Args[1] == "restore" {
-		if err := store.Restore(cfg.DataDir, os.Args[2]); err != nil {
-			log.Error("restore failed", "error", err)
-			os.Exit(1)
+		provider := store.Provider(cfg.DatabaseURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if provider == "postgres" {
+			if err := store.PostgresRestore(ctx, cfg.DatabaseURL, os.Args[2]); err != nil {
+				log.Error("postgres restore failed", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := store.Restore(cfg.DataDir, os.Args[2]); err != nil {
+				log.Error("restore failed", "error", err)
+				os.Exit(1)
+			}
 		}
-		log.Info("restore complete", "source", os.Args[2])
+		log.Info("restore complete", "provider", provider, "source", os.Args[2])
 		return
 	}
 	var st *store.Store
