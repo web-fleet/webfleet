@@ -62,6 +62,17 @@ func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	return s
 }
 
+func NewAnalyticsIngest(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), log: log, mux: http.NewServeMux()}
+	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"ok": true, "mode": "analytics-ingest"})
+	})
+	s.mux.HandleFunc("GET /wf.js", s.handleTracker)
+	s.mux.HandleFunc("POST /api/analytics/event", s.handleAnalyticsEvent)
+	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	return s
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"ok": true}) })
 	s.mux.HandleFunc("GET /wf.js", s.handleTracker)

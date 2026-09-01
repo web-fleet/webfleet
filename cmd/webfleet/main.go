@@ -96,17 +96,36 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	mode := "integrated"
+	if len(os.Args) >= 2 && map[string]bool{"serve": true, "worker": true, "analytics-ingest": true}[os.Args[1]] {
+		mode = os.Args[1]
+	}
 	mon := monitor.New(st)
 	tlsSvc := tlshealth.New(st)
 	dnsSvc := dnsobs.New(st)
 	crawlSvc := crawler.New(st)
-	sched := scheduler.New(st, mon, tlsSvc, dnsSvc, crawlSvc, cfg.CheckInterval, cfg.CrawlInterval, cfg.CheckConcurrency, log)
-	sched.Start(context.Background())
-	defer sched.Stop()
-	srv := server.New(cfg, st, log)
+	var sched *scheduler.Scheduler
+	if mode == "integrated" || mode == "worker" {
+		sched = scheduler.New(st, mon, tlsSvc, dnsSvc, crawlSvc, cfg.CheckInterval, cfg.CrawlInterval, cfg.CheckConcurrency, log)
+		sched.Start(context.Background())
+		defer sched.Stop()
+	}
+	if mode == "worker" {
+		log.Info("webfleet worker started")
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		return
+	}
+	var srv *server.Server
+	if mode == "analytics-ingest" {
+		srv = server.NewAnalyticsIngest(cfg, st, log)
+	} else {
+		srv = server.New(cfg, st, log)
+	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("webfleet starting", "listen", cfg.Listen, "data", cfg.DataDir)
+		log.Info("webfleet starting", "listen", cfg.Listen, "data", cfg.DataDir, "mode", mode)
 		errc <- srv.ListenAndServe()
 	}()
 	sig := make(chan os.Signal, 1)

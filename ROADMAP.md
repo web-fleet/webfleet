@@ -272,7 +272,7 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - Local-admin recovery path.
 - Enterprise configuration documentation.
 
-### CP24 - Worker separation and scale tests
+### CP24 - Worker separation and scale tests [COMPLETE]
 
 - Optional scheduler/check worker processes.
 - Optional independent analytics ingestion process.
