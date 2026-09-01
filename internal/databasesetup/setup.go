@@ -24,7 +24,34 @@ func StateFor(st *store.Store, dataDir string) (State, error) {
 	if e != nil {
 		return State{}, e
 	}
-	return State{Selectable: n == 0 && c.Provider != "postgres", Provider: c.Provider}, nil
+	chosen := c.Provider
+	if chosen == "" {
+		chosen = "sqlite"
+	}
+	// The running store reveals whether the operator has already restarted onto
+	// the chosen provider, which is how restart-required state survives reloads.
+	running := "sqlite"
+	if st.Dialect() == "postgres" {
+		running = "postgres"
+	}
+	state := State{Provider: chosen}
+	if n == 0 {
+		switch chosen {
+		case "postgres":
+			// Selection is always locked for postgres. Before restart the
+			// operator must see the restart-required state; after restart the
+			// administrator form appears. Both cases keep the admin form hidden
+			// until the process actually runs on the chosen provider.
+			state.Selectable = false
+			state.RestartRequired = running != "postgres"
+		default:
+			// SQLite is the default choice and needs no restart. When the
+			// process is already running on PostgreSQL (provisioned by
+			// environment), the chooser must not allow switching back to SQLite.
+			state.Selectable = running == "sqlite"
+		}
+	}
+	return state, nil
 }
 func Apply(ctx context.Context, st *store.Store, dataDir, provider, url string) (State, error) {
 	state, e := StateFor(st, dataDir)
