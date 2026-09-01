@@ -1,7 +1,7 @@
 package apitokens
 
 import (
-	"github.com/web-fleet/webfleet/internal/sqlite"
+	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/store"
 	"testing"
 )
@@ -12,13 +12,18 @@ func TestScopeAndRevoke(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer st.Close()
-	sqlite.Exec(st.DB, `INSERT INTO organizations(name,created_at) SELECT 'Default',? WHERE NOT EXISTS(SELECT 1 FROM organizations WHERE id=1)`, store.Now())
-	sqlite.Exec(st.DB, `INSERT INTO users(email,password_hash,created_at) VALUES('a@b.c','x',?)`, store.Now())
+	a := auth.New(st)
+	if e = a.CreateAdmin("a@b.c", "password"); e != nil {
+		t.Fatal(e)
+	}
 	var uid, oid int64
 	if e = st.DB.QueryRow(`SELECT id FROM users WHERE email='a@b.c'`).Scan(&uid); e != nil {
 		t.Fatal(e)
 	}
 	if e = st.DB.QueryRow(`SELECT id FROM organizations ORDER BY id LIMIT 1`).Scan(&oid); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.DB.Exec(`INSERT INTO organization_memberships(organization_id,user_id,role,created_at) VALUES(?,?,'owner',?)`, oid, uid, store.Now()); e != nil {
 		t.Fatal(e)
 	}
 	s := New(st)
