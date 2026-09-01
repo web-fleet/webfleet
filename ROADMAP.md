@@ -185,7 +185,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fleet-wide traffic overview.
 - Clear "analytics not installed" onboarding for sites without the tracker.
 
-### CP16 - Events and goals
+### CP16 - Events and goals [COMPLETE]
 
 - Custom event API.
 - Goal definitions.

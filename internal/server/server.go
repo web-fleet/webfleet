@@ -73,6 +73,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sites/{id}/analytics", s.withSession(s.handleAnalyticsProperty, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/analytics", s.withSession(s.handleEnableAnalytics, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/analytics/summary", s.withSession(s.handleAnalyticsSummary, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/analytics/goals", s.withSession(s.handleAnalyticsGoals, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/analytics/goals", s.withSession(s.handleCreateAnalyticsGoal, true))
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
 	s.mux.HandleFunc("GET /api/fleet/analytics", s.withSession(s.handleFleetAnalytics, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
@@ -129,6 +131,38 @@ func (s *Server) handleFleetAnalytics(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	writeJSON(w, 200, out)
+}
+func (s *Server) handleAnalyticsGoals(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	g, e := s.analytics.Goals(id)
+	if e != nil {
+		writeError(w, 500, "analytics goals unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"goals": g})
+}
+func (s *Server) handleCreateAnalyticsGoal(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Name      string `json:"name"`
+		EventKind string `json:"event_kind"`
+		PathMatch string `json:"path_match"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	g, e := s.analytics.CreateGoal(id, in.Name, in.EventKind, in.PathMatch)
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 201, g)
 }
 func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)

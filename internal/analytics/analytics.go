@@ -189,4 +189,44 @@ func (s *Service) Fleet(days int) (FleetSummary, error) {
 	return FleetSummary{x["pageviews"].Int64, x["visitors"].Int64, x["sites"].Int64}, nil
 }
 
-const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const e={key:k,kind:"pageview",path:location.pathname,referrer:document.referrer,payload:"{}"};try{navigator.sendBeacon(s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),new Blob([JSON.stringify(e)],{type:"application/json"}))}catch(_){}})();`
+type Goal struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	EventKind string `json:"event_kind"`
+	PathMatch string `json:"path_match"`
+	CreatedAt string `json:"created_at"`
+}
+
+func (s *Service) CreateGoal(siteID int64, name, kind, path string) (Goal, error) {
+	name = strings.TrimSpace(name)
+	kind = strings.TrimSpace(kind)
+	if name == "" || kind == "" {
+		return Goal{}, errors.New("goal name and event kind are required")
+	}
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return Goal{}, errors.New("analytics is not enabled")
+	}
+	r, e := sqlite.Query(s.st.DB, `INSERT INTO analytics_goals(property_id,name,event_kind,path_match,created_at) VALUES(?,?,?,?,?) RETURNING id,created_at`, p.ID, name, kind, path, store.Now())
+	if e != nil {
+		return Goal{}, e
+	}
+	return Goal{r[0]["id"].Int64, name, kind, path, r[0]["created_at"].Text}, nil
+}
+func (s *Service) Goals(siteID int64) ([]map[string]any, error) {
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return []map[string]any{}, e
+	}
+	r, e := sqlite.Query(s.st.DB, `SELECT g.id,g.name,g.event_kind,g.path_match,g.created_at,COUNT(e.id) conversions FROM analytics_goals g LEFT JOIN analytics_events e ON e.property_id=g.property_id AND e.kind=g.event_kind AND (g.path_match='' OR e.path=g.path_match) WHERE g.property_id=? GROUP BY g.id ORDER BY g.id`, p.ID)
+	if e != nil {
+		return nil, e
+	}
+	out := []map[string]any{}
+	for _, x := range r {
+		out = append(out, map[string]any{"id": x["id"].Int64, "name": x["name"].Text, "event_kind": x["event_kind"].Text, "path_match": x["path_match"].Text, "conversions": x["conversions"].Int64})
+	}
+	return out, nil
+}
+
+const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const u=s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),send=(kind,payload={})=>{const e={key:k,kind,path:location.pathname,referrer:document.referrer,payload:JSON.stringify(payload)};try{navigator.sendBeacon(u,new Blob([JSON.stringify(e)],{type:"application/json"}))}catch(_){}};window.webfleet={track:send};send("pageview");})();`
