@@ -23,7 +23,7 @@ func TestSiteCRUDSearchGroupPagination(t *testing.T) {
 	}
 	defer st.Close()
 	svc := New(st)
-	g, e := svc.CreateGroup("Clients")
+	g, e := svc.CreateGroup(1, "Clients")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -32,26 +32,26 @@ func TestSiteCRUDSearchGroupPagination(t *testing.T) {
 		if i == 7 {
 			name = "Needle"
 		}
-		if _, e = svc.Create(name, "https://example.com", g.ID); e != nil {
+		if _, e = svc.Create(1, name, "https://example.com", g.ID); e != nil {
 			t.Fatal(e)
 		}
 	}
-	list, e := svc.List("", g.ID, 2, 10, false)
+	list, e := svc.List(1, "", g.ID, 2, 10, false)
 	if e != nil || len(list.Sites) != 10 || list.Total != 25 || list.Pages != 3 {
 		t.Fatalf("list=%+v err=%v", list, e)
 	}
-	found, e := svc.List("needle", 0, 1, 20, false)
+	found, e := svc.List(1, "needle", 0, 1, 20, false)
 	if e != nil || found.Total != 1 {
 		t.Fatalf("search=%+v err=%v", found, e)
 	}
 	id := found.Sites[0].ID
-	if e = svc.Delete(id); e == nil {
+	if e = svc.Delete(1, id); e == nil {
 		t.Fatal("deleted unarchived site")
 	}
-	if e = svc.Archive(id, true); e != nil {
+	if e = svc.Archive(1, id, true); e != nil {
 		t.Fatal(e)
 	}
-	if e = svc.Delete(id); e != nil {
+	if e = svc.Delete(1, id); e != nil {
 		t.Fatal(e)
 	}
 }

@@ -24,7 +24,7 @@ func TestChangesOnlyAgainstSuccessfulObservations(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer st.Close()
-	site, e := sites.New(st).Create("x", "https://example.com", 0)
+	site, e := sites.New(st).Create(1, "x", "https://example.com", 0)
 	if e != nil {
 		t.Fatal(e)
 	}

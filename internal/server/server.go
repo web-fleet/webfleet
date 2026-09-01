@@ -36,6 +36,35 @@ import (
 //go:embed web/* web/assets/css/* web/assets/js/*
 var embedded embed.FS
 
+// principal is the resolved caller identity carried into authenticated
+// handlers. OrgID and Role come from the caller's organization membership,
+// never from a hard-coded organization id or URL.
+type principal struct {
+	UserID int64
+	Email  string
+	CSRF   string
+	OrgID  int64
+	Role   string
+}
+
+// handler is an authenticated handler signature. Unauthenticated routes are
+// registered with the same signature and ignore the empty principal.
+type handler func(http.ResponseWriter, *http.Request, principal)
+
+// routeMeta describes one registered route. The same table drives both route
+// registration and the route/permission inventory contract test, so the
+// authorization contract and the shipped server cannot drift apart.
+type routeMeta struct {
+	Method string
+	Path   string
+	Action string
+	CSRF   bool
+}
+
+// routeContract is the live, testable route/permission inventory. It is
+// populated by routes() and mirrored in docs/hardening/route-inventory.json.
+var routeContract []routeMeta
+
 type Server struct {
 	cfg           config.Config
 	store         *store.Store
@@ -73,88 +102,155 @@ func NewAnalyticsIngest(cfg config.Config, st *store.Store, log *slog.Logger) *S
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "mode": "analytics-ingest"})
 	})
-	s.mux.HandleFunc("GET /wf.js", s.handleTracker)
-	s.mux.HandleFunc("POST /api/analytics/event", s.handleAnalyticsEvent)
+	s.mux.HandleFunc("GET /wf.js", func(w http.ResponseWriter, r *http.Request) { s.handleTracker(w, r, principal{}) })
+	s.mux.HandleFunc("POST /api/analytics/event", func(w http.ResponseWriter, r *http.Request) { s.handleAnalyticsEvent(w, r, principal{}) })
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
 
+// routes registers the application HTTP surface from a single table. Every
+// authenticated route declares its required permission and CSRF posture here;
+// adding a handler without a permission here is a compile-time table change
+// that the route-inventory contract test will reject.
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"ok": true}) })
-	s.mux.HandleFunc("GET /wf.js", s.handleTracker)
-	s.mux.HandleFunc("POST /api/analytics/event", s.handleAnalyticsEvent)
-	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
-	s.mux.HandleFunc("GET /api/setup/database", s.handleDatabaseSetupStatus)
-	s.mux.HandleFunc("POST /api/setup/database", s.handleDatabaseSetup)
-	s.mux.HandleFunc("POST /api/setup", s.handleSetup)
-	s.mux.HandleFunc("POST /api/login", s.handleLogin)
-	s.mux.HandleFunc("GET /api/oidc/login", s.handleOIDCLogin)
-	s.mux.HandleFunc("GET /api/oidc/callback", s.handleOIDCCallback)
-	s.mux.HandleFunc("GET /api/oidc/config", s.withSession(s.handleOIDCConfig, false))
-	s.mux.HandleFunc("PUT /api/oidc/config", s.withSession(s.handleOIDCConfigSave, true))
-	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
-	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
-	s.mux.HandleFunc("POST /api/tokens", s.withSession(s.handleCreateToken, true))
-	s.mux.HandleFunc("DELETE /api/tokens/{id}", s.withSession(s.handleRevokeToken, true))
-	s.mux.HandleFunc("GET /api/notifications/webhooks", s.withSession(s.handleWebhooks, false))
-	s.mux.HandleFunc("POST /api/notifications/webhooks", s.withSession(s.handleWebhookCreate, true))
-	s.mux.HandleFunc("GET /api/notifications/deliveries", s.withSession(s.handleNotificationDeliveries, false))
-	s.mux.HandleFunc("GET /api/organization/members", s.withSession(s.handleMembers, false))
-	s.mux.HandleFunc("POST /api/organization/members", s.withSession(s.handleMemberUpdate, true))
-	s.mux.HandleFunc("GET /api/groups", s.withSession(s.handleGroups, false))
-	s.mux.HandleFunc("POST /api/groups", s.withSession(s.handleCreateGroup, true))
-	s.mux.HandleFunc("GET /api/sites", s.withSession(s.handleSites, false))
-	s.mux.HandleFunc("POST /api/sites", s.withSession(s.handleCreateSite, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/tags", s.withSession(s.handleSiteTags, false))
-	s.mux.HandleFunc("PUT /api/sites/{id}/tags", s.withSession(s.handleSiteTagsUpdate, true))
-	s.mux.HandleFunc("GET /api/sites/{id}", s.withSession(s.handleSite, false))
-	s.mux.HandleFunc("PUT /api/sites/{id}", s.withSession(s.handleUpdateSite, true))
-	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
-	s.mux.HandleFunc("DELETE /api/sites/{id}", s.withSession(s.handleDeleteSite, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/analytics", s.withSession(s.handleAnalyticsProperty, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/analytics", s.withSession(s.handleEnableAnalytics, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/analytics/summary", s.withSession(s.handleAnalyticsSummary, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/analytics/goals", s.withSession(s.handleAnalyticsGoals, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/analytics/goals", s.withSession(s.handleCreateAnalyticsGoal, true))
-	s.mux.HandleFunc("GET /api/maintenance", s.withSession(s.handleMaintenance, false))
-	s.mux.HandleFunc("PUT /api/maintenance", s.withSession(s.handleMaintenanceUpdate, true))
-	s.mux.HandleFunc("POST /api/maintenance/run", s.withSession(s.handleMaintenanceRun, true))
-	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
-	s.mux.HandleFunc("GET /api/fleet/analytics", s.withSession(s.handleFleetAnalytics, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/audit", s.withSession(s.handleRunAudit, true))
-	s.mux.HandleFunc("PUT /api/sites/{id}/audit/history", s.withSession(s.handleAuditHistorySetting, true))
-	s.mux.HandleFunc("POST /api/audits/resolve", s.withSession(s.handleResolveAudits, true))
-	s.mux.HandleFunc("POST /api/audits/batch", s.withSession(s.handleBatchAudits, true))
-	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/deployments", s.withSession(s.handleDeployments, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/deployments", s.withSession(s.handleDeploymentRecord, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/deployments/correlation", s.withSession(s.handleDeploymentCorrelation, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/performance", s.withSession(s.handleSitePerformance, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/incidents", s.withSession(s.handleSiteIncidents, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/tls", s.withSession(s.handleSiteTLS, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/tls/inspect", s.withSession(s.handleInspectTLS, true))
-	s.mux.HandleFunc("GET /api/fleet/tls", s.withSession(s.handleFleetTLS, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/dns", s.withSession(s.handleSiteDNS, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/dns/observe", s.withSession(s.handleObserveDNS, true))
-	s.mux.HandleFunc("GET /api/sites/{id}/http-observations", s.withSession(s.handleHTTPObservations, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/crawl", s.withSession(s.handleSiteCrawl, false))
-	s.mux.HandleFunc("POST /api/sites/{id}/crawl", s.withSession(s.handleCrawlSite, true))
-	s.mux.HandleFunc("GET /api/fleet/link-regressions", s.withSession(s.handleFleetLinkRegressions, false))
-	s.mux.HandleFunc("GET /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectations, false))
-	s.mux.HandleFunc("PUT /api/sites/{id}/header-expectations", s.withSession(s.handleHeaderExpectationUpdate, true))
-	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
+	health := func(w http.ResponseWriter, r *http.Request, _ principal) {
+		writeJSON(w, 200, map[string]any{"ok": true})
+	}
+	table := []struct {
+		routeMeta
+		handle handler
+	}{
+		{routeMeta{"GET", "/healthz", "", false}, health},
+		{routeMeta{"GET", "/wf.js", "", false}, s.handleTracker},
+		{routeMeta{"POST", "/api/analytics/event", "", false}, s.handleAnalyticsEvent},
+		{routeMeta{"GET", "/api/setup/status", "", false}, s.handleSetupStatus},
+		{routeMeta{"GET", "/api/setup/database", "", false}, s.handleDatabaseSetupStatus},
+		{routeMeta{"POST", "/api/setup/database", "", false}, s.handleDatabaseSetup},
+		{routeMeta{"POST", "/api/setup", "", false}, s.handleSetup},
+		{routeMeta{"POST", "/api/login", "", false}, s.handleLogin},
+		{routeMeta{"GET", "/api/oidc/login", "", false}, s.handleOIDCLogin},
+		{routeMeta{"GET", "/api/oidc/callback", "", false}, s.handleOIDCCallback},
+		{routeMeta{"GET", "/api/oidc/config", "organization.read", false}, s.handleOIDCConfig},
+		{routeMeta{"PUT", "/api/oidc/config", "organization.update", true}, s.handleOIDCConfigSave},
+		{routeMeta{"POST", "/api/logout", "session", true}, s.handleLogout},
+		{routeMeta{"GET", "/api/session", "session", false}, s.handleSession},
+		{routeMeta{"POST", "/api/tokens", "tokens.manage", true}, s.handleCreateToken},
+		{routeMeta{"DELETE", "/api/tokens/{id}", "tokens.manage", true}, s.handleRevokeToken},
+		{routeMeta{"GET", "/api/notifications/webhooks", "webhooks.read", false}, s.handleWebhooks},
+		{routeMeta{"POST", "/api/notifications/webhooks", "webhooks.manage", true}, s.handleWebhookCreate},
+		{routeMeta{"GET", "/api/notifications/deliveries", "webhooks.read", false}, s.handleNotificationDeliveries},
+		{routeMeta{"GET", "/api/organization/members", "organization.read", false}, s.handleMembers},
+		{routeMeta{"POST", "/api/organization/members", "membership.update", true}, s.handleMemberUpdate},
+		{routeMeta{"GET", "/api/groups", "site.read", false}, s.handleGroups},
+		{routeMeta{"POST", "/api/groups", "site.create", true}, s.handleCreateGroup},
+		{routeMeta{"GET", "/api/sites", "site.read", false}, s.handleSites},
+		{routeMeta{"POST", "/api/sites", "site.create", true}, s.handleCreateSite},
+		{routeMeta{"GET", "/api/sites/{id}/tags", "site.read", false}, s.handleSiteTags},
+		{routeMeta{"PUT", "/api/sites/{id}/tags", "site.update", true}, s.handleSiteTagsUpdate},
+		{routeMeta{"GET", "/api/sites/{id}", "site.read", false}, s.handleSite},
+		{routeMeta{"PUT", "/api/sites/{id}", "site.update", true}, s.handleUpdateSite},
+		{routeMeta{"POST", "/api/sites/{id}/archive", "site.archive", true}, s.handleArchiveSite},
+		{routeMeta{"DELETE", "/api/sites/{id}", "site.delete", true}, s.handleDeleteSite},
+		{routeMeta{"GET", "/api/sites/{id}/analytics", "analytics.read", false}, s.handleAnalyticsProperty},
+		{routeMeta{"POST", "/api/sites/{id}/analytics", "analytics.manage", true}, s.handleEnableAnalytics},
+		{routeMeta{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false}, s.handleAnalyticsSummary},
+		{routeMeta{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false}, s.handleAnalyticsGoals},
+		{routeMeta{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true}, s.handleCreateAnalyticsGoal},
+		{routeMeta{"GET", "/api/maintenance", "maintenance.read", false}, s.handleMaintenance},
+		{routeMeta{"PUT", "/api/maintenance", "maintenance.manage", true}, s.handleMaintenanceUpdate},
+		{routeMeta{"POST", "/api/maintenance/run", "maintenance.manage", true}, s.handleMaintenanceRun},
+		{routeMeta{"GET", "/api/fleet", "fleet.read", false}, s.handleFleet},
+		{routeMeta{"GET", "/api/fleet/analytics", "analytics.read", false}, s.handleFleetAnalytics},
+		{routeMeta{"GET", "/api/sites/{id}/audit", "audit.read", false}, s.handleAudit},
+		{routeMeta{"POST", "/api/sites/{id}/audit", "audit.run", true}, s.handleRunAudit},
+		{routeMeta{"PUT", "/api/sites/{id}/audit/history", "audit.configure", true}, s.handleAuditHistorySetting},
+		{routeMeta{"POST", "/api/audits/resolve", "audit.read", true}, s.handleResolveAudits},
+		{routeMeta{"POST", "/api/audits/batch", "audit.run", true}, s.handleBatchAudits},
+		{routeMeta{"POST", "/api/sites/{id}/check", "monitor.run", true}, s.handleCheckSite},
+		{routeMeta{"GET", "/api/sites/{id}/deployments", "deployments.read", false}, s.handleDeployments},
+		{routeMeta{"POST", "/api/sites/{id}/deployments", "deployments.record", true}, s.handleDeploymentRecord},
+		{routeMeta{"GET", "/api/sites/{id}/deployments/correlation", "deployments.read", false}, s.handleDeploymentCorrelation},
+		{routeMeta{"GET", "/api/sites/{id}/checks", "monitor.read", false}, s.handleSiteChecks},
+		{routeMeta{"GET", "/api/sites/{id}/performance", "monitor.read", false}, s.handleSitePerformance},
+		{routeMeta{"GET", "/api/sites/{id}/incidents", "incidents.read", false}, s.handleSiteIncidents},
+		{routeMeta{"POST", "/api/incidents/{id}/ack", "incidents.acknowledge", true}, s.handleAckIncident},
+		{routeMeta{"GET", "/api/sites/{id}/tls", "tls.read", false}, s.handleSiteTLS},
+		{routeMeta{"POST", "/api/sites/{id}/tls/inspect", "tls.run", true}, s.handleInspectTLS},
+		{routeMeta{"GET", "/api/fleet/tls", "tls.read", false}, s.handleFleetTLS},
+		{routeMeta{"GET", "/api/sites/{id}/dns", "dns.read", false}, s.handleSiteDNS},
+		{routeMeta{"POST", "/api/sites/{id}/dns/observe", "dns.run", true}, s.handleObserveDNS},
+		{routeMeta{"GET", "/api/sites/{id}/http-observations", "monitor.read", false}, s.handleHTTPObservations},
+		{routeMeta{"GET", "/api/sites/{id}/crawl", "crawl.read", false}, s.handleSiteCrawl},
+		{routeMeta{"POST", "/api/sites/{id}/crawl", "crawl.run", true}, s.handleCrawlSite},
+		{routeMeta{"GET", "/api/fleet/link-regressions", "crawl.read", false}, s.handleFleetLinkRegressions},
+		{routeMeta{"GET", "/api/sites/{id}/header-expectations", "monitor.read", false}, s.handleHeaderExpectations},
+		{routeMeta{"PUT", "/api/sites/{id}/header-expectations", "monitor.update", true}, s.handleHeaderExpectationUpdate},
+	}
+	routeContract = routeContract[:0]
+	for _, x := range table {
+		routeContract = append(routeContract, x.routeMeta)
+		pattern := x.Method + " " + x.Path
+		if x.Action == "" {
+			h := x.handle
+			s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) { h(w, r, principal{}) })
+		} else {
+			s.mux.HandleFunc(pattern, s.authorize(x.Action, x.CSRF, x.handle))
+		}
+	}
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 }
 
-func (s *Server) handleTracker(w http.ResponseWriter, r *http.Request) {
+// authorize resolves the session, membership role and organization for an
+// authenticated request, enforces CSRF when required, and grants access only
+// when the caller's role permits the route action. Authorization is derived
+// from the membership row, never from the URL or a hard-coded organization.
+func (s *Server) authorize(action string, csrf bool, next handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("webfleet_session")
+		if err != nil {
+			writeError(w, 401, "authentication required")
+			return
+		}
+		sess, err := s.auth.Session(c.Value)
+		if err != nil {
+			writeError(w, 401, "authentication required")
+			return
+		}
+		if csrf && r.Header.Get("X-CSRF-Token") != sess.CSRF {
+			writeError(w, 403, "invalid CSRF token")
+			return
+		}
+		m, err := s.rbac.Resolve(sess.UserID)
+		if err != nil {
+			writeError(w, 403, "no organization membership")
+			return
+		}
+		if action != "session" && !rbac.Can(m.Role, action) {
+			writeError(w, 403, "permission denied")
+			return
+		}
+		next(w, r, principal{UserID: sess.UserID, Email: sess.Email, CSRF: sess.CSRF, OrgID: m.OrgID, Role: m.Role})
+	}
+}
+
+// site loads a site after verifying it belongs to the caller's organization.
+// Cross-organization access returns 404 so site existence is not disclosed.
+func (s *Server) site(w http.ResponseWriter, p principal, id int64) (sites.Site, bool) {
+	site, err := s.sites.GetForOrg(p.OrgID, id)
+	if err != nil {
+		writeError(w, 404, "site not found")
+		return sites.Site{}, false
+	}
+	return site, true
+}
+
+func (s *Server) handleTracker(w http.ResponseWriter, r *http.Request, _ principal) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public,max-age=3600")
 	_, _ = w.Write([]byte(analytics.Tracker))
 }
-func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request, _ principal) {
 	var in analytics.Event
 	if !decodeJSON(w, r, &in) {
 		return
@@ -170,7 +266,7 @@ func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request, p principal) {
 	x, e := s.maintenance.Status()
 	if e != nil {
 		writeError(w, 500, "maintenance status unavailable")
@@ -178,7 +274,7 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request, sess 
 	}
 	writeJSON(w, 200, x)
 }
-func (s *Server) handleMaintenanceUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleMaintenanceUpdate(w http.ResponseWriter, r *http.Request, p principal) {
 	var v maintenance.Settings
 	if !decodeJSON(w, r, &v) {
 		return
@@ -189,25 +285,28 @@ func (s *Server) handleMaintenanceUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request, p principal) {
 	if e := s.maintenance.Run(); e != nil {
 		writeError(w, 500, e.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleFleetAnalytics(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleFleetAnalytics(w http.ResponseWriter, r *http.Request, p principal) {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	out, err := s.analytics.Fleet(days)
+	out, err := s.analytics.Fleet(p.OrgID, days)
 	if err != nil {
 		writeError(w, 500, "fleet analytics unavailable")
 		return
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Server) handleAnalyticsGoals(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAnalyticsGoals(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	g, e := s.analytics.Goals(id)
@@ -217,9 +316,12 @@ func (s *Server) handleAnalyticsGoals(w http.ResponseWriter, r *http.Request, se
 	}
 	writeJSON(w, 200, map[string]any{"goals": g})
 }
-func (s *Server) handleCreateAnalyticsGoal(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCreateAnalyticsGoal(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -237,9 +339,12 @@ func (s *Server) handleCreateAnalyticsGoal(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, 201, g)
 }
-func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
@@ -250,34 +355,43 @@ func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request, 
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Server) handleAnalyticsProperty(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAnalyticsProperty(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
 		return
 	}
-	p, err := s.analytics.Property(id)
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	prop, err := s.analytics.Property(id)
 	if err != nil {
 		writeError(w, 500, "analytics unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"property": p})
+	writeJSON(w, 200, map[string]any{"property": prop})
 }
-func (s *Server) handleEnableAnalytics(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleEnableAnalytics(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
 		return
 	}
-	p, err := s.analytics.Enable(id)
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	prop, err := s.analytics.Enable(id)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 201, p)
+	writeJSON(w, 201, prop)
 }
 
-func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	runs, err := s.audit.History(id)
@@ -288,9 +402,12 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, sess auth.S
 	hist, _ := s.audit.HistoryEnabled(id)
 	writeJSON(w, 200, map[string]any{"history_enabled": hist, "runs": runs})
 }
-func (s *Server) handleRunAudit(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleRunAudit(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	out, err := s.audit.Run(r.Context(), id)
@@ -300,9 +417,12 @@ func (s *Server) handleRunAudit(w http.ResponseWriter, r *http.Request, sess aut
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Server) handleAuditHistorySetting(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAuditHistorySetting(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -317,19 +437,19 @@ func (s *Server) handleAuditHistorySetting(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleResolveAudits(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleResolveAudits(w http.ResponseWriter, r *http.Request, p principal) {
 	var in audit.BatchFilter
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	ids, err := s.audit.ResolveBatch(in)
+	ids, err := s.audit.ResolveBatch(p.OrgID, in)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"site_ids": ids, "count": len(ids)})
 }
-func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		SiteIDs []int64 `json:"site_ids"`
 	}
@@ -340,10 +460,10 @@ func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, sess 
 		writeError(w, 400, "batch audit limit is 100 sites")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"results": s.audit.RunBatch(r.Context(), in.SiteIDs)})
+	writeJSON(w, 200, map[string]any{"results": s.audit.RunBatch(r.Context(), p.OrgID, in.SiteIDs)})
 }
 
-func (s *Server) handleDatabaseSetupStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDatabaseSetupStatus(w http.ResponseWriter, r *http.Request, _ principal) {
 	x, e := databasesetup.StateFor(s.store, s.cfg.DataDir)
 	if e != nil {
 		writeError(w, 500, "database setup unavailable")
@@ -351,7 +471,7 @@ func (s *Server) handleDatabaseSetupStatus(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, 200, x)
 }
-func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request, _ principal) {
 	var in struct {
 		Provider string `json:"provider"`
 		URL      string `json:"url"`
@@ -373,7 +493,7 @@ func (s *Server) oidcRedirect(r *http.Request) string {
 	}
 	return scheme + "://" + r.Host + "/api/oidc/callback"
 }
-func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ principal) {
 	u, e := s.oidc.Begin(r.Context(), s.oidcRedirect(r))
 	if e != nil {
 		writeError(w, 400, e.Error())
@@ -381,7 +501,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, u, http.StatusFound)
 }
-func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, _ principal) {
 	tok, _, e := s.oidc.Callback(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), s.oidcRedirect(r))
 	if e != nil {
 		writeError(w, 401, e.Error())
@@ -390,7 +510,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	setSessionCookie(w, r, tok)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
-func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, p principal) {
 	c, e := s.oidc.Config()
 	if e != nil {
 		writeJSON(w, 200, map[string]any{"config": nil})
@@ -398,23 +518,18 @@ func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, sess a
 	}
 	writeJSON(w, 200, map[string]any{"config": c})
 }
-func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	role, e := s.rbac.Role(sess.UserID, 1)
-	if e != nil || !rbac.Can(role, "membership.update") {
-		writeError(w, 403, "permission denied")
-		return
-	}
+func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, p principal) {
 	var c oidc.Config
 	if !decodeJSON(w, r, &c) {
 		return
 	}
-	if e = s.oidc.Save(c); e != nil {
+	if e := s.oidc.Save(c); e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request, _ principal) {
 	need, err := s.auth.NeedsSetup()
 	if err != nil {
 		writeError(w, 500, "setup status unavailable")
@@ -422,7 +537,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"needs_setup": need, "min_password_length": auth.MinPasswordLength})
 }
-func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, _ principal) {
 	var in struct{ Email, Password string }
 	if !decodeJSON(w, r, &in) {
 		return
@@ -439,7 +554,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	setSessionCookie(w, r, token)
 	writeJSON(w, 201, map[string]any{"email": sess.Email, "csrf": sess.CSRF})
 }
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, _ principal) {
 	var in struct{ Email, Password string }
 	if !decodeJSON(w, r, &in) {
 		return
@@ -452,7 +567,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	setSessionCookie(w, r, token)
 	writeJSON(w, 200, map[string]any{"email": sess.Email, "csrf": sess.CSRF})
 }
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, p principal) {
 	c, _ := r.Cookie("webfleet_session")
 	if c != nil {
 		s.auth.Logout(c.Value)
@@ -460,9 +575,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess auth.
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	detail, err := s.crawler.LatestDetail(id)
@@ -473,9 +591,12 @@ func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, sess au
 	writeJSON(w, 200, map[string]any{"crawl": detail})
 }
 
-func (s *Server) handleCrawlSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCrawlSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	detail, err := s.crawler.CrawlSite(r.Context(), id)
@@ -486,15 +607,15 @@ func (s *Server) handleCrawlSite(w http.ResponseWriter, r *http.Request, sess au
 	writeJSON(w, 200, detail)
 }
 
-func (s *Server) handleFleetLinkRegressions(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	runs, err := s.crawler.FleetRegressions()
+func (s *Server) handleFleetLinkRegressions(w http.ResponseWriter, r *http.Request, p principal) {
+	runs, err := s.crawler.FleetRegressions(p.OrgID)
 	if err != nil {
 		writeError(w, 500, "link regressions unavailable")
 		return
 	}
 	out := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
-		site, err := s.sites.Get(run.SiteID)
+		site, err := s.sites.GetForOrg(p.OrgID, run.SiteID)
 		if err != nil {
 			continue
 		}
@@ -503,9 +624,12 @@ func (s *Server) handleFleetLinkRegressions(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, 200, map[string]any{"regressions": out})
 }
 
-func (s *Server) handleHTTPObservations(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleHTTPObservations(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	rows, err := s.monitor.HTTPHistory(id)
@@ -515,9 +639,12 @@ func (s *Server) handleHTTPObservations(w http.ResponseWriter, r *http.Request, 
 	}
 	writeJSON(w, 200, map[string]any{"observations": rows})
 }
-func (s *Server) handleHeaderExpectations(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleHeaderExpectations(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	x, err := s.monitor.HeaderExpectations(id)
@@ -527,9 +654,12 @@ func (s *Server) handleHeaderExpectations(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, 200, map[string]any{"expectations": x})
 }
-func (s *Server) handleHeaderExpectationUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleHeaderExpectationUpdate(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -546,9 +676,12 @@ func (s *Server) handleHeaderExpectationUpdate(w http.ResponseWriter, r *http.Re
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (s *Server) handleSiteDNS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteDNS(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	rows, err := s.dns.History(id)
@@ -558,9 +691,12 @@ func (s *Server) handleSiteDNS(w http.ResponseWriter, r *http.Request, sess auth
 	}
 	writeJSON(w, 200, map[string]any{"observations": rows})
 }
-func (s *Server) handleObserveDNS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleObserveDNS(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	obs, err := s.dns.ObserveSite(r.Context(), id)
@@ -571,9 +707,12 @@ func (s *Server) handleObserveDNS(w http.ResponseWriter, r *http.Request, sess a
 	writeJSON(w, 200, obs)
 }
 
-func (s *Server) handleSiteTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteTLS(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	obs, err := s.tls.Latest(id)
@@ -583,9 +722,12 @@ func (s *Server) handleSiteTLS(w http.ResponseWriter, r *http.Request, sess auth
 	}
 	writeJSON(w, 200, map[string]any{"observation": obs})
 }
-func (s *Server) handleInspectTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleInspectTLS(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	obs, err := s.tls.InspectSite(r.Context(), id)
@@ -595,8 +737,8 @@ func (s *Server) handleInspectTLS(w http.ResponseWriter, r *http.Request, sess a
 	}
 	writeJSON(w, 200, obs)
 }
-func (s *Server) handleFleetTLS(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	rows, err := s.tls.FleetWarnings(30)
+func (s *Server) handleFleetTLS(w http.ResponseWriter, r *http.Request, p principal) {
+	rows, err := s.tls.FleetWarnings(p.OrgID, 30)
 	if err != nil {
 		writeError(w, 500, "TLS warnings unavailable")
 		return
@@ -604,9 +746,12 @@ func (s *Server) handleFleetTLS(w http.ResponseWriter, r *http.Request, sess aut
 	writeJSON(w, 200, map[string]any{"warnings": rows})
 }
 
-func (s *Server) handleSiteIncidents(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteIncidents(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	rows, err := s.incidents.List(id)
@@ -616,30 +761,33 @@ func (s *Server) handleSiteIncidents(w http.ResponseWriter, r *http.Request, ses
 	}
 	writeJSON(w, 200, map[string]any{"incidents": rows})
 }
-func (s *Server) handleAckIncident(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleAckIncident(w http.ResponseWriter, r *http.Request, p principal) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		writeError(w, 400, "invalid incident id")
 		return
 	}
-	if err = s.incidents.Acknowledge(id, store.Now()); err != nil {
+	if err = s.incidents.Acknowledge(p.OrgID, id, store.Now()); err != nil {
 		writeError(w, 404, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	sum, err := fleet.SummaryFor(s.store)
+func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request, p principal) {
+	sum, err := fleet.SummaryFor(s.store, p.OrgID)
 	if err != nil {
 		writeError(w, 500, "fleet summary unavailable")
 		return
 	}
 	writeJSON(w, 200, sum)
 }
-func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	res, err := s.monitor.CheckSite(r.Context(), id)
@@ -651,9 +799,12 @@ func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, sess au
 	_, _ = s.dns.ObserveSite(r.Context(), id)
 	writeJSON(w, 200, res)
 }
-func (s *Server) handleSitePerformance(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSitePerformance(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	out, err := performance.ForSite(s.store, id, 200)
@@ -664,9 +815,12 @@ func (s *Server) handleSitePerformance(w http.ResponseWriter, r *http.Request, s
 	writeJSON(w, 200, out)
 }
 
-func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	x, e := s.deployments.History(id)
@@ -676,9 +830,12 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request, sess 
 	}
 	writeJSON(w, 200, map[string]any{"deployments": x})
 }
-func (s *Server) handleDeploymentRecord(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleDeploymentRecord(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var x deployments.Event
@@ -693,9 +850,12 @@ func (s *Server) handleDeploymentRecord(w http.ResponseWriter, r *http.Request, 
 	}
 	writeJSON(w, 201, v)
 }
-func (s *Server) handleDeploymentCorrelation(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleDeploymentCorrelation(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	x, e := s.deployments.Correlate(id)
@@ -705,9 +865,12 @@ func (s *Server) handleDeploymentCorrelation(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, 200, map[string]any{"correlation": x})
 }
-func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	rows, err := s.monitor.Recent(id, 50)
@@ -718,7 +881,7 @@ func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess a
 	writeJSON(w, 200, map[string]any{"checks": rows})
 }
 
-func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		Name   string   `json:"name"`
 		Scopes []string `json:"scopes"`
@@ -726,39 +889,34 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, sess 
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	x, e := s.tokens.Create(sess.UserID, 1, in.Name, in.Scopes)
+	x, e := s.tokens.Create(p.UserID, p.OrgID, in.Name, in.Scopes)
 	if e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 201, x)
 }
-func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, p principal) {
 	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if e != nil {
 		writeError(w, 400, "invalid token id")
 		return
 	}
-	if e = s.tokens.Revoke(id, sess.UserID); e != nil {
+	if e = s.tokens.Revoke(id, p.UserID, p.OrgID); e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	x, e := s.notifications.List(1)
+func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request, p principal) {
+	x, e := s.notifications.List(p.OrgID)
 	if e != nil {
 		writeError(w, 500, "webhooks unavailable")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"webhooks": x})
 }
-func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	role, e := s.rbac.Role(sess.UserID, 1)
-	if e != nil || !rbac.Can(role, "membership.update") {
-		writeError(w, 403, "permission denied")
-		return
-	}
+func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
@@ -766,40 +924,30 @@ func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request, ses
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	x, secret, e := s.notifications.Create(1, in.Name, in.URL)
+	x, secret, e := s.notifications.Create(p.OrgID, in.Name, in.URL)
 	if e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 201, map[string]any{"webhook": x, "secret": secret})
 }
-func (s *Server) handleNotificationDeliveries(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	x, e := s.notifications.History(1)
+func (s *Server) handleNotificationDeliveries(w http.ResponseWriter, r *http.Request, p principal) {
+	x, e := s.notifications.History(p.OrgID)
 	if e != nil {
 		writeError(w, 500, "delivery history unavailable")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deliveries": x})
 }
-func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	role, e := s.rbac.Role(sess.UserID, 1)
-	if e != nil || !rbac.Can(role, "organization.read") {
-		writeError(w, 403, "permission denied")
-		return
-	}
-	m, e := s.rbac.Members(1)
+func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, p principal) {
+	m, e := s.rbac.Members(p.OrgID)
 	if e != nil {
 		writeError(w, 500, "members unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"members": m, "role": role})
+	writeJSON(w, 200, map[string]any{"members": m, "role": p.Role})
 }
-func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	role, e := s.rbac.Role(sess.UserID, 1)
-	if e != nil || !rbac.Can(role, "membership.update") {
-		writeError(w, 403, "permission denied")
-		return
-	}
+func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
@@ -807,35 +955,35 @@ func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request, sess
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if e = s.rbac.Add(sess.UserID, 1, in.Email, in.Role); e != nil {
+	if e := s.rbac.Add(p.UserID, p.OrgID, in.Email, in.Role); e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	groups, err := s.sites.Groups()
+func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request, p principal) {
+	groups, err := s.sites.Groups(p.OrgID)
 	if err != nil {
 		writeError(w, 500, "groups unavailable")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"groups": groups})
 }
-func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		Name string `json:"name"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	g, err := s.sites.CreateGroup(in.Name)
+	g, err := s.sites.CreateGroup(p.OrgID, in.Name)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 201, g)
 }
-func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, p principal) {
 	q := r.URL.Query()
 	group, _ := strconv.ParseInt(q.Get("group"), 10, 64)
 	page, _ := strconv.Atoi(q.Get("page"))
@@ -843,9 +991,9 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, sess auth.S
 	var out sites.List
 	var err error
 	if tag := q.Get("tag"); tag != "" && q.Get("archived") != "1" {
-		out, err = s.sites.ListByTag(q.Get("q"), group, tag, page, size)
+		out, err = s.sites.ListByTag(p.OrgID, q.Get("q"), group, tag, page, size)
 	} else {
-		out, err = s.sites.List(q.Get("q"), group, page, size, q.Get("archived") == "1")
+		out, err = s.sites.List(p.OrgID, q.Get("q"), group, page, size, q.Get("archived") == "1")
 	}
 	if err != nil {
 		writeError(w, 500, "sites unavailable")
@@ -853,7 +1001,7 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request, sess auth.S
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p principal) {
 	var in struct {
 		Name       string `json:"name"`
 		PrimaryURL string `json:"primary_url"`
@@ -862,7 +1010,7 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, sess a
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	site, err := s.sites.Create(in.Name, in.PrimaryURL, in.GroupID)
+	site, err := s.sites.Create(p.OrgID, in.Name, in.PrimaryURL, in.GroupID)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -877,21 +1025,27 @@ func pathSiteID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	}
 	return id, true
 }
-func (s *Server) handleSiteTags(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteTags(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
 		return
 	}
-	x, e := s.sites.Tags(id)
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	x, e := s.sites.Tags(p.OrgID, id)
 	if e != nil {
 		writeError(w, 500, "tags unavailable")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"tags": x})
 }
-func (s *Server) handleSiteTagsUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSiteTagsUpdate(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -900,27 +1054,29 @@ func (s *Server) handleSiteTagsUpdate(w http.ResponseWriter, r *http.Request, se
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if e := s.sites.SetTags(id, in.Tags); e != nil {
+	if e := s.sites.SetTags(p.OrgID, id, in.Tags); e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
 		return
 	}
-	site, err := s.sites.Get(id)
-	if err != nil {
-		writeError(w, 404, "site not found")
+	site, ok := s.site(w, p, id)
+	if !ok {
 		return
 	}
 	writeJSON(w, 200, site)
 }
-func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -932,16 +1088,19 @@ func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request, sess a
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	site, err := s.sites.Update(id, in.Name, in.PrimaryURL, in.GroupID, in.Enabled)
+	site, err := s.sites.Update(p.OrgID, id, in.Name, in.PrimaryURL, in.GroupID, in.Enabled)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, site)
 }
-func (s *Server) handleArchiveSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleArchiveSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
 	var in struct {
@@ -950,47 +1109,31 @@ func (s *Server) handleArchiveSite(w http.ResponseWriter, r *http.Request, sess 
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := s.sites.Archive(id, in.Archived); err != nil {
+	if err := s.sites.Archive(p.OrgID, id, in.Archived); err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
 		return
 	}
-	if err := s.sites.Delete(id); err != nil {
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	if err := s.sites.Delete(p.OrgID, id); err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	writeJSON(w, 200, map[string]any{"email": sess.Email, "csrf": sess.CSRF, "role": "admin"})
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, p principal) {
+	writeJSON(w, 200, map[string]any{"email": p.Email, "csrf": p.CSRF, "role": p.Role, "org_id": p.OrgID})
 }
 
-func (s *Server) withSession(next func(http.ResponseWriter, *http.Request, auth.Session), csrf bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("webfleet_session")
-		if err != nil {
-			writeError(w, 401, "authentication required")
-			return
-		}
-		sess, err := s.auth.Session(c.Value)
-		if err != nil {
-			writeError(w, 401, "authentication required")
-			return
-		}
-		if csrf && r.Header.Get("X-CSRF-Token") != sess.CSRF {
-			writeError(w, 403, "invalid CSRF token")
-			return
-		}
-		next(w, r, sess)
-	}
-}
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Value: token, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
 }

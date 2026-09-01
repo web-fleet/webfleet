@@ -160,8 +160,8 @@ type BatchFilter struct {
 	LastAuditedDays int    `json:"last_audited_days"`
 }
 
-func (s *Service) ResolveBatch(f BatchFilter) ([]int64, error) {
-	rows, e := sqlite.Query(s.st.DB, `SELECT id,name,primary_url,group_id FROM sites WHERE archived_at IS NULL AND enabled=1 ORDER BY id`)
+func (s *Service) ResolveBatch(orgID int64, f BatchFilter) ([]int64, error) {
+	rows, e := sqlite.Query(s.st.DB, `SELECT id,name,primary_url,group_id FROM sites WHERE archived_at IS NULL AND enabled=1 AND organization_id=? ORDER BY id`, orgID)
 	if e != nil {
 		return nil, e
 	}
@@ -189,7 +189,32 @@ func (s *Service) ResolveBatch(f BatchFilter) ([]int64, error) {
 	}
 	return ids, nil
 }
-func (s *Service) RunBatch(ctx context.Context, ids []int64) []Result {
+// filterOwned restricts a batch to sites that belong to the acting
+// organization so an operator cannot audit another organization's sites by
+// guessing ids.
+func (s *Service) filterOwned(orgID int64, ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, orgID)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	rows, e := sqlite.Query(s.st.DB, `SELECT id FROM sites WHERE organization_id=? AND id IN (`+strings.Join(ph, ",")+`)`, args...)
+	if e != nil {
+		return nil
+	}
+	out := make([]int64, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r["id"].Int64)
+	}
+	return out
+}
+func (s *Service) RunBatch(ctx context.Context, orgID int64, ids []int64) []Result {
+	ids = s.filterOwned(orgID, ids)
 	out := make([]Result, len(ids))
 	var wg sync.WaitGroup
 	for i, id := range ids {

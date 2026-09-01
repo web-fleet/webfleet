@@ -68,8 +68,8 @@ func (s *Service) List(siteID int64) ([]Incident, error) {
 	}
 	return out, nil
 }
-func (s *Service) Acknowledge(id int64, at string) error {
-	rows, e := sqlite.Query(s.store.DB, `SELECT id FROM incidents WHERE id=?`, id)
+func (s *Service) Acknowledge(orgID, id int64, at string) error {
+	rows, e := sqlite.Query(s.store.DB, `SELECT i.id FROM incidents i JOIN sites s ON s.id=i.site_id WHERE i.id=? AND s.organization_id=?`, id, orgID)
 	if e != nil || len(rows) == 0 {
 		return errors.New("incident not found")
 	}

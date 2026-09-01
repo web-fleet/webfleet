@@ -70,9 +70,21 @@ type Tx struct {
 	Dialect string
 }
 
-func (t *Tx) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+func (t *Tx) query(q string) string {
 	if t.Dialect == "postgres" {
-		q = Rebind(q)
+		return Rebind(q)
 	}
-	return t.Tx.ExecContext(ctx, q, args...)
+	return q
+}
+func (t *Tx) Exec(query string, args ...any) (sql.Result, error) {
+	return t.Tx.Exec(t.query(query), args...)
+}
+func (t *Tx) Query(query string, args ...any) (*sql.Rows, error) {
+	return t.Tx.Query(t.query(query), args...)
+}
+func (t *Tx) QueryRow(query string, args ...any) *sql.Row {
+	return t.Tx.QueryRow(t.query(query), args...)
+}
+func (t *Tx) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	return t.Tx.ExecContext(ctx, t.query(q), args...)
 }

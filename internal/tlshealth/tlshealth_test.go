@@ -13,7 +13,7 @@ func TestHTTPSScopeIsExplicit(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer st.Close()
-	site, e := sites.New(st).Create("Plain", "http://example.com", 0)
+	site, e := sites.New(st).Create(1, "Plain", "http://example.com", 0)
 	if e != nil {
 		t.Fatal(e)
 	}

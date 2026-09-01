@@ -194,12 +194,12 @@ type FleetSummary struct {
 	SitesWithAnalytics int64 `json:"sites_with_analytics"`
 }
 
-func (s *Service) Fleet(days int) (FleetSummary, error) {
+func (s *Service) Fleet(orgID int64, days int) (FleetSummary, error) {
 	if days < 1 {
 		days = 1
 	}
 	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
-	r, e := sqlite.Query(s.st.DB, `SELECT COALESCE(SUM(d.pageviews),0) pageviews,COALESCE(SUM(d.visitors),0) visitors,(SELECT COUNT(*) FROM analytics_properties WHERE enabled=1) sites FROM analytics_daily d WHERE d.day>=?`, since)
+	r, e := sqlite.Query(s.st.DB, `SELECT COALESCE(SUM(d.pageviews),0) pageviews,COALESCE(SUM(d.visitors),0) visitors,(SELECT COUNT(*) FROM analytics_properties ap JOIN sites s ON s.id=ap.site_id WHERE ap.enabled=1 AND s.organization_id=?) sites FROM analytics_daily d WHERE d.property_id IN (SELECT ap.id FROM analytics_properties ap JOIN sites s ON s.id=ap.site_id WHERE s.organization_id=?) AND d.day>=?`, orgID, orgID, since)
 	if e != nil {
 		return FleetSummary{}, e
 	}

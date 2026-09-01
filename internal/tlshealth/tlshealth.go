@@ -114,11 +114,11 @@ func (s *Service) Latest(siteID int64) (Observation, error) {
 	}
 	return row(r[0]), nil
 }
-func (s *Service) FleetWarnings(days int) ([]Observation, error) {
+func (s *Service) FleetWarnings(orgID int64, days int) ([]Observation, error) {
 	if days < 1 {
 		days = 30
 	}
-	r, e := sqlite.Query(s.store.DB, `SELECT t.id,t.site_id,t.valid,t.hostname_valid,t.issuer,t.subject,t.serial,t.not_before,t.not_after,t.days_remaining,t.error_class,t.error,t.checked_at FROM tls_observations t JOIN (SELECT site_id,MAX(id) id FROM tls_observations GROUP BY site_id) x ON x.id=t.id WHERE t.valid=0 OR t.days_remaining<=? ORDER BY t.days_remaining`, days)
+	r, e := sqlite.Query(s.store.DB, `SELECT t.id,t.site_id,t.valid,t.hostname_valid,t.issuer,t.subject,t.serial,t.not_before,t.not_after,t.days_remaining,t.error_class,t.error,t.checked_at FROM tls_observations t JOIN (SELECT site_id,MAX(id) id FROM tls_observations GROUP BY site_id) x ON x.id=t.id JOIN sites s ON s.id=t.site_id WHERE s.organization_id=? AND (t.valid=0 OR t.days_remaining<=?) ORDER BY t.days_remaining`, orgID, days)
 	if e != nil {
 		return nil, e
 	}

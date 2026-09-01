@@ -58,19 +58,19 @@ func CanonicalURL(raw string) (string, error) {
 	}
 	return u.String(), nil
 }
-func (s *Service) CreateGroup(name string) (Group, error) {
+func (s *Service) CreateGroup(orgID int64, name string) (Group, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 80 {
 		return Group{}, errors.New("group name must be 1..80 characters")
 	}
-	r, e := sqlite.Query(s.store.DB, `INSERT INTO groups(name,created_at) VALUES(?,?) RETURNING id`, name, store.Now())
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO groups(organization_id,name,created_at) VALUES(?,?,?) RETURNING id`, orgID, name, store.Now())
 	if e != nil {
 		return Group{}, e
 	}
 	return Group{ID: r[0]["id"].Int64, Name: name}, nil
 }
-func (s *Service) Groups() ([]Group, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT g.id,g.name,COUNT(s.id) site_count FROM groups g LEFT JOIN sites s ON s.group_id=g.id AND s.archived_at IS NULL GROUP BY g.id ORDER BY lower(g.name)`)
+func (s *Service) Groups(orgID int64) ([]Group, error) {
+	r, e := sqlite.Query(s.store.DB, `SELECT g.id,g.name,COUNT(s.id) site_count FROM groups g LEFT JOIN sites s ON s.group_id=g.id AND s.archived_at IS NULL WHERE g.organization_id=? GROUP BY g.id ORDER BY lower(g.name)`, orgID)
 	if e != nil {
 		return nil, e
 	}
@@ -80,7 +80,7 @@ func (s *Service) Groups() ([]Group, error) {
 	}
 	return out, nil
 }
-func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
+func (s *Service) Create(orgID int64, name, rawURL string, groupID int64) (Site, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 120 {
 		return Site{}, errors.New("site name must be 1..120 characters")
@@ -90,13 +90,13 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 		return Site{}, e
 	}
 	if groupID > 0 {
-		r, e := sqlite.Query(s.store.DB, `SELECT id FROM groups WHERE id=?`, groupID)
+		r, e := sqlite.Query(s.store.DB, `SELECT id FROM groups WHERE id=? AND organization_id=?`, groupID, orgID)
 		if e != nil || len(r) == 0 {
 			return Site{}, errors.New("group not found")
 		}
 	}
 	now := store.Now()
-	r, e := sqlite.Query(s.store.DB, `INSERT INTO sites(organization_id,name,primary_url,enabled,group_id,created_at,updated_at) VALUES(1,?,?,1,NULLIF(?,0),?,?) RETURNING id`, name, u, groupID, now, now)
+	r, e := sqlite.Query(s.store.DB, `INSERT INTO sites(organization_id,name,primary_url,enabled,group_id,created_at,updated_at) VALUES(?,?,?,1,NULLIF(?,0),?,?) RETURNING id`, orgID, name, u, groupID, now, now)
 	if e != nil {
 		return Site{}, e
 	}
@@ -112,17 +112,17 @@ func (s *Service) Create(name, rawURL string, groupID int64) (Site, error) {
 			return Site{}, e
 		}
 	}
-	return s.Get(id)
+	return s.GetForOrg(orgID, id)
 }
-func (s *Service) Get(id int64) (Site, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id WHERE s.id=?`, id)
+func (s *Service) GetForOrg(orgID, id int64) (Site, error) {
+	r, e := sqlite.Query(s.store.DB, `SELECT s.id,s.name,s.primary_url,s.enabled,COALESCE(s.group_id,0) group_id,COALESCE(g.name,'') group_name,s.archived_at,s.created_at,s.updated_at,COALESCE(h.state,'unknown') health,COALESCE(h.consecutive_failures,0) consecutive_failures,COALESCE((SELECT checked_at FROM check_results cr WHERE cr.site_id=s.id ORDER BY cr.id DESC LIMIT 1),'') last_checked_at FROM sites s LEFT JOIN groups g ON g.id=s.group_id LEFT JOIN site_health h ON h.site_id=s.id WHERE s.id=? AND s.organization_id=?`, id, orgID)
 	if e != nil || len(r) == 0 {
 		return Site{}, errors.New("site not found")
 	}
 	return rowSite(r[0]), nil
 }
-func (s *Service) Update(id int64, name, rawURL string, groupID int64, enabled bool) (Site, error) {
-	if _, e := s.Get(id); e != nil {
+func (s *Service) Update(orgID, id int64, name, rawURL string, groupID int64, enabled bool) (Site, error) {
+	if _, e := s.GetForOrg(orgID, id); e != nil {
 		return Site{}, e
 	}
 	name = strings.TrimSpace(name)
@@ -133,29 +133,38 @@ func (s *Service) Update(id int64, name, rawURL string, groupID int64, enabled b
 	if e != nil {
 		return Site{}, e
 	}
-	if e = sqlite.Exec(s.store.DB, `UPDATE sites SET name=?,primary_url=?,group_id=NULLIF(?,0),enabled=?,updated_at=? WHERE id=?`, name, u, groupID, enabled, store.Now(), id); e != nil {
+	if groupID > 0 {
+		r, e := sqlite.Query(s.store.DB, `SELECT id FROM groups WHERE id=? AND organization_id=?`, groupID, orgID)
+		if e != nil || len(r) == 0 {
+			return Site{}, errors.New("group not found")
+		}
+	}
+	if e = sqlite.Exec(s.store.DB, `UPDATE sites SET name=?,primary_url=?,group_id=NULLIF(?,0),enabled=?,updated_at=? WHERE id=? AND organization_id=?`, name, u, groupID, enabled, store.Now(), id, orgID); e != nil {
 		return Site{}, e
 	}
-	return s.Get(id)
+	return s.GetForOrg(orgID, id)
 }
-func (s *Service) Archive(id int64, archived bool) error {
+func (s *Service) Archive(orgID, id int64, archived bool) error {
+	if _, e := s.GetForOrg(orgID, id); e != nil {
+		return e
+	}
 	var at any = nil
 	if archived {
 		at = store.Now()
 	}
-	return sqlite.Exec(s.store.DB, `UPDATE sites SET archived_at=?,updated_at=? WHERE id=?`, at, store.Now(), id)
+	return sqlite.Exec(s.store.DB, `UPDATE sites SET archived_at=?,updated_at=? WHERE id=? AND organization_id=?`, at, store.Now(), id, orgID)
 }
-func (s *Service) Delete(id int64) error {
-	site, e := s.Get(id)
+func (s *Service) Delete(orgID, id int64) error {
+	site, e := s.GetForOrg(orgID, id)
 	if e != nil {
 		return e
 	}
 	if !site.Archived {
 		return errors.New("archive site before deleting it")
 	}
-	return sqlite.Exec(s.store.DB, `DELETE FROM sites WHERE id=?`, id)
+	return sqlite.Exec(s.store.DB, `DELETE FROM sites WHERE id=? AND organization_id=?`, id, orgID)
 }
-func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchived bool) (List, error) {
+func (s *Service) List(orgID int64, q string, groupID int64, page, pageSize int, includeArchived bool) (List, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -165,8 +174,8 @@ func (s *Service) List(q string, groupID int64, page, pageSize int, includeArchi
 	if pageSize > 100 {
 		pageSize = 100
 	}
-	where := ` WHERE 1=1`
-	args := []any{}
+	where := ` WHERE s.organization_id=?`
+	args := []any{orgID}
 	if !includeArchived {
 		where += ` AND s.archived_at IS NULL`
 	}
@@ -213,7 +222,10 @@ func ParseID(raw string) (int64, error) {
 	return id, nil
 }
 
-func (s *Service) Tags(siteID int64) ([]string, error) {
+func (s *Service) Tags(orgID, siteID int64) ([]string, error) {
+	if _, e := s.GetForOrg(orgID, siteID); e != nil {
+		return nil, e
+	}
 	r, e := sqlite.Query(s.store.DB, `SELECT tag FROM site_tags WHERE site_id=? ORDER BY lower(tag)`, siteID)
 	if e != nil {
 		return nil, e
@@ -224,7 +236,10 @@ func (s *Service) Tags(siteID int64) ([]string, error) {
 	}
 	return out, nil
 }
-func (s *Service) SetTags(siteID int64, tags []string) error {
+func (s *Service) SetTags(orgID, siteID int64, tags []string) error {
+	if _, e := s.GetForOrg(orgID, siteID); e != nil {
+		return e
+	}
 	if e := sqlite.Exec(s.store.DB, `DELETE FROM site_tags WHERE site_id=?`, siteID); e != nil {
 		return e
 	}
@@ -244,13 +259,13 @@ func (s *Service) SetTags(siteID int64, tags []string) error {
 	}
 	return nil
 }
-func (s *Service) ListByTag(q string, groupID int64, tag string, page, pageSize int) (List, error) {
+func (s *Service) ListByTag(orgID int64, q string, groupID int64, tag string, page, pageSize int) (List, error) {
 	if strings.TrimSpace(tag) == "" {
-		return s.List(q, groupID, page, pageSize, false)
+		return s.List(orgID, q, groupID, page, pageSize, false)
 	}
 	tag = strings.ToLower(strings.TrimSpace(tag))
-	where := ` WHERE s.archived_at IS NULL AND EXISTS(SELECT 1 FROM site_tags st WHERE st.site_id=s.id AND st.tag=?)`
-	args := []any{tag}
+	where := ` WHERE s.organization_id=? AND s.archived_at IS NULL AND EXISTS(SELECT 1 FROM site_tags st WHERE st.site_id=s.id AND st.tag=?)`
+	args := []any{orgID, tag}
 	if strings.TrimSpace(q) != "" {
 		where += ` AND (lower(s.name) LIKE ? OR lower(s.primary_url) LIKE ?)`
 		term := "%" + strings.ToLower(strings.TrimSpace(q)) + "%"

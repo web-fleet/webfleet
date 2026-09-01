@@ -23,9 +23,6 @@ func TestScopeAndRevoke(t *testing.T) {
 	if e = st.DB.QueryRow(`SELECT id FROM organizations ORDER BY id LIMIT 1`).Scan(&oid); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = st.DB.Exec(`INSERT INTO organization_memberships(organization_id,user_id,role,created_at) VALUES(?,?,'owner',?)`, oid, uid, store.Now()); e != nil {
-		t.Fatal(e)
-	}
 	s := New(st)
 	x, e := s.Create(uid, oid, "ci", []string{"sites:read"})
 	if e != nil {
@@ -37,7 +34,7 @@ func TestScopeAndRevoke(t *testing.T) {
 	if _, e = s.Authenticate(x.Token, "sites:write"); e == nil {
 		t.Fatal("scope bypass")
 	}
-	s.Revoke(x.ID, uid)
+	s.Revoke(x.ID, uid, oid)
 	if _, e = s.Authenticate(x.Token, "sites:read"); e == nil {
 		t.Fatal("revoked accepted")
 	}

@@ -145,11 +145,15 @@ func (s *Service) Callback(ctx context.Context, state, code, redirect string) (s
 		if x["auto_provision"].Int64 == 0 {
 			return "", auth.Session{}, errors.New("OIDC account is not provisioned")
 		}
+		org, e := s.st.PrimaryOrgID(ctx)
+		if e != nil {
+			return "", auth.Session{}, e
+		}
 		u, e = sqlite.Query(s.st.DB, `INSERT INTO users(email,password_hash,role,created_at) VALUES(?,'','viewer',?) RETURNING id,email`, strings.ToLower(ui.Email), store.Now())
 		if e != nil {
 			return "", auth.Session{}, e
 		}
-		_ = sqlite.Exec(s.st.DB, `INSERT INTO organization_memberships(organization_id,user_id,role,created_at) VALUES(1,?,'viewer',?)`, u[0]["id"].Int64, store.Now())
+		_ = sqlite.Exec(s.st.DB, `INSERT INTO organization_memberships(organization_id,user_id,role,created_at) VALUES(?,?,'viewer',?)`, org, u[0]["id"].Int64, store.Now())
 	}
 	return s.auth.CreateSessionForUser(u[0]["id"].Int64, u[0]["email"].Text)
 }

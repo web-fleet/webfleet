@@ -263,6 +263,21 @@ func (s *Store) initializePostgres(ctx context.Context) error {
 }
 func (s *Store) Dialect() string { return s.DB.DialectName() }
 
+// PrimaryOrgID returns the deployment's bootstrap organization created by
+// migration 1. Identity bootstrap (first administrator, OIDC auto-provision)
+// attaches memberships to it. Callers derive it from the store rather than
+// hard-coding an organization id.
+func (s *Store) PrimaryOrgID(ctx context.Context) (int64, error) {
+	r, e := sqlite.Query(s.DB, `SELECT id FROM organizations ORDER BY id LIMIT 1`)
+	if e != nil {
+		return 0, e
+	}
+	if len(r) == 0 {
+		return 0, errors.New("no organization exists for this deployment")
+	}
+	return r[0]["id"].Int64, nil
+}
+
 func (s *Store) Close() error { return s.DB.Close() }
 func (s *Store) Path() string { return s.path }
 

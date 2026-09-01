@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -45,7 +46,43 @@ func (a *Service) CreateAdmin(email, pw string) error {
 	if e != nil {
 		return e
 	}
-	if e = sqlite.Exec(a.store.DB, `INSERT INTO users(email,password_hash,role,created_at) VALUES(?,?, 'admin',?)`, email, h, store.Now()); e != nil {
+	ctx := context.Background()
+	org, e := a.store.PrimaryOrgID(ctx)
+	if e != nil {
+		return e
+	}
+	tx, e := a.store.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	// PostgreSQL serializes first-run setup through an advisory lock so two
+	// concurrent first-admin requests cannot both pass the NOT EXISTS guard.
+	// SQLite's single owned connection already serializes writers.
+	if a.store.Dialect() == "postgres" {
+		if _, e = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(761234567)`); e != nil {
+			return e
+		}
+	}
+	res, e := tx.ExecContext(ctx, `INSERT INTO users(email,password_hash,role,created_at) SELECT ?,?,'admin',? WHERE NOT EXISTS(SELECT 1 FROM users)`, email, h, store.Now())
+	if e != nil {
+		return e
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("setup already completed")
+	}
+	var uid int64
+	if e = tx.QueryRow(`SELECT id FROM users WHERE lower(email)=?`, email).Scan(&uid); e != nil {
+		return e
+	}
+	// The first administrator owns the deployment organization; the user and
+	// its owner membership must be created atomically so RBAC never sees an
+	// administrator without a membership.
+	if _, e = tx.ExecContext(ctx, `INSERT INTO organization_memberships(organization_id,user_id,role,created_at) VALUES(?,?,'owner',?)`, org, uid, store.Now()); e != nil {
+		return e
+	}
+	if e = tx.Commit(); e != nil {
 		return e
 	}
 	return a.audit("first_admin_created", email)

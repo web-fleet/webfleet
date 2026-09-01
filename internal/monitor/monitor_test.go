@@ -28,7 +28,7 @@ func setupSite(t *testing.T, raw string) (*store.Store, int64) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	site, e := sites.New(st).Create("Example", raw, 0)
+	site, e := sites.New(st).Create(1, "Example", raw, 0)
 	if e != nil {
 		st.Close()
 		t.Fatal(e)
@@ -84,14 +84,14 @@ func TestHealthTransitions(t *testing.T) {
 	if _, e := svc.CheckSite(context.Background(), id); e != nil {
 		t.Fatal(e)
 	}
-	site, e := sites.New(st).Get(id)
+	site, e := sites.New(st).GetForOrg(1, id)
 	if e != nil || site.Health != "degraded" {
 		t.Fatalf("first failure site=%+v err=%v", site, e)
 	}
 	if _, e = svc.CheckSite(context.Background(), id); e != nil {
 		t.Fatal(e)
 	}
-	site, _ = sites.New(st).Get(id)
+	site, _ = sites.New(st).GetForOrg(1, id)
 	if site.Health != "down" || site.ConsecutiveFailures != 2 {
 		t.Fatalf("second failure site=%+v", site)
 	}
@@ -99,7 +99,7 @@ func TestHealthTransitions(t *testing.T) {
 	if _, e = svc.CheckSite(context.Background(), id); e != nil {
 		t.Fatal(e)
 	}
-	site, _ = sites.New(st).Get(id)
+	site, _ = sites.New(st).GetForOrg(1, id)
 	if site.Health != "healthy" || site.ConsecutiveFailures != 0 {
 		t.Fatalf("recovery site=%+v", site)
 	}

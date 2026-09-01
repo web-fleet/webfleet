@@ -413,8 +413,8 @@ func (s *Service) LatestDetail(siteID int64) (Detail, error) {
 	}
 	return s.Detail(r.ID)
 }
-func (s *Service) FleetRegressions() ([]Run, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT c.id,c.site_id,c.status,c.pages_crawled,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id WHERE c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0 ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`)
+func (s *Service) FleetRegressions(orgID int64) ([]Run, error) {
+	r, e := sqlite.Query(s.store.DB, `SELECT c.id,c.site_id,c.status,c.pages_crawled,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id JOIN sites s ON s.id=c.site_id WHERE s.organization_id=? AND (c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0) ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`, orgID)
 	if e != nil {
 		return nil, e
 	}

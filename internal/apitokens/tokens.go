@@ -62,6 +62,6 @@ func (s *Service) Authenticate(tok, scope string) (int64, error) {
 	_ = sqlite.Exec(s.st.DB, `UPDATE api_tokens SET last_used_at=? WHERE id=?`, store.Now(), r[0]["id"].Int64)
 	return r[0]["user_id"].Int64, nil
 }
-func (s *Service) Revoke(id, user int64) error {
-	return sqlite.Exec(s.st.DB, `UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=?`, store.Now(), id, user)
+func (s *Service) Revoke(id, user, org int64) error {
+	return sqlite.Exec(s.st.DB, `UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=? AND organization_id=?`, store.Now(), id, user, org)
 }

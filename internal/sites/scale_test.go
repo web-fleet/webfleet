@@ -21,7 +21,7 @@ func TestListThousandSites(t *testing.T) {
 		}
 	}
 	start := time.Now()
-	x, e := New(st).List("Site 09", 0, 1, 50, false)
+	x, e := New(st).List(1, "Site 09", 0, 1, 50, false)
 	if e != nil {
 		t.Fatal(e)
 	}
