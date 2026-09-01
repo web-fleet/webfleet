@@ -495,42 +495,79 @@ func TestA11ySingleSubmitAuthProvesOneRequest(t *testing.T) {
 	}
 }
 
-// assertFirstRunPanels asserts the exact mutually-exclusive first-run panel
-// state: chooser/auth/restart are each visible/hidden as required, the auth
-// mode matches when the auth form is shown, and no impossible combination
-// (chooser+auth, restart+auth, chooser+restart) is ever rendered.
-func assertFirstRunPanels(t *testing.T, ctx context.Context, chooser, auth, restart bool, wantMode string) {
+// renderedVisible reports whether an element is actually painted: computed
+// display/visibility are not 'none'/'hidden' and it has nonzero painted size.
+// This is the acceptance criterion - the DOM `hidden` property alone is not,
+// because author CSS display rules can override it.
+func renderedVisible(ctx context.Context, id string) bool {
+	var v bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){var el=document.getElementById('`+id+`');if(!el)return false;var s=getComputedStyle(el);var r=el.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0})()`, &v)); err != nil {
+		return false
+	}
+	return v
+}
+
+// assertFirstRunPanels asserts the real rendered visibility of every first-run
+// panel (chooser, restart notice, auth form, boot error, dashboard, auth
+// stage, postgres sub-panel), proving the panels are mutually exclusive on
+// screen - not merely in their hidden properties.
+func assertFirstRunPanels(t *testing.T, ctx context.Context, chooser, restart, auth, bootError, dashboard bool, wantMode string) {
 	t.Helper()
-	var c, a, r bool
-	var mode string
-	if err := chromedp.Run(ctx,
-		chromedp.Evaluate(`document.getElementById('database-stage').hidden === false`, &c),
-		chromedp.Evaluate(`document.getElementById('auth-form').hidden === false`, &a),
-		chromedp.Evaluate(`document.getElementById('restart-stage').hidden === false`, &r),
-		chromedp.Evaluate(`(document.getElementById('auth-form').dataset.mode||'')`, &mode),
-	); err != nil {
-		t.Fatal(err)
+	r := map[string]bool{
+		"database-stage": renderedVisible(ctx, "database-stage"),
+		"restart-stage":  renderedVisible(ctx, "restart-stage"),
+		"auth-form":      renderedVisible(ctx, "auth-form"),
+		"boot-error":     renderedVisible(ctx, "boot-error"),
+		"dashboard":      renderedVisible(ctx, "dashboard"),
+		"auth-stage":     renderedVisible(ctx, "auth-stage"),
+		"postgres-setup": renderedVisible(ctx, "postgres-setup"),
 	}
-	if c && a {
-		t.Fatal("impossible state: database chooser and auth form both visible")
+	if r["database-stage"] && r["auth-form"] {
+		t.Fatal("rendered impossible combination: database chooser and auth form")
 	}
-	if r && a {
-		t.Fatal("impossible state: restart-required notice and auth form both visible")
+	if r["restart-stage"] && r["auth-form"] {
+		t.Fatal("rendered impossible combination: restart notice and auth form")
 	}
-	if c && r {
-		t.Fatal("impossible state: database chooser and restart-required notice both visible")
+	if r["database-stage"] && r["restart-stage"] {
+		t.Fatal("rendered impossible combination: database chooser and restart notice")
 	}
-	if c != chooser {
-		t.Fatalf("chooser visible=%v want=%v", c, chooser)
+	if r["auth-form"] && r["dashboard"] {
+		t.Fatal("rendered impossible combination: auth form and dashboard")
 	}
-	if a != auth {
-		t.Fatalf("auth form visible=%v want=%v", a, auth)
+	if r["dashboard"] && r["auth-stage"] {
+		t.Fatal("rendered impossible combination: dashboard and auth stage")
 	}
-	if r != restart {
-		t.Fatalf("restart notice visible=%v want=%v", r, restart)
+	if r["boot-error"] && (r["database-stage"] || r["restart-stage"] || r["auth-form"] || r["dashboard"]) {
+		t.Fatal("rendered impossible combination: boot error alongside another panel")
 	}
-	if auth && wantMode != "" && mode != wantMode {
-		t.Fatalf("auth form mode=%q want=%q", mode, wantMode)
+	if r["database-stage"] != chooser {
+		t.Fatalf("database-stage rendered=%v want=%v", r["database-stage"], chooser)
+	}
+	if r["restart-stage"] != restart {
+		t.Fatalf("restart-stage rendered=%v want=%v", r["restart-stage"], restart)
+	}
+	if r["auth-form"] != auth {
+		t.Fatalf("auth-form rendered=%v want=%v", r["auth-form"], auth)
+	}
+	if r["boot-error"] != bootError {
+		t.Fatalf("boot-error rendered=%v want=%v", r["boot-error"], bootError)
+	}
+	if r["dashboard"] != dashboard {
+		t.Fatalf("dashboard rendered=%v want=%v", r["dashboard"], dashboard)
+	}
+	if wantMode != "" && auth {
+		var mode string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`(document.getElementById('auth-form').dataset.mode||'')`, &mode)); err != nil {
+			t.Fatal(err)
+		}
+		if mode != wantMode {
+			t.Fatalf("auth form mode=%q want=%q", mode, wantMode)
+		}
+	}
+	// The auth stage shell must render exactly when one of its panels does.
+	childRendered := r["database-stage"] || r["restart-stage"] || r["auth-form"] || r["boot-error"]
+	if childRendered != r["auth-stage"] {
+		t.Fatalf("auth-stage rendered=%v but child panels rendered=%v (shell must track its content)", r["auth-stage"], childRendered)
 	}
 }
 
@@ -546,7 +583,7 @@ func TestA11yFirstRunStateMatrixSQLite(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
 		t.Fatal("database stage did not render")
 	}
-	assertFirstRunPanels(t, ctx, true, false, false, "")
+	assertFirstRunPanels(t, ctx, true, false, false, false, false, "")
 	// STATE B: SQLite chosen -> create-administrator form in setup mode.
 	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
 		t.Fatal(err)
@@ -554,7 +591,7 @@ func TestA11yFirstRunStateMatrixSQLite(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
 		t.Fatal("administrator form did not appear after SQLite choice")
 	}
-	assertFirstRunPanels(t, ctx, false, true, false, "setup")
+	assertFirstRunPanels(t, ctx, false, false, true, false, false, "setup")
 	// Create administrator -> automatic dashboard transition.
 	if err := chromedp.Run(ctx,
 		chromedp.SendKeys(`#email`, "admin@example.com"),
@@ -573,7 +610,7 @@ func TestA11yFirstRunStateMatrixSQLite(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'login' && !document.getElementById('auth-form').hidden`) {
 		t.Fatal("login form did not appear after logout")
 	}
-	assertFirstRunPanels(t, ctx, false, true, false, "login")
+	assertFirstRunPanels(t, ctx, false, false, true, false, false, "login")
 }
 
 // TestA11yFirstRunStateMatrixPostgres walks the PostgreSQL first-run matrix:
@@ -592,7 +629,7 @@ func TestA11yFirstRunStateMatrixPostgres(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
 		t.Fatal("database stage did not render")
 	}
-	assertFirstRunPanels(t, ctx, true, false, false, "")
+	assertFirstRunPanels(t, ctx, true, false, false, false, false, "")
 	// STATE C: configure PostgreSQL URL; auth stays hidden while entering it.
 	if err := chromedp.Run(ctx, chromedp.Click(`input[name="database"][value="postgres"]`)); err != nil {
 		t.Fatal(err)
@@ -600,11 +637,11 @@ func TestA11yFirstRunStateMatrixPostgres(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#postgres-setup`)); err != nil {
 		t.Fatal(err)
 	}
-	assertFirstRunPanels(t, ctx, true, false, false, "")
+	assertFirstRunPanels(t, ctx, true, false, false, false, false, "")
 	if err := chromedp.Run(ctx, chromedp.SetValue(`#postgres-url`, dsn, chromedp.ByID)); err != nil {
 		t.Fatal(err)
 	}
-	assertFirstRunPanels(t, ctx, true, false, false, "")
+	assertFirstRunPanels(t, ctx, true, false, false, false, false, "")
 	// STATE D: commit -> restart-required only.
 	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
 		t.Fatal(err)
@@ -612,7 +649,7 @@ func TestA11yFirstRunStateMatrixPostgres(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('restart-stage').hidden === false`) {
 		t.Fatal("restart-required stage did not appear after postgres choice")
 	}
-	assertFirstRunPanels(t, ctx, false, false, true, "")
+	assertFirstRunPanels(t, ctx, false, true, false, false, false, "")
 	// STATE E: restart onto PostgreSQL -> create-administrator form (setup).
 	stop()
 	srv2, _ := startRealServer(t, "", dsn)
@@ -622,7 +659,7 @@ func TestA11yFirstRunStateMatrixPostgres(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
 		t.Fatal("create-administrator form did not appear after postgres restart")
 	}
-	assertFirstRunPanels(t, ctx, false, true, false, "setup")
+	assertFirstRunPanels(t, ctx, false, false, true, false, false, "setup")
 	if err := chromedp.Run(ctx,
 		chromedp.SendKeys(`#email`, "admin@example.com"),
 		chromedp.SendKeys(`#password`, "secret7"),
@@ -658,8 +695,123 @@ func TestA11yPendingRestartHidesAuthEvenWithAdmin(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('restart-stage').hidden === false`) {
 		t.Fatal("pending postgres transition did not show the restart notice")
 	}
-	assertFirstRunPanels(t, ctx, false, false, true, "")
+	assertFirstRunPanels(t, ctx, false, true, false, false, false, "")
 	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === false`) {
 		t.Fatal("dashboard was not hidden during the pending transition")
 	}
+}
+
+// assertAtMostOnePanelRendered fails if more than one of the first-run panels
+// is painted in the current browser frame, and that the auth stage shell
+// tracks its content. This is the exact-screenshot regression: the owner saw
+// Loading + Retry + restart-required + auth fields all at once.
+func assertAtMostOnePanelRendered(t *testing.T, ctx context.Context) {
+	t.Helper()
+	ids := []string{"database-stage", "restart-stage", "auth-form", "boot-error", "dashboard"}
+	rendered := 0
+	for _, id := range ids {
+		if renderedVisible(ctx, id) {
+			rendered++
+		}
+	}
+	if rendered > 1 {
+		t.Fatalf("browser frame rendered %d first-run panels at once (owner screenshot state)", rendered)
+	}
+	// Loading must never coexist with a rendered panel or boot error.
+	var title string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-title').textContent`, &title)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(title, "Loading") && rendered > 0 {
+		t.Fatalf("Loading title coexists with %d rendered panels", rendered)
+	}
+	authStage := renderedVisible(ctx, "auth-stage")
+	if authStage != (renderedVisible(ctx, "database-stage") || renderedVisible(ctx, "restart-stage") || renderedVisible(ctx, "auth-form") || renderedVisible(ctx, "boot-error")) {
+		t.Fatal("auth-stage shell rendered state does not match its panels")
+	}
+}
+
+// TestA11yFirstRunRenderedVisibility walks the first-run states and asserts,
+// on real rendered visibility, that no browser frame ever paints more than one
+// first-run panel and that Loading is gone in every terminal state.
+func TestA11yFirstRunRenderedVisibility(t *testing.T) {
+	ctx := a11yContext(t)
+	srv, _ := startRealServer(t, t.TempDir(), "")
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render")
+	}
+	assertAtMostOnePanelRendered(t, ctx)
+	assertFirstRunPanels(t, ctx, true, false, false, false, false, "")
+	// SQLite -> admin form; still a single rendered panel, no Loading.
+	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("administrator form did not appear")
+	}
+	assertAtMostOnePanelRendered(t, ctx)
+	assertFirstRunPanels(t, ctx, false, false, true, false, false, "setup")
+	// Create administrator -> dashboard is the single rendered panel.
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("dashboard did not appear")
+	}
+	assertAtMostOnePanelRendered(t, ctx)
+	assertFirstRunPanels(t, ctx, false, false, false, false, true, "")
+}
+
+// TestA11yInitialLoadShowsOnlyLoading proves the pre-boot shell renders nothing
+// but the Loading text: no chooser, restart, auth, boot-error or dashboard is
+// painted before boot resolves.
+func TestA11yInitialLoadShowsOnlyLoading(t *testing.T) {
+	ctx := a11yContext(t)
+	dataDir := t.TempDir()
+	t.Setenv("WEBFLEET_DATABASE_URL", "")
+	t.Setenv("WEBFLEET_DATA_DIR", dataDir)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Delay /api/setup/database (boot's first await) to hold the initial shell.
+	wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/setup/database" {
+			time.Sleep(2500 * time.Millisecond)
+		}
+		s.Handler().ServeHTTP(w, r)
+	}))
+	defer wrapped.Close()
+	if err := chromedp.Run(ctx, chromedp.Navigate(wrapped.URL)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	var title string
+	_ = chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-title').textContent`, &title))
+	if !strings.Contains(title, "Loading") {
+		t.Fatalf("pre-boot shell title = %q (want Loading)", title)
+	}
+	for _, id := range []string{"database-stage", "restart-stage", "auth-form", "boot-error", "dashboard"} {
+		if renderedVisible(ctx, id) {
+			t.Fatalf("pre-boot shell rendered %s (must be visually absent)", id)
+		}
+	}
+	// Once boot resolves the database chooser becomes the single rendered panel.
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render after boot")
+	}
+	assertAtMostOnePanelRendered(t, ctx)
 }
