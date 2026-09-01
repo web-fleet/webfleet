@@ -133,7 +133,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Avoid presenting synthetic server timing as browser Core Web Vitals.
 - Keep this checkpoint independent of a browser runtime so ordinary monitoring remains lightweight.
 
-### CP12 - Audit
+### CP12 - Audit [COMPLETE]
 
 - Add an optional browser-rendered audit runner for representative pages.
 - Present the feature in the site UI simply as **Audit**, not as Google Lighthouse compatibility.

@@ -18,7 +18,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 type migration struct {
 	version int
@@ -90,6 +90,11 @@ var migrations = []migration{
 	{11, "performance history", []string{
 		`ALTER TABLE check_results ADD COLUMN response_bytes INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE TABLE performance_baselines(site_id INTEGER PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE, baseline_latency_ms INTEGER NOT NULL DEFAULT 0, baseline_response_bytes INTEGER NOT NULL DEFAULT 0, sample_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);`,
+	}},
+	{12, "manual browser audits", []string{
+		`CREATE TABLE audit_settings(site_id INTEGER PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE, history_enabled INTEGER NOT NULL DEFAULT 0, pages_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);`,
+		`CREATE TABLE audit_runs(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, status TEXT NOT NULL, performance_score INTEGER NOT NULL DEFAULT 0, accessibility_score INTEGER NOT NULL DEFAULT 0, best_practices_score INTEGER NOT NULL DEFAULT 0, discoverability_score INTEGER NOT NULL DEFAULT 0, findings_json TEXT NOT NULL DEFAULT '[]', duration_ms INTEGER NOT NULL DEFAULT 0, audited_url TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`,
+		`CREATE INDEX audit_runs_site_idx ON audit_runs(site_id,id DESC);`,
 	}},
 }
 

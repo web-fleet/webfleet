@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/web-fleet/webfleet/internal/audit"
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
@@ -30,6 +31,7 @@ var embedded embed.FS
 type Server struct {
 	cfg       config.Config
 	store     *store.Store
+	audit     *audit.Service
 	auth      *auth.Service
 	sites     *sites.Service
 	monitor   *monitor.Service
@@ -43,7 +45,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -65,6 +67,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
 	s.mux.HandleFunc("DELETE /api/sites/{id}", s.withSession(s.handleDeleteSite, true))
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/audit", s.withSession(s.handleRunAudit, true))
+	s.mux.HandleFunc("PUT /api/sites/{id}/audit/history", s.withSession(s.handleAuditHistorySetting, true))
+	s.mux.HandleFunc("POST /api/audits/resolve", s.withSession(s.handleResolveAudits, true))
+	s.mux.HandleFunc("POST /api/audits/batch", s.withSession(s.handleBatchAudits, true))
 	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/performance", s.withSession(s.handleSitePerformance, false))
@@ -83,6 +90,74 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	runs, err := s.audit.History(id)
+	if err != nil {
+		writeError(w, 500, "audit unavailable")
+		return
+	}
+	hist, _ := s.audit.HistoryEnabled(id)
+	writeJSON(w, 200, map[string]any{"history_enabled": hist, "runs": runs})
+}
+func (s *Server) handleRunAudit(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.audit.Run(r.Context(), id)
+	if err != nil {
+		writeJSON(w, 200, out)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+func (s *Server) handleAuditHistorySetting(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if err := s.audit.SetHistory(id, in.Enabled); err != nil {
+		writeError(w, 500, "audit setting unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (s *Server) handleResolveAudits(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var in audit.BatchFilter
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	ids, err := s.audit.ResolveBatch(in)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"site_ids": ids, "count": len(ids)})
+}
+func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var in struct {
+		SiteIDs []int64 `json:"site_ids"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if len(in.SiteIDs) > 100 {
+		writeError(w, 400, "batch audit limit is 100 sites")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"results": s.audit.RunBatch(r.Context(), in.SiteIDs)})
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
