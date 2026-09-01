@@ -31,6 +31,13 @@ var knownActions = map[string]bool{
 	"session": true,
 }
 
+// knownTokenScopes is the documented API-token scope vocabulary. A route may
+// accept an API token only when it lists one or more of these scopes.
+var knownTokenScopes = map[string]bool{
+	"sites:read": true, "sites:write": true,
+	"fleet:read": true, "analytics:read": true, "audit:run": true,
+}
+
 // minRoleFor returns the least-privileged role that can perform the action.
 func minRoleFor(action string) string {
 	if action == "session" {
@@ -46,12 +53,13 @@ func minRoleFor(action string) string {
 
 // docRoute mirrors docs/hardening/route-inventory.json entries.
 type docRoute struct {
-	Method     string `json:"method"`
-	Path       string `json:"path"`
-	Action     string `json:"action"`
-	CSRF       bool   `json:"csrf"`
-	SiteScoped bool   `json:"siteScoped"`
-	MinRole    string `json:"minRole"`
+	Method      string   `json:"method"`
+	Path        string   `json:"path"`
+	Action      string   `json:"action"`
+	CSRF        bool     `json:"csrf"`
+	SiteScoped  bool     `json:"siteScoped"`
+	MinRole     string   `json:"minRole"`
+	TokenScopes []string `json:"tokenScopes,omitempty"`
 }
 type docInventory struct {
 	Actions []string   `json:"actions"`
@@ -74,6 +82,11 @@ func TestRouteContractIsCompleteAndConsistent(t *testing.T) {
 		}
 		if !knownActions[rt.action] {
 			t.Fatalf("route %s uses unknown action %q; extend knownActions deliberately", key, rt.action)
+		}
+		for _, sc := range rt.tokenScopes {
+			if !knownTokenScopes[sc] {
+				t.Fatalf("route %s uses unknown token scope %q", key, sc)
+			}
 		}
 		// CSRF posture: every state-changing authenticated route must be
 		// CSRF-protected; GET routes are read-only and exempt.
@@ -140,6 +153,14 @@ func TestRouteInventoryMatchesDocumentedInventory(t *testing.T) {
 		}
 		if d.MinRole != wantMin {
 			t.Fatalf("route %s minRole mismatch: doc=%q derived=%q", key, d.MinRole, wantMin)
+		}
+		if len(d.TokenScopes) != len(rt.tokenScopes) {
+			t.Fatalf("route %s tokenScopes mismatch: doc=%v table=%v", key, d.TokenScopes, rt.tokenScopes)
+		}
+		for i := range d.TokenScopes {
+			if d.TokenScopes[i] != rt.tokenScopes[i] {
+				t.Fatalf("route %s tokenScope[%d] mismatch: doc=%q table=%q", key, i, d.TokenScopes[i], rt.tokenScopes[i])
+			}
 		}
 		delete(docByKey, key)
 	}

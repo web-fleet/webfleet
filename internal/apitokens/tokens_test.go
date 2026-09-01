@@ -28,14 +28,21 @@ func TestScopeAndRevoke(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.Authenticate(x.Token, "sites:read"); e != nil {
-		t.Fatal(e)
+	u, o, scopes, e := s.Authenticate(x.Token)
+	if e != nil || u != uid || o != oid || !HasScope(scopes, "sites:read") {
+		t.Fatalf("authenticate: uid=%d org=%d scopes=%v err=%v", u, o, scopes, e)
 	}
-	if _, e = s.Authenticate(x.Token, "sites:write"); e == nil {
-		t.Fatal("scope bypass")
+	if HasScope(scopes, "sites:write") {
+		t.Fatal("scope bypass: sites:write granted when not requested")
 	}
 	s.Revoke(x.ID, uid, oid)
-	if _, e = s.Authenticate(x.Token, "sites:read"); e == nil {
+	if _, _, _, e = s.Authenticate(x.Token); e == nil {
 		t.Fatal("revoked accepted")
+	}
+	// Unknown and revoked tokens produce the same generic error (no existence
+	// oracle).
+	_, _, _, unknownErr := s.Authenticate("wf_doesnotexist")
+	if unknownErr == nil || unknownErr.Error() != e.Error() {
+		t.Fatal("token error leaks existence")
 	}
 }

@@ -56,12 +56,15 @@ type handler func(http.ResponseWriter, *http.Request, principal)
 // actual registration (Server.routes) and the route-inventory contract test,
 // so there is no mutable contract populated as a side effect of constructing a
 // server, and the authorization contract cannot drift from what is shipped.
+// tokenScopes declares which API-token scopes may authenticate this route; an
+// empty value makes the route session-only (a Bearer token cannot reach it).
 type routeDef struct {
-	method string
-	path   string
-	action string
-	csrf   bool
-	build  func(*Server) handler
+	method      string
+	path        string
+	action      string
+	csrf        bool
+	build       func(*Server) handler
+	tokenScopes []string
 }
 
 var apiRouteDefs = []routeDef{
@@ -69,71 +72,71 @@ var apiRouteDefs = []routeDef{
 		return func(w http.ResponseWriter, r *http.Request, _ principal) {
 			writeJSON(w, 200, map[string]any{"ok": true})
 		}
-	}},
-	{"GET", "/wf.js", "", false, func(s *Server) handler { return s.handleTracker }},
-	{"POST", "/api/analytics/event", "", false, func(s *Server) handler { return s.handleAnalyticsEvent }},
-	{"GET", "/api/setup/status", "", false, func(s *Server) handler { return s.handleSetupStatus }},
-	{"GET", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetupStatus }},
-	{"POST", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetup }},
-	{"POST", "/api/setup", "", false, func(s *Server) handler { return s.handleSetup }},
-	{"POST", "/api/login", "", false, func(s *Server) handler { return s.handleLogin }},
-	{"GET", "/api/oidc/login", "", false, func(s *Server) handler { return s.handleOIDCLogin }},
-	{"GET", "/api/oidc/callback", "", false, func(s *Server) handler { return s.handleOIDCCallback }},
-	{"GET", "/api/oidc/config", "organization.read", false, func(s *Server) handler { return s.handleOIDCConfig }},
-	{"PUT", "/api/oidc/config", "organization.update", true, func(s *Server) handler { return s.handleOIDCConfigSave }},
-	{"POST", "/api/logout", "session", true, func(s *Server) handler { return s.handleLogout }},
-	{"GET", "/api/session", "session", false, func(s *Server) handler { return s.handleSession }},
-	{"POST", "/api/tokens", "tokens.manage", true, func(s *Server) handler { return s.handleCreateToken }},
-	{"DELETE", "/api/tokens/{id}", "tokens.manage", true, func(s *Server) handler { return s.handleRevokeToken }},
-	{"GET", "/api/notifications/webhooks", "webhooks.read", false, func(s *Server) handler { return s.handleWebhooks }},
-	{"POST", "/api/notifications/webhooks", "webhooks.manage", true, func(s *Server) handler { return s.handleWebhookCreate }},
-	{"GET", "/api/notifications/deliveries", "webhooks.read", false, func(s *Server) handler { return s.handleNotificationDeliveries }},
-	{"GET", "/api/organization/members", "organization.read", false, func(s *Server) handler { return s.handleMembers }},
-	{"POST", "/api/organization/members", "membership.update", true, func(s *Server) handler { return s.handleMemberUpdate }},
-	{"GET", "/api/groups", "site.read", false, func(s *Server) handler { return s.handleGroups }},
-	{"POST", "/api/groups", "site.create", true, func(s *Server) handler { return s.handleCreateGroup }},
-	{"GET", "/api/sites", "site.read", false, func(s *Server) handler { return s.handleSites }},
-	{"POST", "/api/sites", "site.create", true, func(s *Server) handler { return s.handleCreateSite }},
-	{"GET", "/api/sites/{id}/tags", "site.read", false, func(s *Server) handler { return s.handleSiteTags }},
-	{"PUT", "/api/sites/{id}/tags", "site.update", true, func(s *Server) handler { return s.handleSiteTagsUpdate }},
-	{"GET", "/api/sites/{id}", "site.read", false, func(s *Server) handler { return s.handleSite }},
-	{"PUT", "/api/sites/{id}", "site.update", true, func(s *Server) handler { return s.handleUpdateSite }},
-	{"POST", "/api/sites/{id}/archive", "site.archive", true, func(s *Server) handler { return s.handleArchiveSite }},
-	{"DELETE", "/api/sites/{id}", "site.delete", true, func(s *Server) handler { return s.handleDeleteSite }},
-	{"GET", "/api/sites/{id}/analytics", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsProperty }},
-	{"POST", "/api/sites/{id}/analytics", "analytics.manage", true, func(s *Server) handler { return s.handleEnableAnalytics }},
-	{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsSummary }},
-	{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsGoals }},
-	{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true, func(s *Server) handler { return s.handleCreateAnalyticsGoal }},
-	{"GET", "/api/maintenance", "maintenance.read", false, func(s *Server) handler { return s.handleMaintenance }},
-	{"PUT", "/api/maintenance", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceUpdate }},
-	{"POST", "/api/maintenance/run", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceRun }},
-	{"GET", "/api/fleet", "fleet.read", false, func(s *Server) handler { return s.handleFleet }},
-	{"GET", "/api/fleet/analytics", "analytics.read", false, func(s *Server) handler { return s.handleFleetAnalytics }},
-	{"GET", "/api/sites/{id}/audit", "audit.read", false, func(s *Server) handler { return s.handleAudit }},
-	{"POST", "/api/sites/{id}/audit", "audit.run", true, func(s *Server) handler { return s.handleRunAudit }},
-	{"PUT", "/api/sites/{id}/audit/history", "audit.configure", true, func(s *Server) handler { return s.handleAuditHistorySetting }},
-	{"POST", "/api/audits/resolve", "audit.read", true, func(s *Server) handler { return s.handleResolveAudits }},
-	{"POST", "/api/audits/batch", "audit.run", true, func(s *Server) handler { return s.handleBatchAudits }},
-	{"POST", "/api/sites/{id}/check", "monitor.run", true, func(s *Server) handler { return s.handleCheckSite }},
-	{"GET", "/api/sites/{id}/deployments", "deployments.read", false, func(s *Server) handler { return s.handleDeployments }},
-	{"POST", "/api/sites/{id}/deployments", "deployments.record", true, func(s *Server) handler { return s.handleDeploymentRecord }},
-	{"GET", "/api/sites/{id}/deployments/correlation", "deployments.read", false, func(s *Server) handler { return s.handleDeploymentCorrelation }},
-	{"GET", "/api/sites/{id}/checks", "monitor.read", false, func(s *Server) handler { return s.handleSiteChecks }},
-	{"GET", "/api/sites/{id}/performance", "monitor.read", false, func(s *Server) handler { return s.handleSitePerformance }},
-	{"GET", "/api/sites/{id}/incidents", "incidents.read", false, func(s *Server) handler { return s.handleSiteIncidents }},
-	{"POST", "/api/incidents/{id}/ack", "incidents.acknowledge", true, func(s *Server) handler { return s.handleAckIncident }},
-	{"GET", "/api/sites/{id}/tls", "tls.read", false, func(s *Server) handler { return s.handleSiteTLS }},
-	{"POST", "/api/sites/{id}/tls/inspect", "tls.run", true, func(s *Server) handler { return s.handleInspectTLS }},
-	{"GET", "/api/fleet/tls", "tls.read", false, func(s *Server) handler { return s.handleFleetTLS }},
-	{"GET", "/api/sites/{id}/dns", "dns.read", false, func(s *Server) handler { return s.handleSiteDNS }},
-	{"POST", "/api/sites/{id}/dns/observe", "dns.run", true, func(s *Server) handler { return s.handleObserveDNS }},
-	{"GET", "/api/sites/{id}/http-observations", "monitor.read", false, func(s *Server) handler { return s.handleHTTPObservations }},
-	{"GET", "/api/sites/{id}/crawl", "crawl.read", false, func(s *Server) handler { return s.handleSiteCrawl }},
-	{"POST", "/api/sites/{id}/crawl", "crawl.run", true, func(s *Server) handler { return s.handleCrawlSite }},
-	{"GET", "/api/fleet/link-regressions", "crawl.read", false, func(s *Server) handler { return s.handleFleetLinkRegressions }},
-	{"GET", "/api/sites/{id}/header-expectations", "monitor.read", false, func(s *Server) handler { return s.handleHeaderExpectations }},
-	{"PUT", "/api/sites/{id}/header-expectations", "monitor.update", true, func(s *Server) handler { return s.handleHeaderExpectationUpdate }},
+	}, nil},
+	{"GET", "/wf.js", "", false, func(s *Server) handler { return s.handleTracker }, nil},
+	{"POST", "/api/analytics/event", "", false, func(s *Server) handler { return s.handleAnalyticsEvent }, nil},
+	{"GET", "/api/setup/status", "", false, func(s *Server) handler { return s.handleSetupStatus }, nil},
+	{"GET", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetupStatus }, nil},
+	{"POST", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetup }, nil},
+	{"POST", "/api/setup", "", false, func(s *Server) handler { return s.handleSetup }, nil},
+	{"POST", "/api/login", "", false, func(s *Server) handler { return s.handleLogin }, nil},
+	{"GET", "/api/oidc/login", "", false, func(s *Server) handler { return s.handleOIDCLogin }, nil},
+	{"GET", "/api/oidc/callback", "", false, func(s *Server) handler { return s.handleOIDCCallback }, nil},
+	{"GET", "/api/oidc/config", "organization.read", false, func(s *Server) handler { return s.handleOIDCConfig }, nil},
+	{"PUT", "/api/oidc/config", "organization.update", true, func(s *Server) handler { return s.handleOIDCConfigSave }, nil},
+	{"POST", "/api/logout", "session", true, func(s *Server) handler { return s.handleLogout }, nil},
+	{"GET", "/api/session", "session", false, func(s *Server) handler { return s.handleSession }, nil},
+	{"POST", "/api/tokens", "tokens.manage", true, func(s *Server) handler { return s.handleCreateToken }, nil},
+	{"DELETE", "/api/tokens/{id}", "tokens.manage", true, func(s *Server) handler { return s.handleRevokeToken }, nil},
+	{"GET", "/api/notifications/webhooks", "webhooks.read", false, func(s *Server) handler { return s.handleWebhooks }, nil},
+	{"POST", "/api/notifications/webhooks", "webhooks.manage", true, func(s *Server) handler { return s.handleWebhookCreate }, nil},
+	{"GET", "/api/notifications/deliveries", "webhooks.read", false, func(s *Server) handler { return s.handleNotificationDeliveries }, nil},
+	{"GET", "/api/organization/members", "organization.read", false, func(s *Server) handler { return s.handleMembers }, nil},
+	{"POST", "/api/organization/members", "membership.update", true, func(s *Server) handler { return s.handleMemberUpdate }, nil},
+	{"GET", "/api/groups", "site.read", false, func(s *Server) handler { return s.handleGroups }, []string{"sites:read"}},
+	{"POST", "/api/groups", "site.create", true, func(s *Server) handler { return s.handleCreateGroup }, []string{"sites:write"}},
+	{"GET", "/api/sites", "site.read", false, func(s *Server) handler { return s.handleSites }, []string{"sites:read"}},
+	{"POST", "/api/sites", "site.create", true, func(s *Server) handler { return s.handleCreateSite }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/tags", "site.read", false, func(s *Server) handler { return s.handleSiteTags }, []string{"sites:read"}},
+	{"PUT", "/api/sites/{id}/tags", "site.update", true, func(s *Server) handler { return s.handleSiteTagsUpdate }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}", "site.read", false, func(s *Server) handler { return s.handleSite }, []string{"sites:read"}},
+	{"PUT", "/api/sites/{id}", "site.update", true, func(s *Server) handler { return s.handleUpdateSite }, []string{"sites:write"}},
+	{"POST", "/api/sites/{id}/archive", "site.archive", true, func(s *Server) handler { return s.handleArchiveSite }, []string{"sites:write"}},
+	{"DELETE", "/api/sites/{id}", "site.delete", true, func(s *Server) handler { return s.handleDeleteSite }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/analytics", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsProperty }, []string{"analytics:read"}},
+	{"POST", "/api/sites/{id}/analytics", "analytics.manage", true, func(s *Server) handler { return s.handleEnableAnalytics }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsSummary }, []string{"analytics:read"}},
+	{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsGoals }, []string{"analytics:read"}},
+	{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true, func(s *Server) handler { return s.handleCreateAnalyticsGoal }, []string{"sites:write"}},
+	{"GET", "/api/maintenance", "maintenance.read", false, func(s *Server) handler { return s.handleMaintenance }, nil},
+	{"PUT", "/api/maintenance", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceUpdate }, nil},
+	{"POST", "/api/maintenance/run", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceRun }, nil},
+	{"GET", "/api/fleet", "fleet.read", false, func(s *Server) handler { return s.handleFleet }, []string{"fleet:read"}},
+	{"GET", "/api/fleet/analytics", "analytics.read", false, func(s *Server) handler { return s.handleFleetAnalytics }, []string{"analytics:read"}},
+	{"GET", "/api/sites/{id}/audit", "audit.read", false, func(s *Server) handler { return s.handleAudit }, []string{"sites:read"}},
+	{"POST", "/api/sites/{id}/audit", "audit.run", true, func(s *Server) handler { return s.handleRunAudit }, []string{"audit:run"}},
+	{"PUT", "/api/sites/{id}/audit/history", "audit.configure", true, func(s *Server) handler { return s.handleAuditHistorySetting }, []string{"sites:write"}},
+	{"POST", "/api/audits/resolve", "audit.read", true, func(s *Server) handler { return s.handleResolveAudits }, []string{"audit:run"}},
+	{"POST", "/api/audits/batch", "audit.run", true, func(s *Server) handler { return s.handleBatchAudits }, []string{"audit:run"}},
+	{"POST", "/api/sites/{id}/check", "monitor.run", true, func(s *Server) handler { return s.handleCheckSite }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/deployments", "deployments.read", false, func(s *Server) handler { return s.handleDeployments }, []string{"sites:read"}},
+	{"POST", "/api/sites/{id}/deployments", "deployments.record", true, func(s *Server) handler { return s.handleDeploymentRecord }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/deployments/correlation", "deployments.read", false, func(s *Server) handler { return s.handleDeploymentCorrelation }, []string{"sites:read"}},
+	{"GET", "/api/sites/{id}/checks", "monitor.read", false, func(s *Server) handler { return s.handleSiteChecks }, []string{"sites:read"}},
+	{"GET", "/api/sites/{id}/performance", "monitor.read", false, func(s *Server) handler { return s.handleSitePerformance }, []string{"sites:read"}},
+	{"GET", "/api/sites/{id}/incidents", "incidents.read", false, func(s *Server) handler { return s.handleSiteIncidents }, []string{"sites:read"}},
+	{"POST", "/api/incidents/{id}/ack", "incidents.acknowledge", true, func(s *Server) handler { return s.handleAckIncident }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/tls", "tls.read", false, func(s *Server) handler { return s.handleSiteTLS }, []string{"sites:read"}},
+	{"POST", "/api/sites/{id}/tls/inspect", "tls.run", true, func(s *Server) handler { return s.handleInspectTLS }, []string{"sites:write"}},
+	{"GET", "/api/fleet/tls", "tls.read", false, func(s *Server) handler { return s.handleFleetTLS }, []string{"fleet:read"}},
+	{"GET", "/api/sites/{id}/dns", "dns.read", false, func(s *Server) handler { return s.handleSiteDNS }, []string{"sites:read"}},
+	{"POST", "/api/sites/{id}/dns/observe", "dns.run", true, func(s *Server) handler { return s.handleObserveDNS }, []string{"sites:write"}},
+	{"GET", "/api/sites/{id}/http-observations", "monitor.read", false, func(s *Server) handler { return s.handleHTTPObservations }, []string{"sites:read"}},
+	{"GET", "/api/sites/{id}/crawl", "crawl.read", false, func(s *Server) handler { return s.handleSiteCrawl }, []string{"sites:read"}},
+	{"POST", "/api/sites/{id}/crawl", "crawl.run", true, func(s *Server) handler { return s.handleCrawlSite }, []string{"sites:write"}},
+	{"GET", "/api/fleet/link-regressions", "crawl.read", false, func(s *Server) handler { return s.handleFleetLinkRegressions }, []string{"fleet:read"}},
+	{"GET", "/api/sites/{id}/header-expectations", "monitor.read", false, func(s *Server) handler { return s.handleHeaderExpectations }, []string{"sites:read"}},
+	{"PUT", "/api/sites/{id}/header-expectations", "monitor.update", true, func(s *Server) handler { return s.handleHeaderExpectationUpdate }, []string{"sites:write"}},
 }
 
 type Server struct {
@@ -193,44 +196,86 @@ func (s *Server) routes() {
 		if def.action == "" {
 			s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) { h(w, r, principal{}) })
 		} else {
-			s.mux.HandleFunc(pattern, s.authorize(def.action, def.csrf, h))
+			s.mux.HandleFunc(pattern, s.authorize(def.action, def.csrf, def.tokenScopes, h))
 		}
 	}
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 }
 
-// authorize resolves the session, membership role and organization for an
-// authenticated request, enforces CSRF when required, and grants access only
-// when the caller's role permits the route action. Authorization is derived
-// from the membership row, never from the URL or a hard-coded organization.
-func (s *Server) authorize(action string, csrf bool, next handler) http.HandlerFunc {
+// authorize resolves the caller for an authenticated request. A session cookie
+// yields a session principal with CSRF enforcement and the membership-derived
+// role; when no session cookie is present and the route exposes an API-token
+// scope, a Bearer token is accepted as an alternative principal whose
+// authorization is exactly its token scopes (never the creator's role or
+// session). Routes without a token scope are session-only: a Bearer token
+// cannot reach them.
+func (s *Server) authorize(action string, csrf bool, tokenScopes []string, next handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("webfleet_session")
-		if err != nil {
-			writeError(w, 401, "authentication required")
+		if c, err := r.Cookie("webfleet_session"); err == nil {
+			sess, serr := s.auth.Session(c.Value)
+			if serr != nil {
+				writeError(w, 401, "authentication required")
+				return
+			}
+			if csrf && r.Header.Get("X-CSRF-Token") != sess.CSRF {
+				writeError(w, 403, "invalid CSRF token")
+				return
+			}
+			m, merr := s.rbac.Resolve(sess.UserID)
+			if merr != nil {
+				writeError(w, 403, "no organization membership")
+				return
+			}
+			if action != "session" && !rbac.Can(m.Role, action) {
+				writeError(w, 403, "permission denied")
+				return
+			}
+			next(w, r, principal{UserID: sess.UserID, Email: sess.Email, CSRF: sess.CSRF, OrgID: m.OrgID, Role: m.Role})
 			return
 		}
-		sess, err := s.auth.Session(c.Value)
-		if err != nil {
-			writeError(w, 401, "authentication required")
-			return
+		if len(tokenScopes) > 0 {
+			if p, ok := s.tokenPrincipal(w, r, tokenScopes); ok {
+				next(w, r, p)
+				return
+			}
 		}
-		if csrf && r.Header.Get("X-CSRF-Token") != sess.CSRF {
-			writeError(w, 403, "invalid CSRF token")
-			return
-		}
-		m, err := s.rbac.Resolve(sess.UserID)
-		if err != nil {
-			writeError(w, 403, "no organization membership")
-			return
-		}
-		if action != "session" && !rbac.Can(m.Role, action) {
-			writeError(w, 403, "permission denied")
-			return
-		}
-		next(w, r, principal{UserID: sess.UserID, Email: sess.Email, CSRF: sess.CSRF, OrgID: m.OrgID, Role: m.Role})
+		writeError(w, 401, "authentication required")
 	}
+}
+
+// tokenPrincipal authenticates an API token and grants exactly the token's
+// scopes. The acting organization is the token's organization, so a token can
+// never cross organization boundaries or inherit the privileges of the browser
+// session that created it.
+func (s *Server) tokenPrincipal(w http.ResponseWriter, r *http.Request, requiredScopes []string) (principal, bool) {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return principal{}, false
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+	if raw == "" {
+		return principal{}, false
+	}
+	uid, org, tokScopes, err := s.tokens.Authenticate(raw)
+	if err != nil {
+		// A single generic message for unknown and revoked tokens avoids
+		// leaking token existence.
+		writeError(w, 401, "invalid API token")
+		return principal{}, false
+	}
+	ok := false
+	for _, scope := range requiredScopes {
+		if apitokens.HasScope(tokScopes, scope) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		writeError(w, 403, "token scope denied")
+		return principal{}, false
+	}
+	return principal{UserID: uid, OrgID: org, Role: "token"}, true
 }
 
 // site loads a site after verifying it belongs to the caller's organization.

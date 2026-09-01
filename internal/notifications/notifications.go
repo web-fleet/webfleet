@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/web-fleet/webfleet/internal/netguard"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"net/http"
@@ -47,6 +48,14 @@ func (s *Service) Create(org int64, name, rawURL string) (Webhook, string, error
 	u, e := url.Parse(rawURL)
 	if e != nil || u.Scheme != "https" || u.Host == "" {
 		return Webhook{}, "", errors.New("webhook URL must use HTTPS")
+	}
+	// Webhook destinations are SSRF-sensitive: HTTPS alone is not enough. The
+	// host must resolve to a public address under the same public-network guard
+	// used by monitoring, crawling and Audit.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if e := netguard.New().ValidateHost(ctx, u.Hostname()); e != nil {
+		return Webhook{}, "", errors.New("webhook URL must resolve to a public address")
 	}
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)

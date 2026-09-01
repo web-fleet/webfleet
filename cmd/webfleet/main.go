@@ -7,6 +7,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/notifications"
 	"github.com/web-fleet/webfleet/internal/scheduler"
 	"github.com/web-fleet/webfleet/internal/server"
 	"github.com/web-fleet/webfleet/internal/service"
@@ -109,6 +110,11 @@ func main() {
 		sched = scheduler.New(st, mon, tlsSvc, dnsSvc, crawlSvc, cfg.CheckInterval, cfg.CrawlInterval, cfg.CheckConcurrency, log)
 		sched.Start(context.Background())
 		defer sched.Stop()
+		// Webhook outbox delivery runs wherever background work runs, so a
+		// slow webhook can never block an incident transition.
+		nw := notifications.NewWorker(st, log)
+		nw.Start(context.Background())
+		defer nw.Stop()
 	}
 	if mode == "worker" {
 		log.Info("webfleet worker started")

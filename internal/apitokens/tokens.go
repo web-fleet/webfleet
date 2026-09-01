@@ -45,22 +45,30 @@ func (s *Service) Create(user, org int64, name string, scopes []string) (Created
 	}
 	return Created{r[0]["id"].Int64, name, tok, prefix, scopes}, nil
 }
-func (s *Service) Authenticate(tok, scope string) (int64, error) {
-	r, e := sqlite.Query(s.st.DB, `SELECT id,user_id,scopes FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL`, hash(tok))
+// Authenticate validates a token and returns its owner, organization and
+// scopes. Unknown and revoked tokens return the same generic error so token
+// existence is not disclosed. last_used_at is refreshed on success.
+func (s *Service) Authenticate(tok string) (int64, int64, []string, error) {
+	r, e := sqlite.Query(s.st.DB, `SELECT id,user_id,organization_id,scopes FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL`, hash(tok))
 	if e != nil || len(r) == 0 {
-		return 0, errors.New("invalid API token")
+		return 0, 0, nil, errors.New("invalid API token")
 	}
-	ok := false
-	for _, x := range strings.Split(r[0]["scopes"].Text, ",") {
-		if x == scope {
-			ok = true
-		}
-	}
-	if !ok {
-		return 0, errors.New("token scope denied")
+	var scopes []string
+	if t := r[0]["scopes"].Text; t != "" {
+		scopes = strings.Split(t, ",")
 	}
 	_ = sqlite.Exec(s.st.DB, `UPDATE api_tokens SET last_used_at=? WHERE id=?`, store.Now(), r[0]["id"].Int64)
-	return r[0]["user_id"].Int64, nil
+	return r[0]["user_id"].Int64, r[0]["organization_id"].Int64, scopes, nil
+}
+
+// HasScope reports whether the token scope list includes the wanted scope.
+func HasScope(scopes []string, want string) bool {
+	for _, s := range scopes {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 func (s *Service) Revoke(id, user, org int64) error {
 	return sqlite.Exec(s.st.DB, `UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=? AND organization_id=?`, store.Now(), id, user, org)

@@ -1,7 +1,10 @@
 package incidents
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"github.com/web-fleet/webfleet/internal/database"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"strings"
@@ -19,44 +22,95 @@ type Incident struct {
 }
 
 func New(st *store.Store) *Service { return &Service{store: st} }
+
+// Transition applies a health state change to incidents and, in the same
+// transaction, writes webhook outbox rows for enabled destinations. The
+// incident state and its attributable webhook work commit atomically and never
+// depend on the external webhook succeeding; a background delivery worker
+// performs the HTTP afterwards.
 func (s *Service) Transition(siteID int64, prev, next, at string) error {
-	if next == prev {
+	if next == prev || next == "unknown" {
 		return nil
 	}
+	tx, e := s.store.DB.BeginTx(context.Background(), nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	openID := func() (int64, error) {
+		r, e := sqlite.Query(tx, `SELECT id FROM incidents WHERE site_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1`, siteID)
+		if e != nil {
+			return 0, e
+		}
+		if len(r) == 0 {
+			return 0, nil
+		}
+		return r[0]["id"].Int64, nil
+	}
 	if next == "healthy" {
-		rows, e := sqlite.Query(s.store.DB, `SELECT id FROM incidents WHERE site_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1`, siteID)
+		id, e := openID()
 		if e != nil {
 			return e
 		}
-		if len(rows) == 0 {
-			return nil
+		if id == 0 {
+			return tx.Commit()
 		}
-		id := rows[0]["id"].Int64
-		if e = sqlite.Exec(s.store.DB, `UPDATE incidents SET state='resolved',closed_at=? WHERE id=?`, at, id); e != nil {
+		if e = sqlite.Exec(tx, `UPDATE incidents SET state='resolved',closed_at=? WHERE id=?`, at, id); e != nil {
 			return e
 		}
-		return s.delivery(id, siteID, "recovery", at)
+		if e = recordDelivery(tx, id, siteID, "recovery", at); e != nil {
+			return e
+		}
+		if e = enqueueWebhooks(tx, siteID, id, "incident.recover", "resolved", "Website recovered", at); e != nil {
+			return e
+		}
+		return tx.Commit()
 	}
-	if next == "unknown" {
-		return nil
-	}
-	rows, e := sqlite.Query(s.store.DB, `SELECT id FROM incidents WHERE site_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1`, siteID)
+	id, e := openID()
 	if e != nil {
 		return e
 	}
-	if len(rows) > 0 {
-		return sqlite.Exec(s.store.DB, `UPDATE incidents SET state=? WHERE id=?`, next, rows[0]["id"].Int64)
+	if id > 0 {
+		// Escalation within an open incident: update state, do not re-notify.
+		if e = sqlite.Exec(tx, `UPDATE incidents SET state=? WHERE id=?`, next, id); e != nil {
+			return e
+		}
+		return tx.Commit()
 	}
-	summary := "Website entered " + next + " state"
-	r, e := sqlite.Query(s.store.DB, `INSERT INTO incidents(site_id,state,summary,opened_at) VALUES(?,?,?,?) RETURNING id`, siteID, next, summary, at)
+	r, e := sqlite.Query(tx, `INSERT INTO incidents(site_id,state,summary,opened_at) VALUES(?,?,?,?) RETURNING id`, siteID, next, "Website entered "+next+" state", at)
 	if e != nil {
 		return e
 	}
-	return s.delivery(r[0]["id"].Int64, siteID, "open", at)
+	id = r[0]["id"].Int64
+	if e = recordDelivery(tx, id, siteID, "open", at); e != nil {
+		return e
+	}
+	if e = enqueueWebhooks(tx, siteID, id, "incident.open", next, "Website entered "+next+" state", at); e != nil {
+		return e
+	}
+	return tx.Commit()
 }
-func (s *Service) delivery(incidentID, siteID int64, kind, at string) error {
-	return sqlite.Exec(s.store.DB, `INSERT INTO alert_deliveries(incident_id,site_id,transport,kind,status,created_at) VALUES(?,?,'in_app',?,'delivered',?)`, incidentID, siteID, kind, at)
+
+// recordDelivery keeps the in-app alert history in the same transaction as the
+// incident state change.
+func recordDelivery(tx *database.Tx, incidentID, siteID int64, kind, at string) error {
+	return sqlite.Exec(tx, `INSERT INTO alert_deliveries(incident_id,site_id,transport,kind,status,created_at) VALUES(?,?,'in_app',?,'delivered',?)`, incidentID, siteID, kind, at)
 }
+
+// enqueueWebhooks writes a pending delivery row per enabled webhook with the
+// event payload attached, so delivery is attributable and retried later without
+// coupling the incident transition to an external call.
+func enqueueWebhooks(tx *database.Tx, siteID, incidentID int64, kind, state, summary, at string) error {
+	payload, _ := json.Marshal(map[string]any{
+		"site_id":     siteID,
+		"incident_id": incidentID,
+		"state":       state,
+		"summary":     summary,
+		"at":          at,
+	})
+	return sqlite.Exec(tx, `INSERT INTO notification_deliveries(webhook_id,event_kind,status,payload_json,created_at) SELECT id,?, 'pending',?,? FROM notification_webhooks WHERE enabled=1`, kind, string(payload), at)
+}
+
 func (s *Service) List(siteID int64) ([]Incident, error) {
 	rows, e := sqlite.Query(s.store.DB, `SELECT id,site_id,state,summary,opened_at,COALESCE(closed_at,'') closed_at,COALESCE(acknowledged_at,'') acknowledged_at FROM incidents WHERE site_id=? ORDER BY id DESC LIMIT 100`, siteID)
 	if e != nil {
