@@ -258,7 +258,7 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - Agency/client-friendly grouping.
 - Audit logs for privileged actions.
 
-### CP22 - API and tokens
+### CP22 - API and tokens [COMPLETE]
 
 - Documented API for site/monitor/reporting workflows.
 - Scoped API tokens.

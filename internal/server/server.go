@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/web-fleet/webfleet/internal/analytics"
+	"github.com/web-fleet/webfleet/internal/apitokens"
 	"github.com/web-fleet/webfleet/internal/audit"
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
@@ -52,7 +53,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -69,6 +70,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
 	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
+	s.mux.HandleFunc("POST /api/tokens", s.withSession(s.handleCreateToken, true))
+	s.mux.HandleFunc("DELETE /api/tokens/{id}", s.withSession(s.handleRevokeToken, true))
 	s.mux.HandleFunc("GET /api/organization/members", s.withSession(s.handleMembers, false))
 	s.mux.HandleFunc("POST /api/organization/members", s.withSession(s.handleMemberUpdate, true))
 	s.mux.HandleFunc("GET /api/groups", s.withSession(s.handleGroups, false))
@@ -594,6 +597,33 @@ func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess a
 	writeJSON(w, 200, map[string]any{"checks": rows})
 }
 
+func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var in struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	x, e := s.tokens.Create(sess.UserID, 1, in.Name, in.Scopes)
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 201, x)
+}
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if e != nil {
+		writeError(w, 400, "invalid token id")
+		return
+	}
+	if e = s.tokens.Revoke(id, sess.UserID); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
 func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	role, e := s.rbac.Role(sess.UserID, 1)
 	if e != nil || !rbac.Can(role, "organization.read") {
