@@ -306,3 +306,107 @@ func TestCrawlExcludesAssetsAndTemplateLiterals(t *testing.T) {
 		t.Fatalf("internal_links=%d want >=3 (asset links still count as internal links; template literals are filtered)", d.Run.InternalLinks)
 	}
 }
+
+// TestCrawlAssetInventoryUnique proves assets are inventoried as unique
+// normalized URLs per class, repeated references count once, extensionless
+// resources are classified by Content-Type, and no asset ever becomes a page.
+func TestCrawlAssetInventoryUnique(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<a href="/style.css">c1</a><a href="/style.css">c2</a><a href="/app.js">j</a><a href="/img.png">i</a><a href="/img.png">i2</a><a href="/font.woff2">f</a><a href="/dl.zip">d</a><a href="/blob">b</a>`)
+	})
+	mux.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		fmt.Fprint(w, "png")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(base)
+	site, _ := sites.New(st).Create(1, "x", base, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := d.Run
+	// Only the root page is HTML; the extensionless /blob is an image asset.
+	if r.PagesCrawled != 1 || r.PagesDiscovered != 1 {
+		t.Fatalf("pages_crawled=%d discovered=%d want 1 (assets never become pages)", r.PagesCrawled, r.PagesDiscovered)
+	}
+	if r.CSSFiles != 1 || r.JavaScriptFiles != 1 || r.ImageFiles != 2 || r.FontFiles != 1 || r.DocumentFiles != 1 {
+		t.Fatalf("asset counts css=%d js=%d img=%d font=%d doc=%d want 1/1/2/1/1 (unique, repeated refs counted once)",
+			r.CSSFiles, r.JavaScriptFiles, r.ImageFiles, r.FontFiles, r.DocumentFiles)
+	}
+	if len(d.Assets) != 6 {
+		t.Fatalf("assets rows=%d want 6 (5 extension + 1 content-type-classified)", len(d.Assets))
+	}
+	for _, a := range d.Assets {
+		if a.Kind != "asset" {
+			t.Fatalf("asset row kind=%q", a.Kind)
+		}
+		if a.URL == base+"/blob" && a.AssetClass != "image" {
+			t.Fatalf("extensionless /blob class=%q want image (from Content-Type)", a.AssetClass)
+		}
+	}
+}
+
+// TestCrawlSitemapDiagnostics proves the sitemap/internal/crawled sets stay
+// distinct so mismatch counts can be derived truthfully.
+func TestCrawlSitemapDiagnostics(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<a href="/linked">linked</a>`) // in sitemap AND internal -> both
+	})
+	mux.HandleFunc("/linked", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<a href="/only-internal">more</a>`)
+	})
+	mux.HandleFunc("/only-internal", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "internal only")
+	})
+	mux.HandleFunc("/only-sitemap", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "sitemap only")
+	})
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, "<urlset><url><loc>%s/linked</loc></url><url><loc>%s/only-sitemap</loc></url></urlset>", base, base)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(base)
+	site, _ := sites.New(st).Create(1, "x", base, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	originOf := map[string]string{}
+	for _, p := range d.Pages {
+		originOf[p.URL] = p.Origin
+	}
+	if originOf[base+"/linked"] != "both" {
+		t.Fatalf("/linked origin=%q want both", originOf[base+"/linked"])
+	}
+	if originOf[base+"/only-sitemap"] != "sitemap" {
+		t.Fatalf("/only-sitemap origin=%q want sitemap", originOf[base+"/only-sitemap"])
+	}
+	if originOf[base+"/only-internal"] != "internal" {
+		t.Fatalf("/only-internal origin=%q want internal", originOf[base+"/only-internal"])
+	}
+}

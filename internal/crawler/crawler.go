@@ -44,6 +44,15 @@ type Run struct {
 	LimitReached          bool   `json:"limit_reached"`
 	SitemapURLsDiscovered int    `json:"sitemap_urls_discovered"`
 	CurrentURL            string `json:"current_url"`
+	PagesFailed           int    `json:"pages_failed"`
+	CSSFiles              int    `json:"css_files"`
+	JavaScriptFiles       int    `json:"javascript_files"`
+	ImageFiles            int    `json:"image_files"`
+	FontFiles             int    `json:"font_files"`
+	MediaFiles            int    `json:"media_files"`
+	DocumentFiles         int    `json:"document_files"`
+	DataFeedFiles         int    `json:"data_feed_files"`
+	OtherAssetFiles       int    `json:"other_asset_files"`
 	InternalLinks         int    `json:"internal_links"`
 	ExternalLinks         int    `json:"external_links"`
 	BrokenInternal        int    `json:"broken_internal"`
@@ -60,6 +69,10 @@ type Page struct {
 	StatusCode int    `json:"status_code"`
 	Depth      int    `json:"depth"`
 	Error      string `json:"error"`
+	Kind       string `json:"kind"`
+	AssetClass string `json:"asset_class"`
+	Origin     string `json:"origin"`
+	OK         bool   `json:"ok"`
 }
 type Link struct {
 	FromURL    string `json:"from_url"`
@@ -70,9 +83,10 @@ type Link struct {
 	Error      string `json:"error"`
 }
 type Detail struct {
-	Run   Run    `json:"run"`
-	Pages []Page `json:"pages"`
-	Links []Link `json:"links"`
+	Run    Run    `json:"run"`
+	Pages  []Page `json:"pages"`
+	Assets []Page `json:"assets"`
+	Links  []Link `json:"links"`
 }
 
 type fetchResult struct {
@@ -135,6 +149,9 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	seen := map[string]bool{}
 	known := map[string]bool{root.String(): true}
 	discovered := 1
+	sitemapPages := map[string]bool{root.String(): true}
+	internalPages := map[string]bool{root.String(): true}
+	assets := map[string]string{}
 	for _, sm := range sitemaps {
 		if urls := s.loadSitemap(ctx, sm, root); len(urls) > 0 {
 			detail.Run.SitemapFound = true
@@ -142,6 +159,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 				if pu, perr := url.Parse(u); perr == nil && isAsset(pu) {
 					continue
 				}
+				sitemapPages[u] = true
 				if !known[u] {
 					known[u] = true
 					discovered++
@@ -174,21 +192,36 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 		if ct := strings.ToLower(fr.header.Get("Content-Type")); ct != "" && !strings.Contains(ct, "text/html") {
 			isHTML = false
 		}
-		// Only HTML documents (or broken/errored responses) count as crawled
-		// pages; linked stylesheets, images, downloads and API endpoints are
-		// resources, not pages.
+		// A fetched resource that is neither HTML nor an error is an asset
+		// (extensionless target); classify it by its authoritative Content-Type.
 		if !isHTML && fr.err == nil && fr.status < 400 {
+			cls := assetClassByContentType(fr.header.Get("Content-Type"))
+			if _, ok := assets[q.u]; !ok {
+				assets[q.u] = cls
+				_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,asset_class,origin,ok) VALUES(?,?,?,0,0,'','asset',?,'internal',0) RETURNING id`, runID, siteID, q.u, cls)
+			}
+			// It was counted as a discovered page when enqueued, but it is a
+			// resource, not an HTML page.
+			if discovered > 0 {
+				discovered--
+			}
 			_ = s.persistProgress(runID, detail, discovered)
 			continue
 		}
+		// A real page: record its discovery origin and whether it was fetched OK.
+		page.Kind = "page"
+		page.Origin = "internal"
+		if sitemapPages[q.u] {
+			page.Origin = "sitemap"
+		}
+		if page.Origin == "sitemap" && internalPages[q.u] {
+			page.Origin = "both"
+		}
+		page.OK = fr.err == nil && fr.status < 400
 		detail.Pages = append(detail.Pages, page)
-		_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error) VALUES(?,?,?,?,?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error)
-		if fr.err != nil || fr.status >= 400 {
+		_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,asset_class,origin,ok) VALUES(?,?,?,?,?,?,'page','',?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error, page.Origin, page.OK)
+		if !page.OK {
 			brokenNow[q.u] = true
-			_ = s.persistProgress(runID, detail, discovered)
-			continue
-		}
-		if !isHTML {
 			_ = s.persistProgress(runID, detail, discovered)
 			continue
 		}
@@ -205,10 +238,18 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 			if strings.EqualFold(tu.Hostname(), root.Hostname()) {
 				kind = "internal"
 				detail.Run.InternalLinks++
-				if !isAsset(tu) && !known[target] && q.depth < MaxDepth {
-					known[target] = true
-					discovered++
-					queue = append(queue, queued{u: target, depth: q.depth + 1})
+				if isAsset(tu) {
+					if _, ok := assets[target]; !ok {
+						assets[target] = assetClass(tu)
+						_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,asset_class,origin,ok) VALUES(?,?,?,0,0,'','asset',?,'internal',0) RETURNING id`, runID, siteID, target, assetClass(tu))
+					}
+				} else {
+					internalPages[target] = true
+					if !known[target] && q.depth < MaxDepth {
+						known[target] = true
+						discovered++
+						queue = append(queue, queued{u: target, depth: q.depth + 1})
+					}
 				}
 			} else {
 				detail.Run.ExternalLinks++
@@ -286,10 +327,35 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	// The crawl is truncated only when it stopped at the page ceiling while
 	// undiscovered work still remained in the queue.
 	detail.Run.LimitReached = len(detail.Pages) >= MaxPages && len(queue) > 0
+	for _, p := range detail.Pages {
+		if !p.OK {
+			detail.Run.PagesFailed++
+		}
+	}
+	for _, cls := range assets {
+		switch cls {
+		case "css":
+			detail.Run.CSSFiles++
+		case "javascript":
+			detail.Run.JavaScriptFiles++
+		case "image":
+			detail.Run.ImageFiles++
+		case "font":
+			detail.Run.FontFiles++
+		case "media":
+			detail.Run.MediaFiles++
+		case "document":
+			detail.Run.DocumentFiles++
+		case "data":
+			detail.Run.DataFeedFiles++
+		default:
+			detail.Run.OtherAssetFiles++
+		}
+	}
 	detail.Run.CurrentURL = ""
 	detail.Run.Status = "complete"
 	detail.Run.FinishedAt = store.Now()
-	_ = sqlite.Exec(s.store.DB, `UPDATE crawl_runs SET status='complete',pages_crawled=?,pages_discovered=?,page_limit=?,limit_reached=?,sitemap_urls_discovered=?,current_url='',internal_links=?,external_links=?,broken_internal=?,broken_external=?,new_broken=?,robots_found=?,sitemap_found=?,finished_at=? WHERE id=?`, detail.Run.PagesCrawled, detail.Run.PagesDiscovered, detail.Run.PageLimit, detail.Run.LimitReached, detail.Run.SitemapURLsDiscovered, detail.Run.InternalLinks, detail.Run.ExternalLinks, detail.Run.BrokenInternal, detail.Run.BrokenExternal, detail.Run.NewBroken, detail.Run.RobotsFound, detail.Run.SitemapFound, detail.Run.FinishedAt, runID)
+	_ = sqlite.Exec(s.store.DB, `UPDATE crawl_runs SET status='complete',pages_crawled=?,pages_discovered=?,page_limit=?,limit_reached=?,sitemap_urls_discovered=?,current_url='',pages_failed=?,css_files=?,javascript_files=?,image_files=?,font_files=?,media_files=?,document_files=?,data_feed_files=?,other_asset_files=?,internal_links=?,external_links=?,broken_internal=?,broken_external=?,new_broken=?,robots_found=?,sitemap_found=?,finished_at=? WHERE id=?`, detail.Run.PagesCrawled, detail.Run.PagesDiscovered, detail.Run.PageLimit, detail.Run.LimitReached, detail.Run.SitemapURLsDiscovered, detail.Run.PagesFailed, detail.Run.CSSFiles, detail.Run.JavaScriptFiles, detail.Run.ImageFiles, detail.Run.FontFiles, detail.Run.MediaFiles, detail.Run.DocumentFiles, detail.Run.DataFeedFiles, detail.Run.OtherAssetFiles, detail.Run.InternalLinks, detail.Run.ExternalLinks, detail.Run.BrokenInternal, detail.Run.BrokenExternal, detail.Run.NewBroken, detail.Run.RobotsFound, detail.Run.SitemapFound, detail.Run.FinishedAt, runID)
 	full, e := s.Detail(runID)
 	if e == nil {
 		return full, nil
@@ -351,13 +417,49 @@ func (s *Service) loadSitemap(ctx context.Context, raw string, root *url.URL) []
 	return out
 }
 
-// assetExtensions are URL suffixes that are almost never HTML pages. The
-// crawler avoids enqueueing them so pages_crawled/pages_discovered reflect
-// actual pages rather than every linked stylesheet/image/download.
-var assetExtensions = map[string]bool{"css": true, "js": true, "png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true, "svg": true, "ico": true, "zip": true, "tar": true, "gz": true, "7z": true, "pdf": true, "json": true, "xml": true, "md": true, "txt": true, "woff": true, "woff2": true, "ttf": true, "otf": true, "mp4": true, "mp3": true, "webm": true, "wasm": true, "map": true}
+// assetClassByExt classifies a resource by its URL path extension. Assets are
+// inventoried (unique URL per class) but never enqueued as crawl pages.
+var assetClassByExt = map[string]string{
+	"css": "css", "scss": "css", "sass": "css",
+	"js": "javascript", "mjs": "javascript", "cjs": "javascript",
+	"png": "image", "jpg": "image", "jpeg": "image", "gif": "image", "webp": "image", "svg": "image", "ico": "image", "avif": "image", "bmp": "image",
+	"woff": "font", "woff2": "font", "ttf": "font", "otf": "font", "eot": "font",
+	"mp4": "media", "mp3": "media", "webm": "media", "ogg": "media", "mov": "media", "m4a": "media", "wav": "media",
+	"pdf": "document", "zip": "document", "tar": "document", "gz": "document", "7z": "document", "rar": "document", "doc": "document", "docx": "document", "xls": "document", "xlsx": "document", "ppt": "document", "pptx": "document", "epub": "document",
+	"json": "data", "xml": "data", "atom": "data", "rss": "data", "txt": "data", "yaml": "data", "yml": "data", "toml": "data", "webmanifest": "data",
+}
 
-func isAsset(u *url.URL) bool {
-	return assetExtensions[strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))]
+func assetClass(u *url.URL) string {
+	if c, ok := assetClassByExt[strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))]; ok {
+		return c
+	}
+	return ""
+}
+
+func isAsset(u *url.URL) bool { return assetClass(u) != "" }
+
+// assetClassByContentType classifies a fetched resource that carried no
+// classifiable path extension, using the authoritative response Content-Type.
+func assetClassByContentType(ct string) string {
+	ct = strings.ToLower(ct)
+	switch {
+	case strings.Contains(ct, "text/css"):
+		return "css"
+	case strings.Contains(ct, "javascript") || strings.Contains(ct, "ecmascript"):
+		return "javascript"
+	case strings.HasPrefix(ct, "image/"):
+		return "image"
+	case strings.Contains(ct, "font"):
+		return "font"
+	case strings.HasPrefix(ct, "audio/") || strings.HasPrefix(ct, "video/"):
+		return "media"
+	case strings.Contains(ct, "pdf") || strings.Contains(ct, "zip") || strings.Contains(ct, "octet-stream"):
+		return "document"
+	case strings.Contains(ct, "json") || strings.Contains(ct, "xml") || strings.Contains(ct, "rss") || strings.Contains(ct, "atom") || strings.Contains(ct, "text/plain") || strings.Contains(ct, "text/csv"):
+		return "data"
+	default:
+		return "other"
+	}
 }
 
 // isTemplateLiteral detects documentation code-sample hrefs such as
@@ -442,24 +544,31 @@ func (s *Service) fetch(ctx context.Context, method, raw string, max int64) fetc
 	return fetchResult{status: resp.StatusCode, body: body, final: resp.Request.URL.String(), header: resp.Header.Clone()}
 }
 func (s *Service) Latest(siteID int64) (Run, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,pages_discovered,page_limit,limit_reached,sitemap_urls_discovered,current_url,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,pages_discovered,page_limit,limit_reached,sitemap_urls_discovered,current_url,pages_failed,css_files,javascript_files,image_files,font_files,media_files,document_files,data_feed_files,other_asset_files,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID)
 	if e != nil || len(r) == 0 {
 		return Run{}, errors.New("no crawl run")
 	}
 	return runRow(r[0]), nil
 }
 func (s *Service) Detail(runID int64) (Detail, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,pages_discovered,page_limit,limit_reached,sitemap_urls_discovered,current_url,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE id=?`, runID)
+	r, e := sqlite.Query(s.store.DB, `SELECT id,site_id,status,pages_crawled,pages_discovered,page_limit,limit_reached,sitemap_urls_discovered,current_url,pages_failed,css_files,javascript_files,image_files,font_files,media_files,document_files,data_feed_files,other_asset_files,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,error,started_at,COALESCE(finished_at,'') finished_at FROM crawl_runs WHERE id=?`, runID)
 	if e != nil || len(r) == 0 {
 		return Detail{}, errors.New("crawl run not found")
 	}
 	d := Detail{Run: runRow(r[0])}
-	pr, e := sqlite.Query(s.store.DB, `SELECT url,status_code,depth,error FROM crawl_pages WHERE run_id=? ORDER BY id`, runID)
+	pr, e := sqlite.Query(s.store.DB, `SELECT url,status_code,depth,error,kind,asset_class,origin,ok FROM crawl_pages WHERE run_id=? AND kind='page' ORDER BY id`, runID)
 	if e != nil {
 		return Detail{}, e
 	}
 	for _, x := range pr {
-		d.Pages = append(d.Pages, Page{URL: x["url"].Text, StatusCode: int(x["status_code"].Int64), Depth: int(x["depth"].Int64), Error: x["error"].Text})
+		d.Pages = append(d.Pages, Page{URL: x["url"].Text, StatusCode: int(x["status_code"].Int64), Depth: int(x["depth"].Int64), Error: x["error"].Text, Kind: x["kind"].Text, AssetClass: x["asset_class"].Text, Origin: x["origin"].Text, OK: x["ok"].Int64 != 0})
+	}
+	ar, e := sqlite.Query(s.store.DB, `SELECT url,status_code,depth,error,kind,asset_class,origin,ok FROM crawl_pages WHERE run_id=? AND kind='asset' ORDER BY id`, runID)
+	if e != nil {
+		return Detail{}, e
+	}
+	for _, x := range ar {
+		d.Assets = append(d.Assets, Page{URL: x["url"].Text, StatusCode: int(x["status_code"].Int64), Depth: int(x["depth"].Int64), Error: x["error"].Text, Kind: x["kind"].Text, AssetClass: x["asset_class"].Text, Origin: x["origin"].Text, OK: x["ok"].Int64 != 0})
 	}
 	lr, e := sqlite.Query(s.store.DB, `SELECT from_url,to_url,kind,status_code,broken,error FROM crawl_links WHERE run_id=? ORDER BY id LIMIT 1000`, runID)
 	if e != nil {
@@ -478,7 +587,7 @@ func (s *Service) LatestDetail(siteID int64) (Detail, error) {
 	return s.Detail(r.ID)
 }
 func (s *Service) FleetRegressions(orgID int64) ([]Run, error) {
-	r, e := sqlite.Query(s.store.DB, `SELECT c.id,c.site_id,c.status,c.pages_crawled,c.pages_discovered,c.page_limit,c.limit_reached,c.sitemap_urls_discovered,c.current_url,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id JOIN sites s ON s.id=c.site_id WHERE s.organization_id=? AND (c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0) ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`, orgID)
+	r, e := sqlite.Query(s.store.DB, `SELECT c.id,c.site_id,c.status,c.pages_crawled,c.pages_discovered,c.page_limit,c.limit_reached,c.sitemap_urls_discovered,c.current_url,c.pages_failed,c.css_files,c.javascript_files,c.image_files,c.font_files,c.media_files,c.document_files,c.data_feed_files,c.other_asset_files,c.internal_links,c.external_links,c.broken_internal,c.broken_external,c.new_broken,c.robots_found,c.sitemap_found,c.error,c.started_at,COALESCE(c.finished_at,'') finished_at FROM crawl_runs c JOIN (SELECT site_id,MAX(id) id FROM crawl_runs WHERE status='complete' GROUP BY site_id) x ON x.id=c.id JOIN sites s ON s.id=c.site_id WHERE s.organization_id=? AND (c.new_broken>0 OR c.broken_internal>0 OR c.broken_external>0) ORDER BY c.new_broken DESC,c.id DESC LIMIT 50`, orgID)
 	if e != nil {
 		return nil, e
 	}
@@ -489,7 +598,7 @@ func (s *Service) FleetRegressions(orgID int64) ([]Run, error) {
 	return out, nil
 }
 func runRow(r sqlite.Row) Run {
-	return Run{ID: r["id"].Int64, SiteID: r["site_id"].Int64, Status: r["status"].Text, PagesCrawled: int(r["pages_crawled"].Int64), PagesDiscovered: int(r["pages_discovered"].Int64), PageLimit: int(r["page_limit"].Int64), LimitReached: r["limit_reached"].Int64 != 0, SitemapURLsDiscovered: int(r["sitemap_urls_discovered"].Int64), CurrentURL: r["current_url"].Text, InternalLinks: int(r["internal_links"].Int64), ExternalLinks: int(r["external_links"].Int64), BrokenInternal: int(r["broken_internal"].Int64), BrokenExternal: int(r["broken_external"].Int64), NewBroken: int(r["new_broken"].Int64), RobotsFound: r["robots_found"].Int64 != 0, SitemapFound: r["sitemap_found"].Int64 != 0, Error: r["error"].Text, StartedAt: r["started_at"].Text, FinishedAt: r["finished_at"].Text}
+	return Run{ID: r["id"].Int64, SiteID: r["site_id"].Int64, Status: r["status"].Text, PagesCrawled: int(r["pages_crawled"].Int64), PagesDiscovered: int(r["pages_discovered"].Int64), PageLimit: int(r["page_limit"].Int64), LimitReached: r["limit_reached"].Int64 != 0, SitemapURLsDiscovered: int(r["sitemap_urls_discovered"].Int64), CurrentURL: r["current_url"].Text, PagesFailed: int(r["pages_failed"].Int64), CSSFiles: int(r["css_files"].Int64), JavaScriptFiles: int(r["javascript_files"].Int64), ImageFiles: int(r["image_files"].Int64), FontFiles: int(r["font_files"].Int64), MediaFiles: int(r["media_files"].Int64), DocumentFiles: int(r["document_files"].Int64), DataFeedFiles: int(r["data_feed_files"].Int64), OtherAssetFiles: int(r["other_asset_files"].Int64), InternalLinks: int(r["internal_links"].Int64), ExternalLinks: int(r["external_links"].Int64), BrokenInternal: int(r["broken_internal"].Int64), BrokenExternal: int(r["broken_external"].Int64), NewBroken: int(r["new_broken"].Int64), RobotsFound: r["robots_found"].Int64 != 0, SitemapFound: r["sitemap_found"].Int64 != 0, Error: r["error"].Text, StartedAt: r["started_at"].Text, FinishedAt: r["finished_at"].Text}
 }
 
 // persistProgress writes the live crawl state so a polling client can observe

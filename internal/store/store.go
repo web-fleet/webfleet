@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 29
+const schemaVersion = 30
 
 type migration struct {
 	version int
@@ -168,6 +168,21 @@ var migrations = []migration{
 		`ALTER TABLE crawl_runs ADD COLUMN limit_reached INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE crawl_runs ADD COLUMN sitemap_urls_discovered INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE crawl_runs ADD COLUMN current_url TEXT NOT NULL DEFAULT '';`,
+	}},
+	{30, "crawl site inventory", []string{
+		`ALTER TABLE crawl_runs ADD COLUMN pages_failed INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN css_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN javascript_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN image_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN font_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN media_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN document_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN data_feed_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN other_asset_files INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_pages ADD COLUMN kind TEXT NOT NULL DEFAULT 'page';`,
+		`ALTER TABLE crawl_pages ADD COLUMN asset_class TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE crawl_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'internal';`,
+		`ALTER TABLE crawl_pages ADD COLUMN ok INTEGER NOT NULL DEFAULT 1;`,
 	}},
 }
 
