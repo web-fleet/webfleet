@@ -258,13 +258,14 @@ func (s *Server) authorize(action string, csrf bool, tokenScopes []string, next 
 // handled=true means this function already did.
 func (s *Server) tokenPrincipal(w http.ResponseWriter, r *http.Request, requiredScopes []string) (principal, bool, bool) {
 	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
+	// Any request presenting a Bearer credential (including an empty or
+	// malformed value) enters the abuse-control path so it is throttled like a
+	// failed token; non-Bearer/absent Authorization headers fall through to
+	// ordinary unauthenticated handling.
+	if !strings.HasPrefix(strings.ToLower(authz), "bearer ") {
 		return principal{}, false, false
 	}
-	raw := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-	if raw == "" {
-		return principal{}, false, false
-	}
+	raw := strings.TrimSpace(authz[len("Bearer "):])
 	uid, org, tokScopes, err := s.tokens.Authenticate(raw)
 	if err != nil {
 		if !s.tokenLim.Allow("token:" + s.proxy.ClientIP(r)) {
@@ -542,20 +543,28 @@ func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request, _ p
 	}
 	writeJSON(w, 200, x)
 }
-// oidcRedirect returns the canonical OIDC callback URI. When WEBFLEET_PUBLIC_URL
-// is configured it is the explicit external origin and the incoming Host header
-// is irrelevant; otherwise the trusted-proxy-aware scheme and the request Host
-// are used. X-Forwarded-Host and Forwarded are never trusted.
+// oidcRedirect returns the canonical OIDC callback URI. The external origin is
+// explicit and fail-closed: it comes only from WEBFLEET_PUBLIC_URL and never
+// from the incoming Host header, X-Forwarded-Host or Forwarded. Without a
+// configured canonical origin OIDC cannot be used (""), and the login/config
+// handlers reject with a clear error rather than constructing an attacker-
+// controllable redirect URI.
 func (s *Server) oidcRedirect(r *http.Request) string {
 	if s.cfg.PublicURL != "" {
 		return s.cfg.PublicURL + "/api/oidc/callback"
 	}
-	return s.proxy.Scheme(r) + "://" + r.Host + "/api/oidc/callback"
+	return ""
 }
+
+func (s *Server) oidcOriginReady() bool { return s.cfg.PublicURL != "" }
 
 const oidcBindingCookie = "wf_oidc_binding"
 
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ principal) {
+	if !s.oidcOriginReady() {
+		writeError(w, 400, "OIDC requires WEBFLEET_PUBLIC_URL (canonical external origin)")
+		return
+	}
 	browser, e := randomToken(18)
 	if e != nil {
 		writeError(w, 500, "OIDC login unavailable")
@@ -574,6 +583,10 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ princ
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, _ principal) {
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		writeError(w, 401, "OIDC authorization failed")
+		return
+	}
+	if !s.oidcOriginReady() {
+		writeError(w, 400, "OIDC requires WEBFLEET_PUBLIC_URL (canonical external origin)")
 		return
 	}
 	browser := ""
@@ -601,6 +614,10 @@ func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, p prin
 func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, p principal) {
 	var c oidc.Config
 	if !decodeJSON(w, r, &c) {
+		return
+	}
+	if c.Enabled && !s.oidcOriginReady() {
+		writeError(w, 400, "OIDC requires WEBFLEET_PUBLIC_URL (canonical external origin)")
 		return
 	}
 	if e := s.oidc.Save(c); e != nil {

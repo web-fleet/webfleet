@@ -277,6 +277,31 @@ func TestTokenInvalidAuthThrottled(t *testing.T) {
 	}
 }
 
+func TestTokenEmptyBearerThrottled(t *testing.T) {
+	s, _ := newRBACServer(t)
+	// An empty/malformed Bearer value is a failed authentication attempt and
+	// must enter the abuse-control path, not silently fall back to ordinary
+	// unauthenticated handling.
+	for i := 0; i < 20; i++ {
+		req := strings.NewReader("")
+		r := httptest.NewRequest("GET", "/api/sites", req)
+		r.Header.Set("Authorization", "Bearer ")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, r)
+		if rr.Code != 401 {
+			t.Fatalf("empty bearer attempt %d = %d, want 401", i, rr.Code)
+		}
+	}
+	req := strings.NewReader("")
+	r := httptest.NewRequest("GET", "/api/sites", req)
+	r.Header.Set("Authorization", "Bearer ")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, r)
+	if rr.Code != 429 {
+		t.Fatalf("empty bearer over-limit = %d, want 429", rr.Code)
+	}
+}
+
 func TestTokenInvalidAuthThrottleSurvivesSpoofedForwardedFor(t *testing.T) {
 	s, _ := newTrustedServer(t, "127.0.0.1/32")
 	for i := 0; i < 20; i++ {

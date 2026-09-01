@@ -436,21 +436,56 @@ func TestOIDCDisabledProvider(t *testing.T) {
 	}
 }
 
-func TestOIDCBrowserBindingMismatchRejected(t *testing.T) {
+func TestOIDCBrowserBindingMismatchDoesNotConsume(t *testing.T) {
 	fp := newFake(t, "user@example.com", true)
 	defer fp.Close()
 	svc, _ := newOIDCService(t, fp, true, true)
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
-	// Another browser cannot consume a transaction initiated by a different
-	// browser, even with the correct state/code/nonce.
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, "browser-b"); e == nil || !strings.Contains(e.Error(), "browser") {
-		t.Fatalf("cross-browser state consumption not rejected: %v", e)
+	// A different browser cannot use the transaction, and it does NOT destroy
+	// the legitimate browser's valid state.
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, "browser-b"); e == nil {
+		t.Fatal("cross-browser state consumption not rejected")
 	}
-	// The state was consumed by the failed callback; replay is denied even with
-	// the correct browser.
+	// The correct browser can still complete the transaction.
+	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
+	if e != nil {
+		t.Fatalf("correct browser could not complete after wrong-browser attempt: %v", e)
+	}
+	if tok == "" || sess.Email != "user@example.com" {
+		t.Fatalf("session %+v", sess)
+	}
+	// Once consumed by the correct browser, replay fails.
 	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
-		t.Fatal("state replay after browser-mismatch allowed")
+		t.Fatal("replay after correct consumption allowed")
+	}
+}
+
+func TestOIDCConcurrentConsumeOnlyOnce(t *testing.T) {
+	fp := newFake(t, "user@example.com", true)
+	defer fp.Close()
+	svc, _ := newOIDCService(t, fp, true, true)
+	state, nonce := beginStateNonce(t, svc)
+	fp.setNonce(nonce)
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, err := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
+			results[i] = err
+		}(i)
+	}
+	wg.Wait()
+	ok := 0
+	for _, err := range results {
+		if err == nil {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("concurrent callbacks consumed the state %d times, want 1", ok)
 	}
 }
 

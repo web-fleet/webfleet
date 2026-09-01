@@ -155,17 +155,16 @@ func (s *Service) Callback(ctx context.Context, state, code, redirect, browser s
 	if strings.TrimSpace(state) == "" || strings.TrimSpace(code) == "" {
 		return "", auth.Session{}, errors.New("OIDC callback is missing state or code")
 	}
-	r, e := sqlite.Query(s.st.DB, `SELECT expires_at,nonce,browser FROM oidc_states WHERE state=?`, state)
+	// Atomic browser-bound one-time consume: the row is deleted only when both
+	// the state and the initiating browser match. A different browser can
+	// therefore neither establish a session nor destroy the legitimate
+	// browser's transaction; two concurrent callbacks cannot both consume the
+	// same state.
+	r, e := sqlite.Query(s.st.DB, `DELETE FROM oidc_states WHERE state=? AND browser=? RETURNING expires_at,nonce`, state, browser)
 	if e != nil || len(r) == 0 {
 		return "", auth.Session{}, errors.New("invalid OIDC state")
 	}
 	storedNonce := r[0]["nonce"].Text
-	storedBrowser := r[0]["browser"].Text
-	// The state is single-use: consume it before doing any provider work.
-	_ = sqlite.Exec(s.st.DB, `DELETE FROM oidc_states WHERE state=?`, state)
-	if storedBrowser == "" || storedBrowser != browser {
-		return "", auth.Session{}, errors.New("OIDC state does not match the initiating browser")
-	}
 	exp, _ := time.Parse(time.RFC3339Nano, r[0]["expires_at"].Text)
 	if time.Now().After(exp) {
 		return "", auth.Session{}, errors.New("expired OIDC state")

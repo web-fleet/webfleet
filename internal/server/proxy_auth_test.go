@@ -91,18 +91,28 @@ func TestSecureCookieUntrustedSpoofCannotUpgrade(t *testing.T) {
 	}
 }
 
-func TestOIDCRedirectSchemeBehindTrustedProxy(t *testing.T) {
+func TestOIDCRedirectRequiresCanonicalOrigin(t *testing.T) {
 	s, _ := newTrustedServer(t, "127.0.0.1/32")
+	// Without WEBFLEET_PUBLIC_URL the OIDC redirect URI fails closed: an
+	// arbitrary Host header (or a trusted proxy's forwarded scheme) never
+	// produces a redirect URI.
 	r := httptest.NewRequest("GET", "http://wf.example.com/api/oidc/login", nil)
 	r.Host = "wf.example.com"
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.Header.Set("X-Forwarded-Proto", "https")
-	if got := s.oidcRedirect(r); got != "https://wf.example.com/api/oidc/callback" {
-		t.Fatalf("trusted proxy redirect = %q", got)
+	if got := s.oidcRedirect(r); got != "" {
+		t.Fatalf("no-origin redirect = %q, want empty", got)
 	}
 	r.RemoteAddr = "198.51.100.7:1234"
-	if got := s.oidcRedirect(r); got != "http://wf.example.com/api/oidc/callback" {
-		t.Fatalf("untrusted spoof redirect = %q", got)
+	if got := s.oidcRedirect(r); got != "" {
+		t.Fatalf("untrusted no-origin redirect = %q, want empty", got)
+	}
+	// With a configured canonical origin, both direct and trusted-proxy
+	// deployments produce the same URI regardless of Host/forwarded headers.
+	s.cfg.PublicURL = "https://webfleet.example.com"
+	r.Host = "evil.example"
+	if got := s.oidcRedirect(r); got != "https://webfleet.example.com/api/oidc/callback" {
+		t.Fatalf("canonical redirect = %q", got)
 	}
 }
 

@@ -118,6 +118,7 @@ func TestOIDCFlowCrossBrowserBinding(t *testing.T) {
 	fp := newFakeOIDCProvider(t, "oidc@example.com")
 	defer fp.srv.Close()
 	s, _ := newOIDCServer(t, nil)
+	s.cfg.PublicURL = "https://wf.example.com"
 	s.oidc.SetHTTPClient(fp.srv.Client())
 	admin := setupAdmin(t, s)
 
@@ -145,8 +146,8 @@ func TestOIDCFlowCrossBrowserBinding(t *testing.T) {
 	nonce := loc.Query().Get("nonce")
 	fp.setNonce(nonce)
 
-	// Cross-browser attack: consume the same valid state/code from a different
-	// browser (no binding cookie / a different one) must fail and set no session.
+	// Cross-browser attack: a different browser must neither establish a
+	// session nor destroy the legitimate browser's valid state.
 	other := &http.Cookie{Name: oidcBindingCookie, Value: "other-browser"}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/oidc/callback?state="+state+"&code=x", nil)
@@ -161,27 +162,13 @@ func TestOIDCFlowCrossBrowserBinding(t *testing.T) {
 		}
 	}
 
-	// The state was consumed; even the correct browser cannot replay it.
+	// The legitimate browser can still consume the same valid state.
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest("GET", "/api/oidc/callback?state="+state+"&code=x", nil)
 	req.AddCookie(binding)
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != 401 {
-		t.Fatalf("replayed callback after cross-browser consumption = %d, want 401", rr.Code)
-	}
-
-	// A fresh login from the correct browser succeeds, clears the binding, and
-	// establishes a session.
-	login = doReq(t, s, nil, "GET", "/api/oidc/login", "")
-	loc, _ = url.Parse(login.Header().Get("Location"))
-	state = loc.Query().Get("state")
-	fp.setNonce(loc.Query().Get("nonce"))
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/api/oidc/callback?state="+state+"&code=x", nil)
-	req.AddCookie(login.Result().Cookies()[0])
-	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != 302 {
-		t.Fatalf("valid callback = %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("correct browser after wrong-browser attempt = %d %s", rr.Code, rr.Body.String())
 	}
 	gotSession := false
 	clearedBinding := false
@@ -196,11 +183,20 @@ func TestOIDCFlowCrossBrowserBinding(t *testing.T) {
 	if !gotSession || !clearedBinding {
 		t.Fatalf("session=%v binding-cleared=%v", gotSession, clearedBinding)
 	}
+
+	// Replay by the legitimate browser is rejected.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/api/oidc/callback?state="+state+"&code=x", nil)
+	req.AddCookie(binding)
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != 401 {
+		t.Fatalf("replayed callback after successful consumption = %d, want 401", rr.Code)
+	}
 }
 
 func TestOIDCRedirectCanonicalOrigin(t *testing.T) {
 	// Configured public URL is the canonical origin; Host and forwarded headers
-	// cannot rewrite it.
+	// cannot rewrite it, in direct or trusted-proxy deployments.
 	s, _ := newOIDCServer(t, nil)
 	s.cfg.PublicURL = "https://webfleet.example.com"
 	r := httptest.NewRequest("GET", "http://evil.example/api/oidc/login", nil)
@@ -210,21 +206,32 @@ func TestOIDCRedirectCanonicalOrigin(t *testing.T) {
 	if got := s.oidcRedirect(r); got != "https://webfleet.example.com/api/oidc/callback" {
 		t.Fatalf("canonical redirect = %q", got)
 	}
-	// Without PublicURL, the trusted-proxy-aware scheme and Host are used and
-	// X-Forwarded-Host is irrelevant.
-	s.cfg.PublicURL = ""
-	s2, _ := newOIDCServer(t, []string{"127.0.0.1/32"})
 	r2 := httptest.NewRequest("GET", "http://wf.example.com/api/oidc/login", nil)
 	r2.Host = "wf.example.com"
 	r2.RemoteAddr = "127.0.0.1:9999"
 	r2.Header.Set("X-Forwarded-Proto", "https")
-	r2.Header.Set("X-Forwarded-Host", "spoofed.example")
-	if got := s2.oidcRedirect(r2); got != "https://wf.example.com/api/oidc/callback" {
-		t.Fatalf("proxy redirect = %q", got)
+	if got := s.oidcRedirect(r2); got != "https://webfleet.example.com/api/oidc/callback" {
+		t.Fatalf("canonical redirect behind trusted proxy = %q", got)
 	}
-	// A direct untrusted peer cannot use X-Forwarded-Proto to rewrite the origin.
-	r2.RemoteAddr = "198.51.100.7:1234"
-	if got := s2.oidcRedirect(r2); got != "http://wf.example.com/api/oidc/callback" {
-		t.Fatalf("untrusted redirect = %q", got)
+	// Without a configured canonical origin, OIDC fails closed: no redirect URI
+	// is produced from the Host header at all.
+	s2, _ := newOIDCServer(t, nil)
+	r3 := httptest.NewRequest("GET", "http://evil.example/api/oidc/login", nil)
+	r3.Host = "evil.example"
+	if got := s2.oidcRedirect(r3); got != "" {
+		t.Fatalf("no-origin redirect = %q, want empty", got)
+	}
+	// The login and config-save handlers reject clearly instead of using Host.
+	if rr := doReq(t, s2, nil, "GET", "/api/oidc/login", ""); rr.Code != 400 {
+		t.Fatalf("no-origin login = %d, want 400", rr.Code)
+	}
+	admin := setupAdmin(t, s2)
+	if rr := doReq(t, s2, admin, "PUT", "/api/oidc/config", `{"issuer":"https://example.com","client_id":"c","client_secret":"s","enabled":true,"auto_provision":true}`); rr.Code != 400 {
+		t.Fatalf("enabling OIDC without canonical origin = %d, want 400", rr.Code)
+	}
+	// Local password authentication still works without WEBFLEET_PUBLIC_URL.
+	rr := doReq(t, s2, nil, "POST", "/api/login", `{"email":"admin@example.com","password":"secret7"}`)
+	if rr.Code != 200 {
+		t.Fatalf("local login without canonical origin = %d", rr.Code)
 	}
 }

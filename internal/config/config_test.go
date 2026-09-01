@@ -73,3 +73,21 @@ func TestLoadTrustedProxies(t *testing.T) {
 		t.Fatal("bogus trusted proxy accepted")
 	}
 }
+
+func TestLoadPublicURL(t *testing.T) {
+	t.Setenv("WEBFLEET_DATA_DIR", t.TempDir())
+	t.Setenv("WEBFLEET_PUBLIC_URL", "https://webfleet.example.com/")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PublicURL != "https://webfleet.example.com" {
+		t.Fatalf("public url = %q", c.PublicURL)
+	}
+	for _, bad := range []string{"not-a-url", "ftp://x", "https://x/path", "https://user:pass@x"} {
+		t.Setenv("WEBFLEET_PUBLIC_URL", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("invalid public URL accepted: %q", bad)
+		}
+	}
+}
