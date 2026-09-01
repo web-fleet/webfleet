@@ -70,3 +70,186 @@ func TestCrawlRespectsRobotsAndFindsBrokenLinks(t *testing.T) {
 		}
 	}
 }
+
+// multiPageSite serves `n` linked pages on one host plus a sitemap listing a
+// set of URLs (some reachable only via the sitemap) so tests can distinguish
+// crawled, discovered, sitemap-discovered and internally-discovered counts.
+func multiPageSite(n, sitemapExtra int) (*httptest.Server, func() int) {
+	var base string
+	crawled := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "User-agent: *\nSitemap: %s/sitemap.xml\n", base)
+	})
+	for i := 1; i <= n; i++ {
+		cur := i
+		mux.HandleFunc(fmt.Sprintf("/p%d", i), func(w http.ResponseWriter, r *http.Request) {
+			crawled++
+			w.Header().Set("Content-Type", "text/html")
+			next := cur + 1
+			if next <= n {
+				fmt.Fprintf(w, `<a href="/p%d">next</a>`, next)
+			}
+		})
+	}
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		var sb strings.Builder
+		sb.WriteString("<urlset>")
+		for i := 1; i <= n; i++ {
+			fmt.Fprintf(&sb, "<url><loc>%s/p%d</loc></url>", base, i)
+		}
+		for i := 1; i <= sitemapExtra; i++ {
+			fmt.Fprintf(&sb, "<url><loc>%s/sm%d</loc></url>", base, i)
+		}
+		sb.WriteString("</urlset>")
+		w.Write([]byte(sb.String()))
+	})
+	for i := 1; i <= sitemapExtra; i++ {
+		cur := i
+		mux.HandleFunc(fmt.Sprintf("/sm%d", i), func(w http.ResponseWriter, r *http.Request) {
+			crawled++
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, "sitemap page %d", cur)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	return srv, func() int { return crawled }
+}
+
+func crawlServiceFor(t *testing.T, base string) *Service {
+	t.Helper()
+	u, _ := url.Parse(base)
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { st.Close() })
+	site, e := sites.New(st).Create(1, "x", base, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Setenv("CRAWL_TEST_SITE_ID", fmt.Sprintf("%d", site.ID))
+	return NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true})
+}
+
+func TestCrawlExceedsFiftyPages(t *testing.T) {
+	srv, _ := multiPageSite(80, 0)
+	defer srv.Close()
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(srv.URL)
+	site, _ := sites.New(st).Create(1, "x", srv.URL, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if d.Run.PagesCrawled < 60 {
+		t.Fatalf("crawled %d pages, want >50 (old ceiling)", d.Run.PagesCrawled)
+	}
+}
+
+func TestCrawlLimitsAndDiscoveredCounts(t *testing.T) {
+	// 700 reachable pages exceeds the 500 ceiling; sitemap adds 150 more
+	// discovered-but-maybe-uncrawled URLs -> pages_discovered > pages_crawled.
+	srv, _ := multiPageSite(700, 150)
+	defer srv.Close()
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(srv.URL)
+	site, _ := sites.New(st).Create(1, "x", srv.URL, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := d.Run
+	if r.PagesCrawled > MaxPages {
+		t.Fatalf("pages_crawled=%d exceeds MaxPages=%d", r.PagesCrawled, MaxPages)
+	}
+	if r.PagesDiscovered <= r.PagesCrawled {
+		t.Fatalf("pages_discovered=%d should exceed pages_crawled=%d on a truncated crawl", r.PagesDiscovered, r.PagesCrawled)
+	}
+	if r.PageLimit != MaxPages {
+		t.Fatalf("page_limit=%d want %d", r.PageLimit, MaxPages)
+	}
+	if !r.LimitReached {
+		t.Fatal("limit_reached=false but the crawl hit the ceiling with work remaining")
+	}
+	if r.SitemapURLsDiscovered < 150 {
+		t.Fatalf("sitemap_urls_discovered=%d want >=150", r.SitemapURLsDiscovered)
+	}
+}
+
+func TestCrawlSmallSiteCompleteNoLimit(t *testing.T) {
+	srv, _ := multiPageSite(30, 5)
+	defer srv.Close()
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(srv.URL)
+	site, _ := sites.New(st).Create(1, "x", srv.URL, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := d.Run
+	if r.LimitReached {
+		t.Fatal("small site reported limit_reached")
+	}
+	// root + 30 linked pages + 5 sitemap-only pages.
+	if r.PagesCrawled != 36 {
+		t.Fatalf("pages_crawled=%d want 36", r.PagesCrawled)
+	}
+	if r.PagesDiscovered != 36 {
+		t.Fatalf("pages_discovered=%d want 36", r.PagesDiscovered)
+	}
+}
+
+func TestCrawlLinksPerPageBeyond200(t *testing.T) {
+	var base string
+	var hits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/html")
+		var sb strings.Builder
+		for i := 1; i <= 400; i++ {
+			fmt.Fprintf(&sb, `<a href="/q%d">l</a>`, i)
+		}
+		w.Write([]byte(sb.String()))
+	})
+	for i := 1; i <= 400; i++ {
+		cur := i
+		mux.HandleFunc(fmt.Sprintf("/q%d", i), func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, "p %d", cur)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(base)
+	site, _ := sites.New(st).Create(1, "x", base, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if d.Run.InternalLinks < 300 {
+		t.Fatalf("internal_links=%d, want >200 links discovered from one page", d.Run.InternalLinks)
+	}
+}

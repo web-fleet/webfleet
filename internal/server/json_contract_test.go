@@ -44,3 +44,12 @@ func TestPublicJSONFieldContracts(t *testing.T) {
 	requireKeys(t, keys(t, crawler.Page{}), "url", "status_code", "depth", "error")
 	requireKeys(t, keys(t, crawler.Link{}), "from_url", "to_url", "kind", "status_code", "broken", "error")
 }
+
+func TestCrawlRunJSONFieldContracts(t *testing.T) {
+	requireKeys(t, keys(t, crawler.Run{}),
+		"id", "site_id", "status",
+		"pages_crawled", "pages_discovered", "page_limit", "limit_reached",
+		"sitemap_urls_discovered", "current_url",
+		"internal_links", "external_links", "broken_internal", "broken_external", "new_broken",
+		"robots_found", "sitemap_found", "error", "started_at", "finished_at")
+}

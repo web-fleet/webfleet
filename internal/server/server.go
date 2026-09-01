@@ -712,12 +712,19 @@ func (s *Server) handleCrawlSite(w http.ResponseWriter, r *http.Request, p princ
 	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
-	detail, err := s.crawler.CrawlSite(r.Context(), id)
-	if err != nil {
-		writeError(w, 400, err.Error())
+	if !s.crawler.Claim(id) {
+		writeError(w, 409, "a crawl is already in progress for this site")
 		return
 	}
-	writeJSON(w, 200, detail)
+	// Run the crawl in the background so the SPA can poll live progress from
+	// GET /api/sites/{id}/crawl (the running row is updated as pages are
+	// processed). The request context must not cancel the crawl once this
+	// handler returns.
+	go func() {
+		defer s.crawler.Release(id)
+		s.crawler.CrawlSite(context.WithoutCancel(r.Context()), id)
+	}()
+	writeJSON(w, 202, map[string]any{"status": "running"})
 }
 
 func (s *Server) handleFleetLinkRegressions(w http.ResponseWriter, r *http.Request, p principal) {

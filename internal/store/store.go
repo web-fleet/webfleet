@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 type migration struct {
 	version int
@@ -161,6 +161,13 @@ var migrations = []migration{
 		`DROP TABLE deployment_events_old;`,
 		`CREATE INDEX deployment_events_site_time_idx ON deployment_events(site_id,deployed_at DESC);`,
 		`CREATE UNIQUE INDEX deployment_events_idem_idx ON deployment_events(site_id,provider,external_id) WHERE external_id <> '';`,
+	}},
+	{29, "crawl result transparency", []string{
+		`ALTER TABLE crawl_runs ADD COLUMN pages_discovered INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN page_limit INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN limit_reached INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN sitemap_urls_discovered INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE crawl_runs ADD COLUMN current_url TEXT NOT NULL DEFAULT '';`,
 	}},
 }
 
