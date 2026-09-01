@@ -213,7 +213,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ### CP19 - PostgreSQL [COMPLETE]
 
-The storage path exists, but CP19 is not product-complete until the first-run database-selection experience matches the standard established by Trestle.
+The storage path and Trestle-style first-run database-selection experience are implemented. Live PostgreSQL behavioural/parity execution is intentionally retained for the CP30 battle-hardening campaign.
 
 - Storage abstraction only where necessary.
 - PostgreSQL migrations and integration tests.
@@ -244,9 +244,9 @@ The storage path exists, but CP19 is not product-complete until the first-run da
 
 ## CP11-CP20 ordering review
 
-The sequence remains sound after implementation. Performance and Audit needed to precede analytics so browser-derived and server-derived measurements stayed distinct. Analytics property/storage/dashboard/events formed one coherent block. Backup/restore and the Linux service lifecycle correctly preceded the larger-database path. The PostgreSQL storage path exists before enterprise identity work, but CP19 remains unfinished until the first-run database UX and live PostgreSQL gates pass; CP21+ should still preserve both storage modes. CP20 retention belongs before multi-user scale because disk growth is already a concern for monitoring and analytics.
+The sequence remains sound after implementation. Performance and Audit needed to precede analytics so browser-derived and server-derived measurements stayed distinct. Analytics property/storage/dashboard/events formed one coherent block. Backup/restore and the Linux service lifecycle correctly preceded the larger-database path. PostgreSQL storage and first-run database selection are complete before enterprise identity work; CP21+ preserves both storage modes. Live PostgreSQL parity remains a CP30 release-hardening gate. CP20 retention belongs before multi-user scale because disk growth is already a concern for monitoring and analytics.
 
-No checkpoint is being promoted ahead of CP21. The next block should start with users/organizations/RBAC, then API tokens and OIDC. CP19 remains an explicit unfinished checkpoint. Finish its first-run database-selection UX and live PostgreSQL integration validation as soon as the required environment is available; do not let later checkpoint completion silently mark CP19 complete.
+No checkpoint is being promoted ahead of CP21. The next block should start with users/organizations/RBAC, then API tokens and OIDC. CP19 is complete at the implementation checkpoint level. Live PostgreSQL integration/parity execution remains explicitly required by CP30 and must not be waived.
 
 ## Phase 5 - multi-user, agency and enterprise scale
 
