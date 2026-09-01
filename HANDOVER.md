@@ -18,7 +18,7 @@ The product observes websites. It does not host them and should not become a gen
 
 1. **Useful in five minutes.** A user should be able to install one binary, create the first admin, add a URL, and see useful monitoring without deploying an agent or modifying the website.
 2. **One site to thousands.** Small installations stay simple. Scale features must not make the small deployment miserable.
-3. **Monitoring first.** Uptime, response behaviour, TLS, DNS, links, headers, performance, browser-rendered site audits and change history are the core product.
+3. **Monitoring first.** Uptime, response behaviour, TLS, DNS, links, headers, performance, manually triggered browser-rendered audits and change history are the core product.
 4. **Analytics is first-class but optional.** Public checks work without site changes. Analytics begins only after the operator installs the lightweight tracker.
 5. **Privacy by default.** Do not collect visitor data merely because other analytics products do. Avoid persistent raw IP storage, fingerprinting and unnecessary cookies.
 6. **Actionable dashboard.** Prefer "what needs attention" over walls of charts.
@@ -34,7 +34,7 @@ The product observes websites. It does not host them and should not become a gen
 - PostgreSQL supported before broad production positioning.
 - Nift-built HTML/CSS/JavaScript dashboard with vanilla JavaScript unless a concrete requirement justifies another frontend stack.
 - Background scheduler for remote checks.
-- Optional lower-frequency browser audit worker for rendered performance/accessibility/best-practice/discoverability evaluations; basic monitoring must not require Chromium.
+- Optional browser audit worker for manually triggered rendered performance/accessibility/best-practice/discoverability evaluations; basic monitoring must not require Chromium.
 - HTTP/HTTPS checks performed agentlessly from the Web Fleet server.
 - Analytics ingestion exposed as a separate HTTP endpoint inside the same application initially.
 - Analytics subsystem kept architecturally separable from monitoring/crawling.
@@ -76,7 +76,7 @@ A site detail view should eventually expose:
 - Overview
 - Uptime
 - Performance
-- Audits
+- Audit
 - Pages and links
 - TLS
 - DNS
@@ -118,12 +118,13 @@ After basic availability, add website-specific observations rather than generic 
 - redirects and redirect chains;
 - sitemap and robots.txt discovery/health;
 - page response/performance history;
-- optional browser-rendered site audits covering performance, accessibility, best-practice/security hygiene and technical discoverability;
-- browser-audit history with category scores, individual findings and regression detection;
+- optional browser-rendered audits covering performance, accessibility, best-practice/security hygiene and technical discoverability;
+- manual single-site and bounded batch audit execution, including simple fleet filters and optional advanced/regex targeting;
+- latest audit results by default, with audit history/category-score regression tracking explicitly opt-in;
 - basic metadata/structured-data checks where useful;
 - regression/change detection.
 
-Browser-rendered audits are a separate low-frequency workload. They may use Chromium or another suitable browser engine, but basic monitoring, TLS/DNS checks and analytics ingestion must remain usable without a browser runtime. Do not claim Google Lighthouse compatibility unless Web Fleet literally executes and reports Lighthouse with a maintained compatibility contract; the product-facing feature name is **Site Audits**.
+Browser-rendered audits are a separate, heavyweight **manual** workload. They may use Chromium or another suitable browser engine, but basic monitoring, TLS/DNS checks and analytics ingestion must remain usable without a browser runtime. Audit history is opt-in rather than the default. Batch audits must resolve an explicit site set from selections/search/groups/tags or optional advanced/regex predicates, preview that scope before execution, and run through a bounded queue so they cannot starve availability monitoring. Do not claim Google Lighthouse compatibility unless Web Fleet literally executes and reports Lighthouse with a maintained compatibility contract; the product-facing feature/tab name is simply **Audit**.
 
 ## Analytics boundary
 
@@ -215,10 +216,10 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP10 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented. CP12 Site Audits is now explicitly planned as the browser-rendered quality layer after CP11 performance history.
+- CP1-CP10 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented. CP12 Audit is now explicitly planned as the manually triggered browser-rendered quality layer after CP11 performance history.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
 - The next implementation checkpoint is CP11 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP11 performance history. Keep server-side timing honest about what it measures, add response-size/transfer observations and regression baselines, and do not label synthetic HTTP timings as browser Core Web Vitals. Then implement CP12 Site Audits as an optional lower-frequency browser-rendered quality layer before beginning the analytics checkpoints.
+Continue with CP11 performance history. Keep server-side timing honest about what it measures, add response-size/transfer observations and regression baselines, and do not label synthetic HTTP timings as browser Core Web Vitals. Then implement CP12 Audit as an optional manually triggered browser-rendered quality layer before beginning the analytics checkpoints.

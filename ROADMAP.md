@@ -133,20 +133,27 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Avoid presenting synthetic server timing as browser Core Web Vitals.
 - Keep this checkpoint independent of a browser runtime so ordinary monitoring remains lightweight.
 
-### CP12 - Site audits
+### CP12 - Audit
 
 - Add an optional browser-rendered audit runner for representative pages.
-- Present the feature in the site UI as **Audits**, not as Google Lighthouse compatibility.
+- Present the feature in the site UI simply as **Audit**, not as Google Lighthouse compatibility.
+- Audits are **manual by default**. Web Fleet must not automatically launch browser audits merely because a site is being monitored.
 - Evaluate performance, accessibility, best-practice/security hygiene and technical discoverability/SEO-style signals with clearly documented scoring rules.
 - Capture browser-derived metrics separately from CP11 server timings; never relabel synthetic HTTP timings as Core Web Vitals.
-- Persist audit runs, category scores, individual findings and evidence so regressions can be compared over time.
-- Allow per-site audit configuration, page selection and a manual "Run audit" action.
-- Schedule audits at a lower frequency than uptime checks and make the browser worker optional so basic self-hosting does not require Chromium.
-- Surface meaningful audit regressions both on the individual site's **Audits** tab and in the fleet-wide attention view.
-- Define resource/time/concurrency limits so large fleets cannot let browser audits starve availability monitoring.
+- Show the latest audit result without requiring history.
+- Make **audit history opt-in** per site/property. With history disabled, a successful new run replaces the stored current result rather than accumulating historical runs.
+- When history is enabled, retain category scores, individual findings and evidence so changes/regressions can be compared over time. Detailed retention controls belong with the later retention-policy work rather than complicating CP12.
+- Allow per-site audit configuration, representative-page selection and a manual **Run audit** action.
+- Add a **Batch audit** workflow for intentionally running audits across many sites.
+- Reuse the normal fleet-selection model for batch targeting: selected sites, current search results, group/category, tags and other simple filters should be available without requiring advanced syntax.
+- Provide an optional **Advanced** matcher for operators who need it, including name/URL regular expressions and useful predicates such as last-audited age or current audit state.
+- Before starting an advanced/regex batch, show the resolved site count/list so a broad expression cannot unexpectedly launch audits across the whole fleet.
+- Queue and bound batch work. Never launch one browser per matched site; audit concurrency must be configurable/limited independently from uptime monitoring.
+- Surface current audit problems fleet-wide. Surface **regressions** only where history is enabled and sufficient historical evidence exists.
+- Keep the browser runtime optional so basic self-hosting and all automatic monitoring remain usable without Chromium.
 - Keep the audit engine internally abstract enough that a browser extension or remote audit worker can be explored later without changing the site/audit data model.
 
-**Exit:** an operator can run and compare browser-based quality evaluations for a site, understand exactly why a score changed, and see important regressions across the fleet without confusing Web Fleet with Google Lighthouse itself.
+**Exit:** an operator can manually audit one site or deliberately batch-audit an understandable filtered set, inspect the latest browser-based quality evaluation, optionally retain/compare history, and do so without Web Fleet launching heavyweight browser work automatically or confusing the feature with Google Lighthouse itself.
 
 **Phase 2 exit:** Web Fleet understands failures and regressions specific to websites, including browser-rendered quality regressions, not merely hosts.
 
