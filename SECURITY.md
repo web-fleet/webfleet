@@ -41,7 +41,7 @@ The boundaries below were implemented in earlier checkpoints but were not yet en
 - Organization ids were hard-coded as `1` in user-facing queries. `[repaired]` Site/group/list/fleet and audit-batch queries now filter by the acting organization resolved from the session membership; site-scoped handlers reject cross-organization access.
 - API tokens were hashed at rest but no HTTP route accepted them; no endpoint rate limiting existed. (CP30 Campaign 4 obligation.)
 - Webhook delivery was never invoked by product events (`notifications.Deliver` had no callers). (CP30 Campaign 4 obligation.)
-- Audit launched Chromium with `--no-sandbox` without the public-network guard (CP30 Campaign 2 blocker).
+- Audit launched Chromium with `--no-sandbox` and no public-network guard. `[repaired in CP30 Campaign 2]` Audit now pins Chromium to an in-process guarded proxy so every connection (redirects and subresources included) is validated and dialed by the Go process; Chromium never resolves or dials the target itself. DNS rebinding is blocked at dial time, the browser sandbox is required by default (`WEBFLEET_AUDIT_SANDBOX` strict) with `--no-sandbox` only on explicit opt-in, browser output and concurrency are bounded, and Audit remains manual with opt-in history. See `docs/hardening/audit-boundary.json`.
 - Cookie `Secure` and OIDC redirect schemes derived from `r.TLS`, so TLS-terminating reverse proxies produced non-secure cookies and `http` redirect URIs (CP30 Campaign 3 blocker).
 - `webfleet backup`/`restore` always addressed the SQLite path regardless of the configured provider (CP30 Campaign 5/6 blocker).
 
