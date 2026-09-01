@@ -234,7 +234,8 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP20 are implemented in development: monitoring, performance history, manual Audit, privacy-first analytics, backup/restore, Linux service lifecycle, PostgreSQL storage support and retention/maintenance are present.
+- CP1-CP18 and CP20 are complete in development.
+- CP19 PostgreSQL is **unfinished**: the storage path exists, but the Trestle-style first-run SQLite/PostgreSQL selection UX and real PostgreSQL integration/parity gate remain outstanding. Do not mark CP19 complete merely because later checkpoints proceed.
 - The companion `web-fleet.github.io` source/generated workspace documents the current development state.
 - The next implementation checkpoint is CP21 in `ROADMAP.md`.
 

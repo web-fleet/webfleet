@@ -211,7 +211,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP19 - PostgreSQL [IMPLEMENTED - SETUP UX + LIVE INTEGRATION GATES PENDING]
+### CP19 - PostgreSQL [UNFINISHED]
 
 The storage path exists, but CP19 is not product-complete until the first-run database-selection experience matches the standard established by Trestle.
 
@@ -244,9 +244,9 @@ The storage path exists, but CP19 is not product-complete until the first-run da
 
 ## CP11-CP20 ordering review
 
-The sequence remains sound after implementation. Performance and Audit needed to precede analytics so browser-derived and server-derived measurements stayed distinct. Analytics property/storage/dashboard/events formed one coherent block. Backup/restore and the Linux service lifecycle correctly preceded the larger-database path. PostgreSQL is implemented before enterprise identity work so CP21+ can be designed against both storage modes. CP20 retention belongs before multi-user scale because disk growth is already a concern for monitoring and analytics.
+The sequence remains sound after implementation. Performance and Audit needed to precede analytics so browser-derived and server-derived measurements stayed distinct. Analytics property/storage/dashboard/events formed one coherent block. Backup/restore and the Linux service lifecycle correctly preceded the larger-database path. The PostgreSQL storage path exists before enterprise identity work, but CP19 remains unfinished until the first-run database UX and live PostgreSQL gates pass; CP21+ should still preserve both storage modes. CP20 retention belongs before multi-user scale because disk growth is already a concern for monitoring and analytics.
 
-No checkpoint is being promoted ahead of CP21. The next block should start with users/organizations/RBAC, then API tokens and OIDC. PostgreSQL live integration validation remains a release gate and should be run as soon as a real PostgreSQL test environment is available.
+No checkpoint is being promoted ahead of CP21. The next block should start with users/organizations/RBAC, then API tokens and OIDC. CP19 remains an explicit unfinished checkpoint. Finish its first-run database-selection UX and live PostgreSQL integration validation as soon as the required environment is available; do not let later checkpoint completion silently mark CP19 complete.
 
 ## Phase 5 - multi-user, agency and enterprise scale
 
@@ -314,6 +314,8 @@ Measure real workload first. Only add queues, specialized analytics storage or H
 - Document direct VPS/systemd deployment, reverse proxies, TLS termination, firewall/listen-address expectations, upgrades, rollback, backup/restore and PostgreSQL deployment considerations.
 - Provide dedicated Caddy and nginx examples.
 - Document the recommended company subdomain pattern, for example `webfleet.company.com`, including DNS, reverse proxy and HTTPS setup.
+- Include a step-by-step **Set up Web Fleet on a subdomain** walkthrough starting from ownership of `company.com`: create the DNS record, configure `webfleet.company.com`, reverse proxy it to Web Fleet's private listen address, obtain/verify HTTPS, test `/healthz`, then load first-run setup.
+- Show both Caddy and nginx variants for the subdomain walkthrough and explain common DNS/TLS propagation failures.
 - Explain that related self-hosted tools can live independently on sibling subdomains such as `trestle.company.com`, `cortex.company.com` and `watchpost.company.com`; do not imply that Web Fleet manages or requires those products.
 - Cover analytics tracker origin/CORS implications when the monitored website and Web Fleet live on different domains.
 - Cover Chromium/browser requirements separately for manual Audit so ordinary monitoring deployments do not accidentally install heavyweight browser dependencies.
