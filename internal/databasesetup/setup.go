@@ -24,7 +24,7 @@ func StateFor(st *store.Store, dataDir string) (State, error) {
 	if e != nil {
 		return State{}, e
 	}
-	return State{Selectable: n == 0, Provider: c.Provider}, nil
+	return State{Selectable: n == 0 && c.Provider != "postgres", Provider: c.Provider}, nil
 }
 func Apply(ctx context.Context, st *store.Store, dataDir, provider, url string) (State, error) {
 	state, e := StateFor(st, dataDir)
