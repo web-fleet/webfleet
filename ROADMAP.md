@@ -280,11 +280,17 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - Load/stress tests for hundreds/thousands of sites.
 - Preserve the one-binary integrated deployment as the default.
 
-### CP25 - High availability and larger ingestion decision gate
+### CP25 - High availability and larger ingestion decision gate [COMPLETE]
 
 Measure real workload first. Only add queues, specialized analytics storage or HA coordination when evidence shows PostgreSQL/in-process buffering is insufficient.
 
-**Exit:** document the measured limit that justified each added component.
+**Exit:** document the measured limit that justified each added component. Current decision: no additional distributed component is justified; `SCALE.md` records the thresholds and CP30 measurement campaign.
+
+## CP19/CP21-CP25 ordering review
+
+Completing CP19 before enterprise identity was correct: the first-run database contract now exists before organizations/RBAC expand the data model. CP21 RBAC then establishes the authorization boundary used by CP22 API tokens and CP23 OIDC. CP24 process separation follows identity/storage so split processes do not invent a second product model. CP25 deliberately ends this block with a **no new infrastructure yet** decision rather than adding queues/HA without measurements.
+
+The next checkpoint remains CP26 deployment observations. CP30 is the appropriate battle-hardening campaign for live PostgreSQL parity, OIDC provider interoperability and measured 100/1,000/10,000-site scale evidence.
 
 ## Phase 6 - integrations and release readiness
 
