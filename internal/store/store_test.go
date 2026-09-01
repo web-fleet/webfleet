@@ -156,3 +156,31 @@ func TestMigrationHistoryMismatchFailsClosed(t *testing.T) {
 		t.Fatalf("tampered migration history accepted: %v", err)
 	}
 }
+
+func TestBackupRestoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	st, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.DB.Exec(`INSERT INTO app_events(kind,message,created_at) VALUES('probe','yes',?)`, Now()); e != nil {
+		t.Fatal(e)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if e = st.Backup(backup); e != nil {
+		t.Fatal(e)
+	}
+	st.Close()
+	if e = Restore(dir, backup); e != nil {
+		t.Fatal(e)
+	}
+	st, e = Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	var n int
+	if e = st.DB.QueryRow(`SELECT count(*) FROM app_events WHERE kind='probe'`).Scan(&n); e != nil || n != 1 {
+		t.Fatalf("probe=%d err=%v", n, e)
+	}
+}

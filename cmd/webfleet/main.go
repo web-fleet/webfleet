@@ -26,6 +26,28 @@ func main() {
 		log.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
+	if len(os.Args) >= 3 && os.Args[1] == "backup" {
+		st, err := store.Open(cfg.DataDir)
+		if err != nil {
+			log.Error("database failed", "error", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+		if err := st.Backup(os.Args[2]); err != nil {
+			log.Error("backup failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("backup complete", "path", os.Args[2])
+		return
+	}
+	if len(os.Args) >= 3 && os.Args[1] == "restore" {
+		if err := store.Restore(cfg.DataDir, os.Args[2]); err != nil {
+			log.Error("restore failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("restore complete", "source", os.Args[2])
+		return
+	}
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		log.Error("database failed", "error", err)

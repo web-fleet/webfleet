@@ -196,7 +196,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 4 - self-hosting and operational reliability
 
-### CP17 - Backup and restore
+### CP17 - Backup and restore [COMPLETE]
 
 - Consistent SQLite backup.
 - Restore workflow with safety checks.

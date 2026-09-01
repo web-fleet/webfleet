@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/web-fleet/webfleet/internal/sqlite"
@@ -314,3 +315,80 @@ func (s *Store) SchemaVersion() (int, error) {
 }
 
 func Now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func (s *Store) Backup(destination string) error {
+	if strings.TrimSpace(destination) == "" {
+		return errors.New("backup destination is required")
+	}
+	abs, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return err
+	}
+	_ = os.Remove(abs)
+	q := `VACUUM INTO '` + strings.ReplaceAll(abs, `'`, `''`) + `'`
+	if _, err := s.DB.Exec(q); err != nil {
+		return fmt.Errorf("backup sqlite database: %w", err)
+	}
+	if err := os.Chmod(abs, 0o600); err != nil {
+		return fmt.Errorf("secure backup: %w", err)
+	}
+	return nil
+}
+func ValidateDatabase(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var ok string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&ok); err != nil {
+		return err
+	}
+	if ok != "ok" {
+		return fmt.Errorf("sqlite integrity check failed: %s", ok)
+	}
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v > schemaVersion {
+		return fmt.Errorf("backup schema %d is newer than supported %d", v, schemaVersion)
+	}
+	return nil
+}
+func Restore(dataDir, source string) error {
+	if err := ValidateDatabase(source); err != nil {
+		return fmt.Errorf("validate restore source: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	_ = os.Chmod(dataDir, 0o700)
+	dst := filepath.Join(dataDir, "webfleet.db")
+	tmp := dst + ".restore"
+	b, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		bak := dst + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
+		if err := os.Rename(dst, bak); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	return nil
+}
