@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/web-fleet/webfleet/internal/analytics"
 	"github.com/web-fleet/webfleet/internal/audit"
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
@@ -31,6 +32,7 @@ var embedded embed.FS
 type Server struct {
 	cfg       config.Config
 	store     *store.Store
+	analytics *analytics.Service
 	audit     *audit.Service
 	auth      *auth.Service
 	sites     *sites.Service
@@ -45,7 +47,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -53,6 +55,8 @@ func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"ok": true}) })
+	s.mux.HandleFunc("GET /wf.js", s.handleTracker)
+	s.mux.HandleFunc("POST /api/analytics/event", s.handleAnalyticsEvent)
 	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
 	s.mux.HandleFunc("POST /api/setup", s.handleSetup)
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -66,6 +70,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/sites/{id}", s.withSession(s.handleUpdateSite, true))
 	s.mux.HandleFunc("POST /api/sites/{id}/archive", s.withSession(s.handleArchiveSite, true))
 	s.mux.HandleFunc("DELETE /api/sites/{id}", s.withSession(s.handleDeleteSite, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/analytics", s.withSession(s.handleAnalyticsProperty, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/analytics", s.withSession(s.handleEnableAnalytics, true))
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/audit", s.withSession(s.handleRunAudit, true))
@@ -90,6 +96,52 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/incidents/{id}/ack", s.withSession(s.handleAckIncident, true))
 	sub, _ := fs.Sub(embedded, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
+}
+
+func (s *Server) handleTracker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public,max-age=3600")
+	_, _ = w.Write([]byte(analytics.Tracker))
+}
+func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request) {
+	var in analytics.Event
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	origin := r.Header.Get("Origin")
+	ip := r.RemoteAddr
+	if i := strings.LastIndex(ip, ":"); i > 0 {
+		ip = ip[:i]
+	}
+	if err := s.analytics.Ingest(in, origin, ip, r.UserAgent()); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) handleAnalyticsProperty(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	p, err := s.analytics.Property(id)
+	if err != nil {
+		writeError(w, 500, "analytics unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"property": p})
+}
+func (s *Server) handleEnableAnalytics(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	p, err := s.analytics.Enable(id)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 201, p)
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, sess auth.Session) {

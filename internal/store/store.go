@@ -18,7 +18,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 type migration struct {
 	version int
@@ -95,6 +95,11 @@ var migrations = []migration{
 		`CREATE TABLE audit_settings(site_id INTEGER PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE, history_enabled INTEGER NOT NULL DEFAULT 0, pages_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);`,
 		`CREATE TABLE audit_runs(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, status TEXT NOT NULL, performance_score INTEGER NOT NULL DEFAULT 0, accessibility_score INTEGER NOT NULL DEFAULT 0, best_practices_score INTEGER NOT NULL DEFAULT 0, discoverability_score INTEGER NOT NULL DEFAULT 0, findings_json TEXT NOT NULL DEFAULT '[]', duration_ms INTEGER NOT NULL DEFAULT 0, audited_url TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`,
 		`CREATE INDEX audit_runs_site_idx ON audit_runs(site_id,id DESC);`,
+	}},
+	{13, "analytics property and tracker", []string{
+		`CREATE TABLE analytics_properties(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL UNIQUE REFERENCES sites(id) ON DELETE CASCADE, public_key TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, allowed_origin TEXT NOT NULL, created_at TEXT NOT NULL);`,
+		`CREATE TABLE analytics_events(id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES analytics_properties(id) ON DELETE CASCADE, kind TEXT NOT NULL, path TEXT NOT NULL DEFAULT '/', referrer TEXT NOT NULL DEFAULT '', visitor_key TEXT NOT NULL DEFAULT '', user_agent_class TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL DEFAULT '{}', occurred_at TEXT NOT NULL);`,
+		`CREATE INDEX analytics_events_property_time_idx ON analytics_events(property_id,occurred_at DESC);`,
 	}},
 }
 

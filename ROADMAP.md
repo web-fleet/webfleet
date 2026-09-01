@@ -159,7 +159,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 3 - privacy-first analytics
 
-### CP13 - Analytics property and tracker
+### CP13 - Analytics property and tracker [COMPLETE]
 
 - Optional analytics property per site.
 - Tiny cacheable tracker script.
