@@ -8,6 +8,7 @@ import (
 	"errors"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -26,7 +27,18 @@ type Service struct {
 	salt string
 }
 
-func New(st *store.Store) *Service { return &Service{st: st, salt: randomKey(24)} }
+func New(st *store.Store) *Service {
+	r, _ := sqlite.Query(st.DB, `SELECT value FROM app_settings WHERE key='analytics_visitor_salt'`)
+	salt := ""
+	if len(r) > 0 {
+		salt = r[0]["value"].Text
+	}
+	if salt == "" {
+		salt = randomKey(24)
+		_ = sqlite.Exec(st.DB, `INSERT INTO app_settings(key,value,updated_at) VALUES('analytics_visitor_salt',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, salt, store.Now())
+	}
+	return &Service{st: st, salt: salt}
+}
 func randomKey(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
@@ -110,6 +122,12 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 		}
 	}
 	return nil
+}
+func RemoteIP(remote string) string {
+	if h, _, e := net.SplitHostPort(remote); e == nil {
+		return h
+	}
+	return strings.Trim(remote, "[]")
 }
 func clientClass(ua string) string {
 	l := strings.ToLower(ua)
@@ -229,4 +247,4 @@ func (s *Service) Goals(siteID int64) ([]map[string]any, error) {
 	return out, nil
 }
 
-const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const u=s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),send=(kind,payload={})=>{const e={key:k,kind,path:location.pathname,referrer:document.referrer,payload:JSON.stringify(payload)};try{navigator.sendBeacon(u,new Blob([JSON.stringify(e)],{type:"application/json"}))}catch(_){}};window.webfleet={track:send};send("pageview");})();`
+const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const u=s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),send=(kind,payload={})=>{const e={key:k,kind,path:location.pathname,referrer:document.referrer,payload:JSON.stringify(payload)};try{navigator.sendBeacon(u,new Blob([JSON.stringify(e)],{type:"text/plain;charset=UTF-8"}))}catch(_){}};window.webfleet={track:send};send("pageview");})();`

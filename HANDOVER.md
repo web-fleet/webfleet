@@ -216,10 +216,12 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP20 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented. CP12 Audit is now explicitly planned as the manually triggered browser-rendered quality layer after CP11 performance history.
-- The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
+- CP1-CP20 are implemented in development: monitoring, performance history, manual Audit, privacy-first analytics, backup/restore, Linux service lifecycle, PostgreSQL storage support and retention/maintenance are present.
+- The companion `web-fleet.github.io` source/generated workspace documents the current development state.
 - The next implementation checkpoint is CP21 in `ROADMAP.md`.
 
 ## Immediate next step
 
-Continue with CP11 performance history. Keep server-side timing honest about what it measures, add response-size/transfer observations and regression baselines, and do not label synthetic HTTP timings as browser Core Web Vitals. Then implement CP12 Audit as an optional manually triggered browser-rendered quality layer before beginning the analytics checkpoints.
+Continue with CP21 users, organizations and RBAC. Preserve the simple single-admin experience for small installs while introducing organization membership and scoped roles underneath it.
+
+Before public preview, run the PostgreSQL integration suite against a real PostgreSQL server. The storage path and migrations are implemented, but this sandbox does not provide a PostgreSQL server or outbound Go-module access, so live PostgreSQL behavioural equivalence remains a release gate rather than something to infer from SQLite tests.
