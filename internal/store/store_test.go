@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,8 @@ func TestFreshOpenRestartAndPragmas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	// 0700 is a Unix ownership mode; Windows has no Unix permission bits.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("data directory permissions=%o want=700", info.Mode().Perm())
 	}
 }

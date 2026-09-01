@@ -91,22 +91,37 @@ jobs:
         run: |
           set -euxo pipefail
           DATA=/var/lib/webfleet
+          # The first start runs migrations before binding the listener, so the
+          # healthz check must tolerate startup (bounded poll, not a single
+          # immediate curl).
+          wait_healthz() {
+            for _ in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8090/healthz | grep -q '"ok":true'; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "healthz never became ready" >&2
+            curl -v http://127.0.0.1:8090/healthz 2>&1 | tail -3 || true
+            return 1
+          }
           sudo /tmp/wf service install
           # account and data ownership are created by install
           id webfleet
           sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = webfleet || exit 1
           systemctl is-active webfleet.service
-          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          wait_healthz
           # install is idempotent
           sudo /tmp/wf service install
+          wait_healthz
           # update with a verified artifact
           CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
           SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
           sudo /tmp/wf service update /tmp/wf2 "$SHA"
-          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          wait_healthz
           # rollback restores the previous executable
           sudo /tmp/wf service rollback
-          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          wait_healthz
           # uninstall removes the unit; data is preserved
           sudo /tmp/wf service uninstall
           test ! -f /etc/systemd/system/webfleet.service
