@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -302,8 +303,8 @@ func TestA11yPostgresChooserFlow(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('db-action').textContent`, &label)); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(label, "Test connection") {
-		t.Fatalf("postgres action label = %q (want Test connection)", label)
+	if !strings.Contains(label, "Test and use PostgreSQL") {
+		t.Fatalf("postgres action label = %q (want Test and use PostgreSQL)", label)
 	}
 	// An unreachable URL must surface an inline error and re-enable the button.
 	if err := chromedp.Run(ctx,
@@ -400,5 +401,96 @@ func TestA11yBootErrorState(t *testing.T) {
 	}
 	if !a11yPoll(t, ctx, `document.getElementById('database-stage').hidden === false`) {
 		t.Fatal("Retry did not recover to the database stage")
+	}
+}
+
+// countingAuthServer starts the application through the production init path
+// (config.Load -> store.Open -> New) and wraps its handler so every POST
+// /api/setup and /api/login is counted, to prove a single UI submit issues a
+// single request.
+func countingAuthServer(t *testing.T, dataDir string) (string, *atomic.Int64, *atomic.Int64) {
+	t.Helper()
+	t.Setenv("WEBFLEET_DATABASE_URL", "")
+	t.Setenv("WEBFLEET_DATA_DIR", dataDir)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := New(cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	inner := s.Handler()
+	var setups, logins atomic.Int64
+	wrap := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			switch r.URL.Path {
+			case "/api/setup":
+				setups.Add(1)
+			case "/api/login":
+				logins.Add(1)
+			}
+		}
+		inner.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(wrap)
+	t.Cleanup(srv.Close)
+	return srv.URL, &setups, &logins
+}
+
+// TestA11ySingleSubmitAuthProvesOneRequest guards against duplicate auth-form
+// submit handlers: one Create administrator click must produce exactly one
+// POST /api/setup, and one Sign in click exactly one POST /api/login.
+func TestA11ySingleSubmitAuthProvesOneRequest(t *testing.T) {
+	ctx := a11yContext(t)
+	srv, setups, logins := countingAuthServer(t, t.TempDir())
+
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-title').textContent === 'Choose your database'`) {
+		t.Fatal("database stage did not render")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#db-action`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'setup' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("administrator form did not appear in setup mode")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("administrator creation did not reach the dashboard")
+	}
+	if got := setups.Load(); got != 1 {
+		t.Fatalf("one Create administrator click issued %d POST /api/setup (want 1)", got)
+	}
+
+	// Log out and sign back in with a single submit.
+	if err := a11yEvalTrue(ctx, `document.getElementById('logout').click()`); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-form').dataset.mode === 'login' && !document.getElementById('auth-form').hidden`) {
+		t.Fatal("login form did not appear after logout")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("login did not reach the dashboard")
+	}
+	if got := logins.Load(); got != 1 {
+		t.Fatalf("one Sign in click issued %d POST /api/login (want 1)", got)
 	}
 }
