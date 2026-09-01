@@ -240,6 +240,6 @@ As of this handover revision:
 
 ## Immediate next step
 
-Continue with CP21 users, organizations and RBAC. Preserve the simple single-admin experience for small installs while introducing organization membership and scoped roles underneath it.
+Continue with CP26 deployment observations. Keep Web Fleet observational: ingest deployment metadata from external systems and correlate it with health/performance/Audit/analytics changes rather than turning Web Fleet into a deployment platform.
 
-Before public preview, finish the Trestle-style first-run SQLite/PostgreSQL selection UX and run the PostgreSQL integration suite against a real PostgreSQL server. The storage path and migrations are implemented, but this sandbox does not provide a PostgreSQL server or outbound Go-module access, so live PostgreSQL behavioural equivalence remains a release gate rather than something to infer from SQLite tests.
+CP30 is the dedicated battle-hardening gate for real PostgreSQL parity, external OIDC interoperability, cross-platform packaging, security review and measured scale evidence. `SCALE.md` records the current decision not to add distributed infrastructure without measurements.
