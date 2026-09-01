@@ -18,7 +18,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 type migration struct {
 	version int
@@ -86,6 +86,10 @@ var migrations = []migration{
 		`CREATE INDEX crawl_pages_run_idx ON crawl_pages(run_id);`,
 		`CREATE TABLE crawl_links(id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, from_url TEXT NOT NULL, to_url TEXT NOT NULL, kind TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 0, broken INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');`,
 		`CREATE INDEX crawl_links_run_idx ON crawl_links(run_id);`,
+	}},
+	{11, "performance history", []string{
+		`ALTER TABLE check_results ADD COLUMN response_bytes INTEGER NOT NULL DEFAULT 0;`,
+		`CREATE TABLE performance_baselines(site_id INTEGER PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE, baseline_latency_ms INTEGER NOT NULL DEFAULT 0, baseline_response_bytes INTEGER NOT NULL DEFAULT 0, sample_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);`,
 	}},
 }
 

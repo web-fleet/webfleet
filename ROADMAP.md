@@ -125,7 +125,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Ordering review after CP10:** CP11 remains next. Performance history should establish honest server-side baselines before browser-rendered audits are added. CP12 is now a first-class Site Audits checkpoint rather than a vague optional browser-check note. CP13-CP16 then form the coherent privacy-first analytics slice. CP17 backup/restore remains a release gate and may be pulled ahead of analytics only if monitoring-only dogfooding begins before the analytics phase is ready.
 
-### CP11 - Performance history
+### CP11 - Performance history [COMPLETE]
 
 - Stable server-side timing metrics first.
 - Response-size and transfer observations.

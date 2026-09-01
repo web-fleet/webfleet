@@ -18,6 +18,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/performance"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
@@ -66,6 +67,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
+	s.mux.HandleFunc("GET /api/sites/{id}/performance", s.withSession(s.handleSitePerformance, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/incidents", s.withSession(s.handleSiteIncidents, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/tls", s.withSession(s.handleSiteTLS, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/tls/inspect", s.withSession(s.handleInspectTLS, true))
@@ -320,6 +322,19 @@ func (s *Server) handleCheckSite(w http.ResponseWriter, r *http.Request, sess au
 	_, _ = s.dns.ObserveSite(r.Context(), id)
 	writeJSON(w, 200, res)
 }
+func (s *Server) handleSitePerformance(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	out, err := performance.ForSite(s.store, id, 200)
+	if err != nil {
+		writeError(w, 500, "performance history unavailable")
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
 func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)
 	if !ok {

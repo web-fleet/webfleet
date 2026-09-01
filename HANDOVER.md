@@ -216,9 +216,9 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP10 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented. CP12 Audit is now explicitly planned as the manually triggered browser-rendered quality layer after CP11 performance history.
+- CP1-CP11 are complete: core monitoring/fleet health, incidents, TLS/DNS, HTTP header/redirect observations, and bounded website crawling/link-health regressions are implemented. CP12 Audit is now explicitly planned as the manually triggered browser-rendered quality layer after CP11 performance history.
 - The public website is being established in the companion `web-fleet.github.io` source/generated workspace.
-- The next implementation checkpoint is CP11 in `ROADMAP.md`.
+- The next implementation checkpoint is CP12 in `ROADMAP.md`.
 
 ## Immediate next step
 

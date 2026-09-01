@@ -23,16 +23,17 @@ type Service struct {
 	guard netguard.Guard
 }
 type Result struct {
-	ID         int64  `json:"id"`
-	SiteID     int64  `json:"site_id"`
-	MonitorID  int64  `json:"monitor_id"`
-	OK         bool   `json:"ok"`
-	StatusCode int    `json:"status_code"`
-	LatencyMS  int64  `json:"latency_ms"`
-	FinalURL   string `json:"final_url"`
-	ErrorClass string `json:"error_class"`
-	Error      string `json:"error"`
-	CheckedAt  string `json:"checked_at"`
+	ID            int64  `json:"id"`
+	SiteID        int64  `json:"site_id"`
+	MonitorID     int64  `json:"monitor_id"`
+	OK            bool   `json:"ok"`
+	StatusCode    int    `json:"status_code"`
+	LatencyMS     int64  `json:"latency_ms"`
+	ResponseBytes int64  `json:"response_bytes"`
+	FinalURL      string `json:"final_url"`
+	ErrorClass    string `json:"error_class"`
+	Error         string `json:"error"`
+	CheckedAt     string `json:"checked_at"`
 }
 
 type HTTPObservation struct {
@@ -102,7 +103,8 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 		return s.persist(siteID, monitorID, res)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<20))
+	res.ResponseBytes = n
 	res.StatusCode = resp.StatusCode
 	res.FinalURL = resp.Request.URL.String()
 	res.OK = resp.StatusCode >= minStatus && resp.StatusCode <= maxStatus
@@ -120,7 +122,7 @@ func (s *Service) check(ctx context.Context, siteID, monitorID int64, raw string
 	return res, nil
 }
 func (s *Service) persist(siteID, monitorID int64, res Result) (Result, error) {
-	rows, e := sqlite.Query(s.store.DB, `INSERT INTO check_results(site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, monitorID, res.OK, res.StatusCode, res.LatencyMS, res.FinalURL, res.ErrorClass, res.Error, res.CheckedAt)
+	rows, e := sqlite.Query(s.store.DB, `INSERT INTO check_results(site_id,monitor_id,ok,status_code,latency_ms,response_bytes,final_url,error_class,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, monitorID, res.OK, res.StatusCode, res.LatencyMS, res.ResponseBytes, res.FinalURL, res.ErrorClass, res.Error, res.CheckedAt)
 	if e != nil {
 		return Result{}, e
 	}
@@ -258,7 +260,7 @@ func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
 	if limit > 200 {
 		limit = 200
 	}
-	rows, e := sqlite.Query(s.store.DB, `SELECT id,site_id,monitor_id,ok,status_code,latency_ms,final_url,error_class,error,checked_at FROM check_results WHERE site_id=? ORDER BY id DESC LIMIT ?`, siteID, limit)
+	rows, e := sqlite.Query(s.store.DB, `SELECT id,site_id,monitor_id,ok,status_code,latency_ms,response_bytes,final_url,error_class,error,checked_at FROM check_results WHERE site_id=? ORDER BY id DESC LIMIT ?`, siteID, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -269,7 +271,7 @@ func (s *Service) Recent(siteID int64, limit int) ([]Result, error) {
 	return out, nil
 }
 func resultRow(r sqlite.Row) Result {
-	return Result{ID: r["id"].Int64, SiteID: r["site_id"].Int64, MonitorID: r["monitor_id"].Int64, OK: r["ok"].Int64 != 0, StatusCode: int(r["status_code"].Int64), LatencyMS: r["latency_ms"].Int64, FinalURL: r["final_url"].Text, ErrorClass: r["error_class"].Text, Error: r["error"].Text, CheckedAt: r["checked_at"].Text}
+	return Result{ID: r["id"].Int64, SiteID: r["site_id"].Int64, MonitorID: r["monitor_id"].Int64, OK: r["ok"].Int64 != 0, StatusCode: int(r["status_code"].Int64), LatencyMS: r["latency_ms"].Int64, ResponseBytes: r["response_bytes"].Int64, FinalURL: r["final_url"].Text, ErrorClass: r["error_class"].Text, Error: r["error"].Text, CheckedAt: r["checked_at"].Text}
 }
 func classifyError(err error) string {
 	msg := strings.ToLower(err.Error())
