@@ -74,6 +74,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sites/{id}/analytics", s.withSession(s.handleEnableAnalytics, true))
 	s.mux.HandleFunc("GET /api/sites/{id}/analytics/summary", s.withSession(s.handleAnalyticsSummary, false))
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
+	s.mux.HandleFunc("GET /api/fleet/analytics", s.withSession(s.handleFleetAnalytics, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/audit", s.withSession(s.handleRunAudit, true))
 	s.mux.HandleFunc("PUT /api/sites/{id}/audit/history", s.withSession(s.handleAuditHistorySetting, true))
@@ -119,6 +120,15 @@ func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) handleFleetAnalytics(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	out, err := s.analytics.Fleet(days)
+	if err != nil {
+		writeError(w, 500, "fleet analytics unavailable")
+		return
+	}
+	writeJSON(w, 200, out)
 }
 func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)

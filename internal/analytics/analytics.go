@@ -170,4 +170,23 @@ func (s *Service) Summary(siteID int64, days int) (Summary, error) {
 	return out, nil
 }
 
+type FleetSummary struct {
+	Pageviews          int64 `json:"pageviews"`
+	Visitors           int64 `json:"visitors"`
+	SitesWithAnalytics int64 `json:"sites_with_analytics"`
+}
+
+func (s *Service) Fleet(days int) (FleetSummary, error) {
+	if days < 1 {
+		days = 1
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	r, e := sqlite.Query(s.st.DB, `SELECT COALESCE(SUM(d.pageviews),0) pageviews,COALESCE(SUM(d.visitors),0) visitors,(SELECT COUNT(*) FROM analytics_properties WHERE enabled=1) sites FROM analytics_daily d WHERE d.day>=?`, since)
+	if e != nil {
+		return FleetSummary{}, e
+	}
+	x := r[0]
+	return FleetSummary{x["pageviews"].Int64, x["visitors"].Int64, x["sites"].Int64}, nil
+}
+
 const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const e={key:k,kind:"pageview",path:location.pathname,referrer:document.referrer,payload:"{}"};try{navigator.sendBeacon(s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),new Blob([JSON.stringify(e)],{type:"application/json"}))}catch(_){}})();`

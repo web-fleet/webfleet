@@ -177,7 +177,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Bot filtering.
 - Performance/load tests for SQLite-scale deployments.
 
-### CP15 - Analytics dashboard
+### CP15 - Analytics dashboard [COMPLETE]
 
 - Today/7d/30d/custom ranges.
 - Visitors, pageviews, top pages, sources, countries and device/browser classes.
