@@ -329,10 +329,10 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 
 **Exit:** an operator can go from a fresh server and company domain to a correctly proxied HTTPS Web Fleet deployment using only the public documentation.
 
-### CP30 - Public-preview hardening
+### CP30 - Public-preview hardening [READY FOR DEEPSEEK/CORTEX]
 
-- Threat model and SSRF review.
-- Fuzz/property tests for URL/parser/security boundaries.
+- Threat model and SSRF review. `SECURITY.md` defines the adversarial handoff.
+- Fuzz/property tests for URL/parser/security boundaries. Initial netguard fuzz target is present; adversarial expansion remains part of the handoff.
 - Fresh install and recovery rehearsal.
 - SQLite and PostgreSQL matrix.
 - Cross-platform application builds.

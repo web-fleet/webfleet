@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./cmd/webfleet
+node scripts/test-database-setup.mjs
+git diff --check
+echo "Local hardening gates passed. Real PostgreSQL/OIDC/provider/cross-platform/scale adversarial gates remain external."
