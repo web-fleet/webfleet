@@ -9,6 +9,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/scheduler"
 	"github.com/web-fleet/webfleet/internal/server"
+	"github.com/web-fleet/webfleet/internal/service"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
 	"log/slog"
@@ -38,6 +39,42 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("backup complete", "path", os.Args[2])
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "service" {
+		if len(os.Args) < 3 {
+			log.Error("usage: webfleet service install|uninstall|update|rollback")
+			os.Exit(2)
+		}
+		switch os.Args[2] {
+		case "install":
+			if err := service.Install(service.Executable(), cfg.DataDir, cfg.Listen); err != nil {
+				log.Error("service install failed", "error", err)
+				os.Exit(1)
+			}
+		case "uninstall":
+			if err := service.Uninstall(); err != nil {
+				log.Error("service uninstall failed", "error", err)
+				os.Exit(1)
+			}
+		case "update":
+			if len(os.Args) != 5 {
+				log.Error("usage: webfleet service update ARTIFACT SHA256")
+				os.Exit(2)
+			}
+			if err := service.Update(os.Args[3], os.Args[4]); err != nil {
+				log.Error("service update failed", "error", err)
+				os.Exit(1)
+			}
+		case "rollback":
+			if err := service.Rollback(); err != nil {
+				log.Error("service rollback failed", "error", err)
+				os.Exit(1)
+			}
+		default:
+			log.Error("unknown service command")
+			os.Exit(2)
+		}
 		return
 	}
 	if len(os.Args) >= 3 && os.Args[1] == "restore" {

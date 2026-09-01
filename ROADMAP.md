@@ -203,7 +203,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Configuration/data export where appropriate.
 - Documented disaster-recovery test.
 
-### CP18 - Service install/update/rollback
+### CP18 - Service install/update/rollback [COMPLETE]
 
 - Linux systemd install path with clear privilege/ownership model.
 - Release artifact verification.
