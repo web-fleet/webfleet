@@ -211,13 +211,27 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP19 - PostgreSQL [IMPLEMENTED - LIVE INTEGRATION GATE PENDING]
+### CP19 - PostgreSQL [IMPLEMENTED - SETUP UX + LIVE INTEGRATION GATES PENDING]
+
+The storage path exists, but CP19 is not product-complete until the first-run database-selection experience matches the standard established by Trestle.
 
 - Storage abstraction only where necessary.
 - PostgreSQL migrations and integration tests.
 - Behavioural equivalence for core monitoring/auth/analytics paths.
 - Migration/import story from SQLite where feasible.
-- Before public preview, run the full PostgreSQL behavioural/integration suite against a real PostgreSQL server; the current sandbox cannot provide one.
+- **First-run database choice happens before first-admin registration.**
+- Default to SQLite and explain that it is the simplest self-hosted choice.
+- Offer PostgreSQL as an explicit alternative during first-run setup.
+- When PostgreSQL is selected, show a connection URL field plus **Test and use PostgreSQL**. The action must remain visibly disabled, including hover state, while the URL is empty; once the URL is non-empty the enabled/hover styling must be unambiguous.
+- Validate the PostgreSQL connection and schema compatibility before persisting the choice. Do not create the administrator until the database choice is settled.
+- If switching to PostgreSQL requires a process restart, show a prominent **Restart required** state with an exact next action: stop/start Web Fleet, reload the page, then create the administrator account.
+- After restart/reload, the auth gate must explicitly say **Create the administrator account** rather than looking like an ordinary sign-in form.
+- Once a deployment contains application/admin data, database-provider switching must not remain casually available from the browser setup flow. Later migration tooling is a separate deliberate operation.
+- Support non-interactive/server-managed configuration through `WEBFLEET_DATABASE_URL` for operators who provision configuration before first launch.
+- Add a pure setup-state contract/regression suite, similar in spirit to Trestle's database setup state machine, covering SQLite, PostgreSQL URL empty/non-empty, persisted provider, restart-required and post-restart administrator-creation transitions.
+- Before public preview, run the full PostgreSQL behavioural/integration suite against a real PostgreSQL server and prove fresh setup, restart, migration, backup/recovery expectations and SQLite/PostgreSQL behavioural parity.
+
+**Exit:** an ordinary user can choose SQLite or PostgreSQL before creating the first administrator, cannot accidentally proceed with an untested PostgreSQL URL, receives unmistakable restart instructions when required, and lands back on an unmistakable administrator-creation screen after restart.
 
 ### CP20 - Retention and maintenance [COMPLETE]
 
@@ -294,7 +308,20 @@ Measure real workload first. Only add queues, specialized analytics storage or H
 - Search/filter/tag/group workflows proven at large site counts.
 - No page-level dashboard overflow regressions.
 
-### CP29 - Public-preview hardening
+### CP29 - Hosting and deployment documentation
+
+- Publish substantial hosting/deployment documentation alongside the application.
+- Document direct VPS/systemd deployment, reverse proxies, TLS termination, firewall/listen-address expectations, upgrades, rollback, backup/restore and PostgreSQL deployment considerations.
+- Provide dedicated Caddy and nginx examples.
+- Document the recommended company subdomain pattern, for example `webfleet.company.com`, including DNS, reverse proxy and HTTPS setup.
+- Explain that related self-hosted tools can live independently on sibling subdomains such as `trestle.company.com`, `cortex.company.com` and `watchpost.company.com`; do not imply that Web Fleet manages or requires those products.
+- Cover analytics tracker origin/CORS implications when the monitored website and Web Fleet live on different domains.
+- Cover Chromium/browser requirements separately for manual Audit so ordinary monitoring deployments do not accidentally install heavyweight browser dependencies.
+- Include deployment troubleshooting for 502/504 errors, TLS/certificate problems, DNS propagation, proxy headers, database connectivity and service permissions.
+
+**Exit:** an operator can go from a fresh server and company domain to a correctly proxied HTTPS Web Fleet deployment using only the public documentation.
+
+### CP30 - Public-preview hardening
 
 - Threat model and SSRF review.
 - Fuzz/property tests for URL/parser/security boundaries.
@@ -304,7 +331,7 @@ Measure real workload first. Only add queues, specialized analytics storage or H
 - Release provenance/checksums.
 - Documentation/public website audit against actual shipped behaviour.
 
-### CP30 - Stable public preview
+### CP31 - Stable public preview
 
 - Signed/tagged release.
 - Install/update instructions tested by an ordinary-user dogfood pass.

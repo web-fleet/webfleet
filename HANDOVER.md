@@ -43,6 +43,24 @@ The product observes websites. It does not host them and should not become a gen
 
 Do not introduce Redis, Kafka, ClickHouse, Kubernetes, a separate frontend framework, or a service mesh into the default architecture without measured need.
 
+## First-run database setup contract
+
+Web Fleet supports SQLite and PostgreSQL, but database choice is part of **first-run setup**, not an environment-variable-only implementation detail.
+
+Follow the Trestle-proven UX shape:
+
+1. Before the first administrator exists, show the database choice.
+2. SQLite is selected by default and requires no connection string.
+3. Selecting PostgreSQL reveals the PostgreSQL URL and **Test and use PostgreSQL** action.
+4. An empty URL keeps that action visibly disabled in every interaction state. A non-empty URL makes the enabled state visually clear.
+5. Test the real connection before accepting PostgreSQL.
+6. If applying PostgreSQL requires restarting Web Fleet, replace the setup form with a prominent restart-required message that tells the operator to restart Web Fleet and reload.
+7. After restart, return to a page explicitly headed **Create the administrator account**. Do not make first-admin creation look like login.
+8. Do not allow casual provider switching after the deployment contains administrator/application data.
+9. `WEBFLEET_DATABASE_URL` remains available for non-interactive provisioning, but the ordinary-user dashboard flow must not require editing environment variables.
+
+Keep the database-selection state machine pure/testable so the empty URL, enabled URL, restart and post-restart transitions can be regression tested without a browser.
+
 ## Core domain model
 
 Keep these concepts explicit even when the first UI hides unnecessary hierarchy:
@@ -224,4 +242,4 @@ As of this handover revision:
 
 Continue with CP21 users, organizations and RBAC. Preserve the simple single-admin experience for small installs while introducing organization membership and scoped roles underneath it.
 
-Before public preview, run the PostgreSQL integration suite against a real PostgreSQL server. The storage path and migrations are implemented, but this sandbox does not provide a PostgreSQL server or outbound Go-module access, so live PostgreSQL behavioural equivalence remains a release gate rather than something to infer from SQLite tests.
+Before public preview, finish the Trestle-style first-run SQLite/PostgreSQL selection UX and run the PostgreSQL integration suite against a real PostgreSQL server. The storage path and migrations are implemented, but this sandbox does not provide a PostgreSQL server or outbound Go-module access, so live PostgreSQL behavioural equivalence remains a release gate rather than something to infer from SQLite tests.
