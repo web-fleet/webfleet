@@ -16,7 +16,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Exit:** one binary starts from a fresh directory, initializes its database, serves the dashboard and exits cleanly.
 
-**Completed:** Go application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. SQLite now follows the same storage pattern as Trestle: `database/sql`, the cgo-free `modernc.org/sqlite` driver, one owned SQLite connection, WAL, foreign-key enforcement, a five-second busy timeout, secured data-directory permissions, validated migration history and transactional migrations. A `sandbox_sqlite`-tagged system-SQLite driver exists only so the network-isolated development sandbox can exercise the same `database/sql` contract when module downloads are unavailable; it is not the normal build path.
+**Completed:** Go application foundation, versioned SQLite schema, Nift-built embedded dashboard, configuration, structured logging, graceful shutdown, `/healthz`, and unit/integration coverage. SQLite now follows the same storage pattern as Trestle: `database/sql`, the cgo-free `modernc.org/sqlite` driver, one owned SQLite connection, WAL, foreign-key enforcement, a five-second busy timeout, secured data-directory permissions, validated migration history and transactional migrations.
 
 ### CP2 - First-admin authentication ✅
 
@@ -123,7 +123,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 **Completed:** bounded same-origin crawl queue (50 pages, depth 3, 200 links/page), robots.txt and sitemap awareness, persisted page/link graph, internal broken-link detection, conservative capped external checks with HEAD-to-GET fallback, new-broken comparison against the prior completed crawl, six-hour independent crawl scheduling, manual crawl API/UI, site-detail link health, and fleet-level regression surfacing. All crawler requests and redirects use the shared public-target network guard.
 
-**Ordering review after CP10:** CP11 remains next. Completing performance history closes the core website-health phase before analytics begins. CP12-CP15 remain together because tracker ingestion, storage/rollups, dashboarding, then events/goals form one coherent privacy-first analytics slice. CP16 backup/restore remains a release gate and may be pulled ahead of analytics only if monitoring-only dogfooding begins before the analytics phase is ready.
+**Ordering review after CP10:** CP11 remains next. Performance history should establish honest server-side baselines before browser-rendered audits are added. CP12 is now a first-class Site Audits checkpoint rather than a vague optional browser-check note. CP13-CP16 then form the coherent privacy-first analytics slice. CP17 backup/restore remains a release gate and may be pulled ahead of analytics only if monitoring-only dogfooding begins before the analytics phase is ready.
 
 ### CP11 - Performance history
 
@@ -131,13 +131,28 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Response-size and transfer observations.
 - Regression thresholds/baselines.
 - Avoid presenting synthetic server timing as browser Core Web Vitals.
-- Evaluate optional browser-based checks only after the base feature is useful.
+- Keep this checkpoint independent of a browser runtime so ordinary monitoring remains lightweight.
 
-**Phase 2 exit:** Web Fleet understands failures and regressions specific to websites, not merely hosts.
+### CP12 - Site audits
+
+- Add an optional browser-rendered audit runner for representative pages.
+- Present the feature in the site UI as **Audits**, not as Google Lighthouse compatibility.
+- Evaluate performance, accessibility, best-practice/security hygiene and technical discoverability/SEO-style signals with clearly documented scoring rules.
+- Capture browser-derived metrics separately from CP11 server timings; never relabel synthetic HTTP timings as Core Web Vitals.
+- Persist audit runs, category scores, individual findings and evidence so regressions can be compared over time.
+- Allow per-site audit configuration, page selection and a manual "Run audit" action.
+- Schedule audits at a lower frequency than uptime checks and make the browser worker optional so basic self-hosting does not require Chromium.
+- Surface meaningful audit regressions both on the individual site's **Audits** tab and in the fleet-wide attention view.
+- Define resource/time/concurrency limits so large fleets cannot let browser audits starve availability monitoring.
+- Keep the audit engine internally abstract enough that a browser extension or remote audit worker can be explored later without changing the site/audit data model.
+
+**Exit:** an operator can run and compare browser-based quality evaluations for a site, understand exactly why a score changed, and see important regressions across the fleet without confusing Web Fleet with Google Lighthouse itself.
+
+**Phase 2 exit:** Web Fleet understands failures and regressions specific to websites, including browser-rendered quality regressions, not merely hosts.
 
 ## Phase 3 - privacy-first analytics
 
-### CP12 - Analytics property and tracker
+### CP13 - Analytics property and tracker
 
 - Optional analytics property per site.
 - Tiny cacheable tracker script.
@@ -146,7 +161,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - No-cookie default.
 - Privacy review of every collected field.
 
-### CP13 - Analytics storage and rollups
+### CP14 - Analytics storage and rollups
 
 - Raw-event retention policy.
 - Privacy-preserving visitor estimation.
@@ -155,7 +170,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Bot filtering.
 - Performance/load tests for SQLite-scale deployments.
 
-### CP14 - Analytics dashboard
+### CP15 - Analytics dashboard
 
 - Today/7d/30d/custom ranges.
 - Visitors, pageviews, top pages, sources, countries and device/browser classes.
@@ -163,7 +178,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fleet-wide traffic overview.
 - Clear "analytics not installed" onboarding for sites without the tracker.
 
-### CP15 - Events and goals
+### CP16 - Events and goals
 
 - Custom event API.
 - Goal definitions.
@@ -174,14 +189,14 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 4 - self-hosting and operational reliability
 
-### CP16 - Backup and restore
+### CP17 - Backup and restore
 
 - Consistent SQLite backup.
 - Restore workflow with safety checks.
 - Configuration/data export where appropriate.
 - Documented disaster-recovery test.
 
-### CP17 - Service install/update/rollback
+### CP18 - Service install/update/rollback
 
 - Linux systemd install path with clear privilege/ownership model.
 - Release artifact verification.
@@ -189,14 +204,14 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP18 - PostgreSQL
+### CP19 - PostgreSQL
 
 - Storage abstraction only where necessary.
 - PostgreSQL migrations and integration tests.
 - Behavioural equivalence for core monitoring/auth/analytics paths.
 - Migration/import story from SQLite where feasible.
 
-### CP19 - Retention and maintenance
+### CP20 - Retention and maintenance
 
 - Check-history retention/compaction.
 - Analytics raw-event retention.
@@ -207,7 +222,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 
 ## Phase 5 - multi-user, agency and enterprise scale
 
-### CP20 - Users, organizations and RBAC
+### CP21 - Users, organizations and RBAC
 
 - Multiple users.
 - Organization membership.
@@ -215,21 +230,21 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Agency/client-friendly grouping.
 - Audit logs for privileged actions.
 
-### CP21 - API and tokens
+### CP22 - API and tokens
 
 - Documented API for site/monitor/reporting workflows.
 - Scoped API tokens.
 - Rotation/revocation.
 - Rate limiting and auditability.
 
-### CP22 - SSO/OIDC
+### CP23 - SSO/OIDC
 
 - OIDC integration.
 - Safe account linking/provisioning policy.
 - Local-admin recovery path.
 - Enterprise configuration documentation.
 
-### CP23 - Worker separation and scale tests
+### CP24 - Worker separation and scale tests
 
 - Optional scheduler/check worker processes.
 - Optional independent analytics ingestion process.
@@ -237,7 +252,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Load/stress tests for hundreds/thousands of sites.
 - Preserve the one-binary integrated deployment as the default.
 
-### CP24 - High availability and larger ingestion decision gate
+### CP25 - High availability and larger ingestion decision gate
 
 Measure real workload first. Only add queues, specialized analytics storage or HA coordination when evidence shows PostgreSQL/in-process buffering is insufficient.
 
@@ -245,27 +260,27 @@ Measure real workload first. Only add queues, specialized analytics storage or H
 
 ## Phase 6 - integrations and release readiness
 
-### CP25 - Deployment observations
+### CP26 - Deployment observations
 
 - GitHub/webhook/API ingestion of external deployment events.
 - Correlate deployments with uptime/performance/link/traffic changes.
 - Web Fleet observes deployments initially; it does not become the deployment platform.
 
-### CP26 - Notifications and integrations
+### CP27 - Notifications and integrations
 
 - Additional notification transports based on user demand.
 - Webhooks.
 - Clear retry/delivery history.
 - Secret handling and redaction tests.
 
-### CP27 - Accessibility, mobile and large-fleet UX
+### CP28 - Accessibility, mobile and large-fleet UX
 
 - Keyboard navigation and screen-reader review.
 - Responsive/mobile fleet management.
 - Search/filter/tag/group workflows proven at large site counts.
 - No page-level dashboard overflow regressions.
 
-### CP28 - Public-preview hardening
+### CP29 - Public-preview hardening
 
 - Threat model and SSRF review.
 - Fuzz/property tests for URL/parser/security boundaries.
@@ -275,7 +290,7 @@ Measure real workload first. Only add queues, specialized analytics storage or H
 - Release provenance/checksums.
 - Documentation/public website audit against actual shipped behaviour.
 
-### CP29 - Stable public preview
+### CP30 - Stable public preview
 
 - Signed/tagged release.
 - Install/update instructions tested by an ordinary-user dogfood pass.
