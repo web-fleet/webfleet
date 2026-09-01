@@ -311,7 +311,7 @@ func TestA11yEditAndGroupDialogsFocus(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	// Create-group dialog from the fleet view (SPA hash navigation).
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`location.hash='#/fleet'`, nil)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`location.hash='#/sites'`, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#add-site-head`)); err != nil {
@@ -483,3 +483,154 @@ func TestA11yMobileOverflowAndMenuKeyboard(t *testing.T) {
 }
 
 func itoa(n int64) string { return fmt.Sprintf("%d", n) }
+
+// a11ySeedSites logs in once and creates n sites over HTTP so the fleet view
+// reaches its populated large-fleet presentation (pagination at 20/page).
+func a11ySeedSites(t *testing.T, srv *httptest.Server, n int) {
+	t.Helper()
+	resp, err := http.Post(srv.URL+"/api/login", "application/json",
+		bytes.NewBufferString(`{"email":"admin@example.com","password":"secret7"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	var cookie string
+	for _, c := range resp.Cookies() {
+		if c.Name == "webfleet_session" {
+			cookie = c.Value
+		}
+	}
+	csrf, _ := body["csrf"].(string)
+	for i := 0; i < n; i++ {
+		payload := fmt.Sprintf(`{"name":"Site %d","primary_url":"https://example.com/%d/"}`, i+1, i+1)
+		req, _ := http.NewRequest("POST", srv.URL+"/api/sites", bytes.NewBufferString(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", csrf)
+		req.AddCookie(&http.Cookie{Name: "webfleet_session", Value: cookie})
+		r, err := http.DefaultClient.Do(req)
+		if err != nil || r.StatusCode != 201 {
+			t.Fatalf("seed site %d: %v %v", i+1, err, r)
+		}
+		r.Body.Close()
+	}
+}
+
+// TestA11yLargeFleetOverflow proves the populated fleet table/pagination
+// layout does not cause page-level horizontal overflow at desktop or narrow
+// width, that the table container owns its own scrolling, that filter and
+// pagination controls remain reachable/inside the viewport, and that
+// pagination actually advances.
+func TestA11yLargeFleetOverflow(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	a11ySetup(t, ctx, srv)
+	a11ySeedSites(t, srv, 25)
+	// Re-fetch the fleet view so the browser sees the seeded sites.
+	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`location.hash='#/sites'`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#add-site-head`)); err != nil {
+		t.Fatal(err)
+	}
+	var ready bool
+	for i := 0; i < 20 && !ready; i++ {
+		time.Sleep(50 * time.Millisecond)
+		var r int
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll('.site-table tbody tr').length`, &r))
+		ready = r == 20
+	}
+	if !ready {
+		var hash, view string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`location.hash`, &hash))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('view').textContent.slice(0,120)`, &view))
+		t.Fatalf("fleet table did not render 20 populated rows after reload (hash=%q view=%q)", hash, view)
+	}
+
+	assertLayout := func(viewportW int) {
+		var scrollW, innerW, addBtnRight, addBtnLeft float64
+		var searchVisible, nextVisible, prevVisible bool
+		var tableRows int
+		var tableW, sectionClientW float64
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(`document.documentElement.scrollWidth`, &scrollW),
+			chromedp.Evaluate(`window.innerWidth`, &innerW),
+			chromedp.Evaluate(`document.querySelector('#add-site-head').getBoundingClientRect().right`, &addBtnRight),
+			chromedp.Evaluate(`document.querySelector('#add-site-head').getBoundingClientRect().left`, &addBtnLeft),
+			chromedp.Evaluate(`!!document.querySelector('#site-search') && document.querySelector('#site-search').offsetParent!==null`, &searchVisible),
+			chromedp.Evaluate(`!!document.querySelector('#next-page') && !document.querySelector('#next-page').disabled`, &nextVisible),
+			chromedp.Evaluate(`document.querySelector('#prev-page')!==null && document.querySelector('#prev-page').disabled`, &prevVisible),
+			chromedp.Evaluate(`document.querySelectorAll('.site-table tbody tr').length`, &tableRows),
+			chromedp.Evaluate(`document.querySelector('.site-table').scrollWidth`, &tableW),
+			chromedp.Evaluate(`document.querySelector('.site-table').closest('.section').clientWidth`, &sectionClientW),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if scrollW > innerW {
+			t.Fatalf("page-level horizontal overflow at %dpx: scrollWidth=%.0f innerWidth=%.0f", viewportW, scrollW, innerW)
+		}
+		if addBtnLeft < 0 || addBtnRight > innerW {
+			t.Fatalf("primary add control outside viewport at %dpx: left=%.0f right=%.0f inner=%.0f", viewportW, addBtnLeft, addBtnRight, innerW)
+		}
+		if !searchVisible || !nextVisible || !prevVisible {
+			t.Fatalf("filter/pagination controls not reachable at %dpx (search=%v next=%v prev=%v)", viewportW, searchVisible, nextVisible, prevVisible)
+		}
+		if tableRows != 20 {
+			t.Fatalf("expected 20 rows per populated page at %dpx, got %d", viewportW, tableRows)
+		}
+		if tableW > sectionClientW {
+			// The table container owns its own horizontal scrolling; the page
+			// itself must still not overflow.
+			t.Logf("table internally scrollable at %dpx: tableW=%.0f container=%.0f", viewportW, tableW, sectionClientW)
+		}
+	}
+
+	assertLayout(1280)
+
+	// Pagination advances to page 2.
+	if err := chromedp.Run(ctx, chromedp.Click(`#next-page`)); err != nil {
+		t.Fatal(err)
+	}
+	var pageNum, rows2 int
+	ok := false
+	for i := 0; i < 20 && !ok; i++ {
+		time.Sleep(50 * time.Millisecond)
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`parseInt(document.getElementById("page-number").value)`, &pageNum))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll('.site-table tbody tr').length`, &rows2))
+		ok = pageNum == 2 && rows2 == 5
+	}
+	if !ok {
+		t.Fatalf("pagination did not advance correctly: page=%d rows=%d", pageNum, rows2)
+	}
+
+	// Narrow width: return to page 1 and assert the populated table does not
+	// overflow the page.
+	if err := chromedp.Run(ctx, chromedp.Click(`#prev-page`)); err != nil {
+		t.Fatal(err)
+	}
+	back := false
+	for i := 0; i < 20 && !back; i++ {
+		time.Sleep(50 * time.Millisecond)
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`parseInt(document.getElementById("page-number").value)`, &pageNum))
+		back = pageNum == 1
+	}
+	if err := chromedp.Run(ctx, chromedp.EmulateViewport(320, 700)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	rendered := false
+	for i := 0; i < 20 && !rendered; i++ {
+		time.Sleep(50 * time.Millisecond)
+		var r int
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll('.site-table tbody tr').length`, &r))
+		rendered = r == 20
+	}
+	if !rendered {
+		t.Fatal("fleet table did not render 20 populated rows at 320px")
+	}
+	assertLayout(320)
+}
