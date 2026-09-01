@@ -634,3 +634,77 @@ func TestA11yLargeFleetOverflow(t *testing.T) {
 	}
 	assertLayout(320)
 }
+
+// TestA11yBrowserAuthFlow proves an ordinary browser can complete the
+// first-admin setup form, reach the dashboard, log out, and log back in
+// through the browser login form - no cookie injection involved.
+func a11yPoll(t *testing.T, ctx context.Context, expr string) bool {
+	t.Helper()
+	for i := 0; i < 40; i++ {
+		var v bool
+		if chromedp.Run(ctx, chromedp.Evaluate(expr, &v)) == nil && v {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func TestA11yBrowserAuthFlow(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv.URL)); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh instance: the auth form appears in setup mode.
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#auth-form`)); err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-form').dataset.mode`, &mode)); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "setup" {
+		t.Fatalf("fresh instance auth form mode = %q (want setup)", mode)
+	}
+	// Complete first-admin setup through the browser.
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#auth-submit`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("auth stage still visible after successful setup")
+	}
+	// Log out via the browser control; the login form appears.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('logout').click()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === false`) {
+		t.Fatal("auth stage did not reappear after logout")
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('auth-form').dataset.mode`, &mode)); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "login" {
+		t.Fatalf("post-logout auth form mode = %q (want login)", mode)
+	}
+	// Log back in through the browser login form.
+	if err := chromedp.Run(ctx,
+		chromedp.SendKeys(`#email`, "admin@example.com"),
+		chromedp.SendKeys(`#password`, "secret7"),
+		chromedp.Click(`#auth-submit`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('auth-stage').hidden === true`) {
+		t.Fatal("auth stage still visible after successful login")
+	}
+	if !a11yPoll(t, ctx, `!!document.getElementById('add-site-head')`) {
+		t.Fatal("dashboard fleet view did not render after login")
+	}
+}

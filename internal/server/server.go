@@ -526,6 +526,7 @@ func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, p pri
 }
 
 func (s *Server) handleDatabaseSetupStatus(w http.ResponseWriter, r *http.Request, _ principal) {
+	w.Header().Set("Cache-Control", "no-store")
 	x, e := databasesetup.StateFor(s.store, s.cfg.DataDir)
 	if e != nil {
 		writeError(w, 500, "database setup unavailable")
@@ -633,6 +634,8 @@ func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, p 
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request, _ principal) {
+	w.Header().Set("Cache-Control", "no-store")
+	s.log.Info("dbg:status", "needs", "?", "cookies", len(r.Cookies()))
 	need, err := s.auth.NeedsSetup()
 	if err != nil {
 		writeError(w, 500, "setup status unavailable")
@@ -1242,6 +1245,7 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p prin
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, p principal) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, map[string]any{"email": p.Email, "csrf": p.CSRF, "role": p.Role, "org_id": p.OrgID})
 }
 
