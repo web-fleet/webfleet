@@ -300,7 +300,7 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Correlate deployments with uptime/performance/link/traffic changes.
 - Web Fleet observes deployments initially; it does not become the deployment platform.
 
-### CP27 - Notifications and integrations
+### CP27 - Notifications and integrations [COMPLETE]
 
 - Additional notification transports based on user demand.
 - Webhooks.

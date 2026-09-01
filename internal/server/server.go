@@ -24,6 +24,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
 	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/notifications"
 	"github.com/web-fleet/webfleet/internal/oidc"
 	"github.com/web-fleet/webfleet/internal/performance"
 	"github.com/web-fleet/webfleet/internal/rbac"
@@ -36,30 +37,32 @@ import (
 var embedded embed.FS
 
 type Server struct {
-	cfg         config.Config
-	store       *store.Store
-	analytics   *analytics.Service
-	tokens      *apitokens.Service
-	audit       *audit.Service
-	auth        *auth.Service
-	sites       *sites.Service
-	monitor     *monitor.Service
-	maintenance *maintenance.Service
-	rbac        *rbac.Service
-	oidc        *oidc.Service
-	incidents   *incidents.Service
-	tls         *tlshealth.Service
-	dns         *dnsobs.Service
-	deployments *deployments.Service
-	crawler     *crawler.Service
-	log         *slog.Logger
-	http        *http.Server
-	mux         *http.ServeMux
+	cfg           config.Config
+	store         *store.Store
+	analytics     *analytics.Service
+	tokens        *apitokens.Service
+	audit         *audit.Service
+	auth          *auth.Service
+	sites         *sites.Service
+	monitor       *monitor.Service
+	maintenance   *maintenance.Service
+	rbac          *rbac.Service
+	oidc          *oidc.Service
+	notifications *notifications.Service
+	incidents     *incidents.Service
+	tls           *tlshealth.Service
+	dns           *dnsobs.Service
+	deployments   *deployments.Service
+	crawler       *crawler.Service
+	log           *slog.Logger
+	http          *http.Server
+	mux           *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.oidc = oidc.New(st, s.auth)
+	s.notifications = notifications.New(st)
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -93,6 +96,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
 	s.mux.HandleFunc("POST /api/tokens", s.withSession(s.handleCreateToken, true))
 	s.mux.HandleFunc("DELETE /api/tokens/{id}", s.withSession(s.handleRevokeToken, true))
+	s.mux.HandleFunc("GET /api/notifications/webhooks", s.withSession(s.handleWebhooks, false))
+	s.mux.HandleFunc("POST /api/notifications/webhooks", s.withSession(s.handleWebhookCreate, true))
+	s.mux.HandleFunc("GET /api/notifications/deliveries", s.withSession(s.handleNotificationDeliveries, false))
 	s.mux.HandleFunc("GET /api/organization/members", s.withSession(s.handleMembers, false))
 	s.mux.HandleFunc("POST /api/organization/members", s.withSession(s.handleMemberUpdate, true))
 	s.mux.HandleFunc("GET /api/groups", s.withSession(s.handleGroups, false))
@@ -736,6 +742,42 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	x, e := s.notifications.List(1)
+	if e != nil {
+		writeError(w, 500, "webhooks unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"webhooks": x})
+}
+func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	role, e := s.rbac.Role(sess.UserID, 1)
+	if e != nil || !rbac.Can(role, "membership.update") {
+		writeError(w, 403, "permission denied")
+		return
+	}
+	var in struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	x, secret, e := s.notifications.Create(1, in.Name, in.URL)
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 201, map[string]any{"webhook": x, "secret": secret})
+}
+func (s *Server) handleNotificationDeliveries(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	x, e := s.notifications.History(1)
+	if e != nil {
+		writeError(w, 500, "delivery history unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deliveries": x})
 }
 func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	role, e := s.rbac.Role(sess.UserID, 1)
