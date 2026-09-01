@@ -31,3 +31,16 @@ The repository implementation campaign is complete, but public preview remains b
 10. accessibility, mobile layout and ordinary-user setup confusion.
 
 Do not waive a failed gate because the feature worked in the implementation environment.
+
+## Current enforcement status (CP30 audit, Campaign 1)
+
+The boundaries below were implemented in earlier checkpoints but were not yet enforced or wired when CP30 began. Each is a live obligation; the route/permission inventory in `docs/hardening/route-inventory.json` and the roadmap track their repair.
+
+- RBAC role checks were consulted by only four handlers; most authenticated routes were session-only. Authorization is being enforced per route from the inventory, with viewer/operator/admin/owner boundaries proven by server-level tests.
+- The fresh-install first administrator had no organization membership. First-admin user creation and owner membership are now a single atomic transaction with a race guard.
+- Organization ids were hard-coded as `1` in user-facing queries. Site/group/list/fleet queries now filter by the acting organization derived from the session membership.
+- API tokens were hashed at rest but no HTTP route accepted them; no endpoint rate limiting existed.
+- Webhook delivery was never invoked by product events (`notifications.Deliver` had no callers).
+- Audit launched Chromium with `--no-sandbox` without the public-network guard (CP30 Campaign 2 blocker).
+- Cookie `Secure` and OIDC redirect schemes derived from `r.TLS`, so TLS-terminating reverse proxies produced non-secure cookies and `http` redirect URIs (CP30 Campaign 3 blocker).
+- `webfleet backup`/`restore` always addressed the SQLite path regardless of the configured provider (CP30 Campaign 5/6 blocker).

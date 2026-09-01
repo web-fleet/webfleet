@@ -265,6 +265,8 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - Rotation/revocation.
 - Rate limiting and auditability.
 
+**CP30 wiring review:** scoped API tokens are persisted, hashed and revocable, but no HTTP route accepts token authentication yet (`apitokens.Authenticate` is exercised only by its unit test). Rate limiting is not implemented. CP22 reached its implementation checkpoint; wiring a deliberate token-authenticated API surface and proving scope enforcement, revocation, organization isolation and rate limiting remain CP30 obligations.
+
 ### CP23 - SSO/OIDC [COMPLETE]
 
 - OIDC integration.
@@ -279,6 +281,8 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - PostgreSQL-backed coordination.
 - Load/stress tests for hundreds/thousands of sites.
 - Preserve the one-binary integrated deployment as the default.
+
+**CP30 wiring review:** the optional `serve`/`worker`/`analytics-ingest` process roles exist, but the scheduler has no claim/lease mechanism, so two worker processes would both schedule the full fleet and produce duplicate checks, crawls and incidents. "PostgreSQL-backed coordination" is not yet implemented; proving single-owner scheduling (or adding a claim/lease) is a CP30 concurrency obligation, not current behaviour.
 
 ### CP25 - High availability and larger ingestion decision gate [COMPLETE]
 
@@ -307,12 +311,16 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Clear retry/delivery history.
 - Secret handling and redaction tests.
 
+**CP30 wiring review:** webhook CRUD and a delivery primitive exist, but no product event invokes delivery yet (`notifications.Deliver` has no callers). Webhooks will not fire until incident/check transitions are wired to delivery, and retry/signature/redaction behaviour needs end-to-end tests. CP27 reached its implementation checkpoint; wiring and proof remain CP30 obligations.
+
 ### CP28 - Accessibility, mobile and large-fleet UX [COMPLETE]
 
 - Keyboard navigation and screen-reader review.
 - Responsive/mobile fleet management.
 - Search/filter/tag/group workflows proven at large site counts.
 - No page-level dashboard overflow regressions.
+
+**CP30 wiring review:** search, group filter, pagination and the mobile navigation work, but the tag-filter input is not wired to the server (`sites.ListByTag` exists; the dashboard tag field has no handler and its state is never initialised). Native `<dialog>` markup provides baseline focus handling, but no keyboard/screen-reader audit evidence has been recorded. CP28 reached its implementation checkpoint; tag-filter wiring and an accessibility audit remain CP30 obligations.
 
 ### CP29 - Hosting and deployment documentation [COMPLETE]
 
@@ -338,6 +346,8 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Cross-platform application builds.
 - Release provenance/checksums.
 - Documentation/public website audit against actual shipped behaviour.
+
+**Campaign 1 (in progress):** project-truth correction and the identity/RBAC foundation. CP30 confirmed that RBAC was decorative (only four handlers consulted it), the fresh-install first administrator had no organization membership, organization ids were hard-coded in user-facing queries, and the first-admin setup path was not race-atomic. The route/permission inventory lives in `docs/hardening/route-inventory.json` and is enforced by a route-table contract test.
 
 ### CP31 - Stable public preview [BLOCKED ON CP30]
 

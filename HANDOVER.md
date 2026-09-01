@@ -235,11 +235,14 @@ As of this handover revision:
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
 - CP1-CP25 are complete in development. CP19 includes the Trestle-style first-run SQLite/PostgreSQL selection UX; live PostgreSQL parity testing remains a CP30 battle-hardening gate. CP21-CP23 add organizations/RBAC, scoped API tokens and OIDC; CP24 adds optional process roles; CP25 records the no-extra-distributed-infrastructure-yet decision.
+- CP30 adversarial review is underway. It confirmed several implementation checkpoints were not yet wired/enforced: RBAC was consulted by only four handlers, the fresh-install first administrator had no organization membership, API-token authentication and webhook delivery had no callers, tag filtering was not wired in the dashboard, the scheduler had no claim/lease, and organization ids were hard-coded in user-facing queries. It also confirmed release blockers: an incomplete `go.sum`, a cgo `libargon2` password binding that breaks cross-platform builds, a systemd install that never creates the service account/ownership, and provider-agnostic backup/restore. These are recorded in `ROADMAP.md`, `SECURITY.md`, `SCALE.md`, `RELEASE.md` and the route inventory at `docs/hardening/route-inventory.json`.
 - The companion `web-fleet.github.io` source/generated workspace documents the current development state.
 - The next implementation checkpoint is CP26 in `ROADMAP.md`.
 
 ## Immediate next step
 
 The implementation campaign is complete through CP29. CP30 is now explicitly handed to DeepSeek/Cortex for adversarial testing and battle hardening. Use `SECURITY.md`, `SCALE.md`, `RELEASE.md`, the roadmap and existing regressions as the attack/review contract.
+
+CP30 Campaign 1 (project-truth correction + identity/RBAC foundation) is in progress. Each campaign stops for review after an independently complete, committed repair with regression/adversarial tests. The route/permission inventory at `docs/hardening/route-inventory.json` is the authorization contract that drove the RBAC enforcement work.
 
 Do not tag or announce the public preview while CP31 is blocked on CP30. After the hardening campaign, repair every release blocker, rerun the exact release gates, then perform an ordinary-user dogfood install from the public website before deciding whether to tag the preview.
