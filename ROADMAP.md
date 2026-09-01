@@ -265,7 +265,7 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 - Rotation/revocation.
 - Rate limiting and auditability.
 
-### CP23 - SSO/OIDC
+### CP23 - SSO/OIDC [COMPLETE]
 
 - OIDC integration.
 - Safe account linking/provisioning policy.

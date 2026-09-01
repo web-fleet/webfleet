@@ -23,6 +23,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
 	"github.com/web-fleet/webfleet/internal/monitor"
+	"github.com/web-fleet/webfleet/internal/oidc"
 	"github.com/web-fleet/webfleet/internal/performance"
 	"github.com/web-fleet/webfleet/internal/rbac"
 	"github.com/web-fleet/webfleet/internal/sites"
@@ -43,6 +44,7 @@ type Server struct {
 	monitor     *monitor.Service
 	maintenance *maintenance.Service
 	rbac        *rbac.Service
+	oidc        *oidc.Service
 	incidents   *incidents.Service
 	tls         *tlshealth.Service
 	dns         *dnsobs.Service
@@ -54,6 +56,7 @@ type Server struct {
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s.oidc = oidc.New(st, s.auth)
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -68,6 +71,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/setup/database", s.handleDatabaseSetup)
 	s.mux.HandleFunc("POST /api/setup", s.handleSetup)
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
+	s.mux.HandleFunc("GET /api/oidc/login", s.handleOIDCLogin)
+	s.mux.HandleFunc("GET /api/oidc/callback", s.handleOIDCCallback)
+	s.mux.HandleFunc("GET /api/oidc/config", s.withSession(s.handleOIDCConfig, false))
+	s.mux.HandleFunc("PUT /api/oidc/config", s.withSession(s.handleOIDCConfigSave, true))
 	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
 	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
 	s.mux.HandleFunc("POST /api/tokens", s.withSession(s.handleCreateToken, true))
@@ -333,6 +340,54 @@ func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, x)
+}
+func (s *Server) oidcRedirect(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + "/api/oidc/callback"
+}
+func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
+	u, e := s.oidc.Begin(r.Context(), s.oidcRedirect(r))
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	http.Redirect(w, r, u, http.StatusFound)
+}
+func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	tok, _, e := s.oidc.Callback(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), s.oidcRedirect(r))
+	if e != nil {
+		writeError(w, 401, e.Error())
+		return
+	}
+	setSessionCookie(w, r, tok)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	c, e := s.oidc.Config()
+	if e != nil {
+		writeJSON(w, 200, map[string]any{"config": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"config": c})
+}
+func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	role, e := s.rbac.Role(sess.UserID, 1)
+	if e != nil || !rbac.Can(role, "membership.update") {
+		writeError(w, 403, "permission denied")
+		return
+	}
+	var c oidc.Config
+	if !decodeJSON(w, r, &c) {
+		return
+	}
+	if e = s.oidc.Save(c); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	need, err := s.auth.NeedsSetup()

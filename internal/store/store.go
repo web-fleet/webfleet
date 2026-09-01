@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 19
+const schemaVersion = 20
 
 type migration struct {
 	version int
@@ -125,6 +125,10 @@ var migrations = []migration{
 	}},
 	{19, "api tokens", []string{
 		`CREATE TABLE api_tokens(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, scopes TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL);`,
+	}},
+	{20, "oidc configuration", []string{
+		`CREATE TABLE oidc_config(id INTEGER PRIMARY KEY, issuer TEXT NOT NULL, client_id TEXT NOT NULL, client_secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, auto_provision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);`,
+		`CREATE TABLE oidc_states(state TEXT PRIMARY KEY, nonce TEXT NOT NULL, expires_at TEXT NOT NULL);`,
 	}},
 }
 

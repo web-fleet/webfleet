@@ -68,6 +68,17 @@ func (a *Service) Login(email, pw string) (string, Session, error) {
 	_ = a.audit("login", r[0]["email"].Text)
 	return raw, Session{UserID: r[0]["id"].Int64, Email: r[0]["email"].Text, CSRF: csrf, Expires: exp}, nil
 }
+func (a *Service) CreateSessionForUser(userID int64, email string) (string, Session, error) {
+	raw := token(32)
+	csrf := token(24)
+	sum := sha256.Sum256([]byte(raw))
+	exp := time.Now().UTC().Add(24 * time.Hour)
+	if e := sqlite.Exec(a.store.DB, `INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,created_at) VALUES(?,?,?,?,?)`, sum[:], userID, csrf, exp.Format(time.RFC3339Nano), store.Now()); e != nil {
+		return "", Session{}, e
+	}
+	_ = a.audit("oidc_login", email)
+	return raw, Session{UserID: userID, Email: email, CSRF: csrf, Expires: exp}, nil
+}
 func (a *Service) Session(raw string) (Session, error) {
 	if raw == "" {
 		return Session{}, errors.New("no session")
