@@ -106,16 +106,31 @@ jobs:
           sudo /tmp/wf service uninstall
           test ! -f /etc/systemd/system/webfleet.service
           sudo test -d "$DATA"
-      - name: Rehearse partial-failure rollback (broken unit activation)
+      - name: Rehearse partial-failure rollback (deterministic activation failure)
         run: |
           set -euxo pipefail
-          # A misconfigured unit activation must not leave a state that looks
-          # installed. Install to a data dir that the service account cannot
-          # write forces systemctl start to fail and install to roll back.
-          sudo /tmp/wf service install || true
-          # After any failure path the unit must be gone or the binary restored;
-          # assert install is repeatable and the unit is consistent.
-          sudo systemctl reset-failed webfleet.service || true
+          # Deterministic failure injection: a fake systemctl that fails the
+          # enable --now activation step. Install must roll back cleanly.
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/systemctl <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *"enable --now"*) echo "simulated activation failure" >&2; exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin/systemctl
+          set +e
+          sudo env "PATH=/tmp/fakebin:/usr/bin:/bin" /tmp/wf service install > /tmp/install-fail.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "install with failing activation succeeded unexpectedly" >&2; exit 1; }
+          grep -q "rolled back" /tmp/install-fail.log || { echo "install did not report rollback" >&2; cat /tmp/install-fail.log >&2; exit 1; }
+          test ! -f /etc/systemd/system/webfleet.service || { echo "unit left behind after rollback" >&2; exit 1; }
+          # The previously installed binary must be restored; user data untouched.
+          cmp /tmp/wf /usr/local/bin/webfleet || { echo "binary not restored after rollback" >&2; exit 1; }
+          sudo test -d /var/lib/webfleet
+          # Installation can then be repeated successfully.
           sudo /tmp/wf service install
           curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
           sudo /tmp/wf service uninstall || true

@@ -18,6 +18,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/apitokens"
 	"github.com/web-fleet/webfleet/internal/audit"
 	"github.com/web-fleet/webfleet/internal/auth"
+	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/databasesetup"
 	"github.com/web-fleet/webfleet/internal/deployments"
@@ -574,5 +575,68 @@ func TestPostgresDeploymentIdempotency(t *testing.T) {
 	}
 	if empty1.ID == empty2.ID || empty1.ID == a1.ID || empty2.ID == a1.ID {
 		t.Fatalf("postgres empty external_id collapse or sequence collision: %d %d %d", empty1.ID, empty2.ID, a1.ID)
+	}
+}
+
+// TestEnvProvisionedPostgresStartup proves the real startup path: setting
+// WEBFLEET_DATABASE_URL causes configuration to select PostgreSQL, the store
+// opens on that database, and first-run setup state behaves correctly without
+// any browser database chooser.
+func TestEnvProvisionedPostgresStartup(t *testing.T) {
+	base := os.Getenv("WEBFLEET_TEST_POSTGRES_URL")
+	if base == "" {
+		t.Skip("WEBFLEET_TEST_POSTGRES_URL not set")
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("wf_env_%d", time.Now().UnixNano())
+	admin, err := store.OpenPostgres(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.DB.ExecContext(context.Background(), "CREATE DATABASE "+name); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	admin.Close()
+	u.Path = "/" + name
+	dsn := u.String()
+	t.Cleanup(func() {
+		admin, err := store.OpenPostgres(context.Background(), base)
+		if err == nil {
+			_, _ = admin.DB.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+			admin.Close()
+		}
+	})
+
+	dir := t.TempDir()
+	t.Setenv("WEBFLEET_DATA_DIR", dir)
+	t.Setenv("WEBFLEET_DATABASE_URL", dsn)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseURL != dsn {
+		t.Fatalf("env database url not selected: %q", cfg.DatabaseURL)
+	}
+	if store.Provider(cfg.DatabaseURL) != "postgres" {
+		t.Fatal("provider not detected as postgres")
+	}
+	st, err := store.OpenPostgres(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("open via startup path: %v", err)
+	}
+	defer st.Close()
+	state, err := databasesetup.StateFor(st, dir)
+	if err != nil || state.Selectable || state.RestartRequired || state.Provider != "postgres" {
+		t.Fatalf("env-provisioned setup state: %+v %v", state, err)
+	}
+	if err := auth.New(st).CreateAdmin("admin@example.com", "secret7"); err != nil {
+		t.Fatal(err)
+	}
+	if need, _ := auth.New(st).NeedsSetup(); need {
+		t.Fatal("setup still required after env-provisioned admin creation")
 	}
 }

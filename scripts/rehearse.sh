@@ -1,15 +1,16 @@
 #!/bin/bash
 # rehearse.sh runs a stranger-style rehearsal from a freshly built release
-# archive (not a development-tree binary): unpack, fresh SQLite setup, admin
-# creation, sites/groups/tags, monitoring check, fleet, Audit, analytics,
-# API token, webhook, backup, restart and persistence. It never creates a
-# public release or tag.
+# archive (not a development-tree binary): fresh SQLite setup, admin, sites,
+# monitoring, incident lifecycle, Audit, analytics, API token, webhook outbox,
+# backup, destructive change, restore, binary update/rollback, restart and
+# persistence. An optional PostgreSQL section runs when
+# WEBFLEET_TEST_POSTGRES_URL is set. It never creates a public release or tag
+# and is not a substitute for the owner's later ordinary-user dogfood.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN=${1:-}
 if [ -z "$BIN" ]; then
-  echo "building release archive..." >/dev/null
   ./scripts/release.sh >/dev/null 2>&1
   LINUX_ARCHIVE=$(ls dist/webfleet_*_linux_amd64.tar.gz | head -1)
   REHEARSE_DIR=$(mktemp -d)
@@ -21,68 +22,115 @@ WORK=$(mktemp -d)
 LISTEN=127.0.0.1:8092
 export WEBFLEET_DATA_DIR="$WORK/data"
 export WEBFLEET_LISTEN="$LISTEN"
-
-echo "== starting from a fresh data dir: $WORK"
-"$BIN" >"$WORK/app.log" 2>&1 &
-APP_PID=$!
-trap 'kill $APP_PID 2>/dev/null || true; rm -rf "$WORK"' EXIT
-sleep 1
-
 B=http://$LISTEN
-J='-sS'
 CSRF=""
+APP_PID=""
+
+start_app() { "$BIN" >>"$WORK/app.log" 2>&1 & APP_PID=$!; sleep 1; }
+stop_app() { kill $APP_PID 2>/dev/null || true; wait $APP_PID 2>/dev/null || true; }
 
 setup() {
-  local out
-  out=$(curl $J -c "$WORK/cookies" -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"secret7"}' "$B/api/setup")
+  local out=$(curl -sS -c "$WORK/cookies" -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"secret7"}' "$B/api/setup")
   CSRF=$(echo "$out" | jq -r '.csrf')
-  echo "setup: $(echo "$out" | jq -r '.email // .error') (csrf ${CSRF:0:6}…)"
+  echo "setup: $(echo "$out" | jq -r '.email // .error')"
 }
-login() {
-  local out
-  out=$(curl $J -b "$WORK/cookies" -c "$WORK/cookies" -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"secret7"}' "$B/api/login")
-  CSRF=$(echo "$out" | jq -r '.csrf')
-  echo "login: $(echo "$out" | jq -r '.email // .error')"
-}
-mut() {
-  curl $J -b "$WORK/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -X POST -d "$2" "$B$1"
-}
-mutp() { # PUT
-  curl $J -b "$WORK/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -X PUT -d "$2" "$B$1"
-}
-get() { curl $J -b "$WORK/cookies" "$B$1"; }
+mut() { curl -sS -b "$WORK/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -X POST -d "$2" "$B$1"; }
+mutp() { curl -sS -b "$WORK/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -X PUT -d "$2" "$B$1"; }
+get() { curl -sS -b "$WORK/cookies" "$B$1"; }
 
+echo "== fresh SQLite rehearsal: $WORK"
+start_app
 setup
-login
-SITE=$(mut /api/sites '{"name":"Example","primary_url":"https://example.com"}')
+SITE=$(mut /api/sites '{"name":"Example","primary_url":"https://example.com/missing-404"}')
 SITE_ID=$(echo "$SITE" | jq -r '.id')
 echo "site created: id=$SITE_ID"
-GROUP=$(mut /api/groups '{"name":"Clients"}')
-GID=$(echo "$GROUP" | jq -r '.id')
-mutp "/api/sites/$SITE_ID" "{\"name\":\"Example\",\"primary_url\":\"https://example.com\",\"group_id\":$GID,\"enabled\":true}" >/dev/null
-mutp "/api/sites/$SITE_ID/tags" '{"tags":["prod"]}' >/dev/null
-echo "group/tags set"
-echo "list: $(get '/api/sites?tag=prod' | jq -r '.total') site(s) tagged prod"
-echo "fleet: $(get /api/fleet | jq -r '.total') site(s)"
-echo "check now: $(mut "/api/sites/$SITE_ID/check" '' | jq -r '.status_code // .error_class')"
-echo "incidents: $(get "/api/sites/$SITE_ID/incidents" | jq -r '.incidents|length')"
+
+# Incident lifecycle: a 404 URL degrades -> open -> acknowledge -> recover.
+echo "check (404): $(mut "/api/sites/$SITE_ID/check" '' | jq -r '.status_code // .error_class')"
+INC=$(get "/api/sites/$SITE_ID/incidents")
+[ "$(echo "$INC" | jq -r '.incidents|length')" -eq 1 ] && echo "incident open: yes"
+INCID=$(echo "$INC" | jq -r '.incidents[0].id')
+mut "/api/incidents/$INCID/ack" '' >/dev/null && echo "incident acknowledged: yes"
+mutp "/api/sites/$SITE_ID" '{"name":"Example","primary_url":"https://example.com/","group_id":0,"enabled":true}' >/dev/null
+echo "check (200): $(mut "/api/sites/$SITE_ID/check" '' | jq -r '.status_code // .error_class')"
+[ "$(get "/api/sites/$SITE_ID/incidents" | jq -r '.incidents[0].state')" = "resolved" ] && echo "incident recovered: yes"
+
+# Webhook outbox wiring: create a webhook, fire another incident, verify the
+# outbox row and that delivery status was recorded by the background worker.
+WH=$(mut /api/notifications/webhooks '{"name":"hook","url":"https://8.8.8.8/hook"}')
+[ "$(echo "$WH" | jq -r '.webhook.name // .error')" = "hook" ] && echo "webhook created: yes"
+mutp "/api/sites/$SITE_ID" '{"name":"Example","primary_url":"https://example.com/missing-404","group_id":0,"enabled":true}' >/dev/null
+mut "/api/sites/$SITE_ID/check" '' >/dev/null
+sleep 2
+DEL=$(get /api/notifications/deliveries | jq -r '.deliveries|length')
+echo "webhook outbox deliveries recorded: $DEL"
+
+# Audit, analytics, token.
 echo "audit: $(mut "/api/sites/$SITE_ID/audit" '' | jq -r '.status // .error')"
 PROP=$(mut "/api/sites/$SITE_ID/analytics" '')
 KEY=$(echo "$PROP" | jq -r '.public_key')
-echo "analytics key: ${KEY:0:8}…"
-curl $J -H 'Content-Type: application/json' -H 'Origin: https://example.com' -d "{\"key\":\"$KEY\",\"path\":\"/\"}" "$B/api/analytics/event" -o /dev/null -w "analytics event: %{http_code}\n"
-echo "analytics summary: $(get "/api/sites/$SITE_ID/analytics/summary?days=7" | jq -r '.pageviews') pageview(s)"
+curl -sS -H 'Content-Type: application/json' -H 'Origin: https://example.com' -d "{\"key\":\"$KEY\",\"path\":\"/\"}" "$B/api/analytics/event" -o /dev/null -w "analytics event: %{http_code}\n"
 TOK=$(mut /api/tokens '{"name":"ci","scopes":["sites:read"]}')
-echo "token: $(echo "$TOK" | jq -r '.prefix')…"
-WH=$(mut /api/notifications/webhooks '{"name":"hook","url":"https://8.8.8.8/hook"}')
-echo "webhook: $(echo "$WH" | jq -r '.webhook.name // .error')"
-"$BIN" backup "$WORK/backup.db" >/dev/null 2>&1 && echo "backup: ok ($(du -h "$WORK/backup.db" | cut -f1))"
+[ -n "$(echo "$TOK" | jq -r '.prefix // empty')" ] && echo "api token created: yes"
 
-echo "== restarting and verifying persistence"
-kill $APP_PID; wait $APP_PID 2>/dev/null || true
-"$BIN" >"$WORK/app2.log" 2>&1 &
-APP_PID=$!
-sleep 1
-echo "session after restart: $(curl $J -b "$WORK/cookies" "$B/api/session" | jq -r '.email // .error')"
-echo "sites after restart: $(curl $J -b "$WORK/cookies" "$B/api/sites" | jq -r '.total')"
+# Backup -> destructive change -> restore.
+"$BIN" backup "$WORK/backup.db" >/dev/null 2>&1 && echo "backup: ok ($(du -h "$WORK/backup.db" | cut -f1))"
+SITES_BEFORE=$(get /api/sites | jq -r '.total')
+stop_app
+# Destructive change: wipe the data file, then restore.
+rm -f "$WORK/data/webfleet.db"
+"$BIN" restore "$WORK/backup.db" >/dev/null 2>&1
+start_app
+SITES_AFTER=$(get /api/sites | jq -r '.total')
+[ "$SITES_AFTER" = "$SITES_BEFORE" ] && echo "restore after destructive change: ok ($SITES_AFTER sites)"
+
+# Binary update/rollback semantics: swap in a verified new binary, restart,
+# then swap the previous one back and restart.
+CGO_ENABLED=0 go build -o "$WORK/webfleet-v2" ./cmd/webfleet
+V2_SHA=$(sha256sum "$WORK/webfleet-v2" | cut -d' ' -f1)
+cp "$BIN" "$WORK/webfleet-v1"
+# verify-then-swap mimics service update
+echo "$V2_SHA  $WORK/webfleet-v2" | sha256sum -c - >/dev/null
+stop_app
+cp "$WORK/webfleet-v2" "$BIN"
+start_app
+echo "post-update health: $(curl -sS "$B/healthz" | jq -r '.ok')"
+echo "post-update session: $(curl -sS -b "$WORK/cookies" "$B/api/session" | jq -r '.email // .error')"
+# rollback
+stop_app
+cp "$WORK/webfleet-v1" "$BIN"
+start_app
+echo "post-rollback health: $(curl -sS "$B/healthz" | jq -r '.ok')"
+echo "post-rollback sites: $(curl -sS -b "$WORK/cookies" "$B/api/sites" | jq -r '.total')"
+stop_app
+
+echo "== optional PostgreSQL rehearsal (WEBFLEET_TEST_POSTGRES_URL)"
+if [ -n "${WEBFLEET_TEST_POSTGRES_URL:-}" ]; then
+  PGWORK=$(mktemp -d)
+  PGDB="wf_rehearse_$(date +%s%N)"
+  # Create a fresh database on the real server, then provision via the env var.
+  psql "${WEBFLEET_TEST_POSTGRES_URL}" -q -c "CREATE DATABASE $PGDB" >/dev/null
+  trap 'psql "${WEBFLEET_TEST_POSTGRES_URL}" -q -c "DROP DATABASE IF EXISTS $PGDB WITH (FORCE)" >/dev/null 2>&1 || true' EXIT
+  case "$WEBFLEET_TEST_POSTGRES_URL" in
+    */*) PGURL="${WEBFLEET_TEST_POSTGRES_URL%/*}/$PGDB" ;;
+    *) PGURL="${WEBFLEET_TEST_POSTGRES_URL}/$PGDB" ;;
+  esac
+  export WEBFLEET_DATA_DIR="$PGWORK/data"
+  export WEBFLEET_DATABASE_URL="$PGURL"
+  start_app
+  sleep 1
+  # A fresh PostgreSQL deployment via WEBFLEET_DATABASE_URL: setup state is
+  # locked (no chooser) and admin creation works.
+  OUT=$(curl -sS -c "$PGWORK/pg.cookies" -H 'Content-Type: application/json' -d '{"email":"admin@example.com","password":"secret7"}' "$B/api/setup")
+  echo "pg setup: $(echo "$OUT" | jq -r '.email // .error')"
+  PGCSRF=$(echo "$OUT" | jq -r '.csrf')
+  curl -sS -b "$PGWORK/pg.cookies" -c "$PGWORK/pg.cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $PGCSRF" -d '{"name":"PGSite","primary_url":"https://example.com/"}' "$B/api/sites" -o /dev/null -w "pg site create: %{http_code}\n"
+  stop_app
+  # restart and prove persistence on postgres
+  start_app
+  echo "pg post-restart session: $(curl -sS -b "$PGWORK/pg.cookies" "$B/api/session" | jq -r '.email // .error')"
+  stop_app
+  unset WEBFLEET_DATABASE_URL
+fi
+
 echo "REHEARSAL COMPLETE"

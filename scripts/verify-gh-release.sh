@@ -1,10 +1,10 @@
 #!/bin/sh
 # verify-gh-release.sh is a READ-ONLY post-release verifier. It inspects an
-# actual GitHub Release: requires exactly the expected six archives plus
-# checksum/provenance material, downloads them, validates checksums and the
-# provenance manifest, and (when gh attestation is available) verifies the
-# artifact attestations against the repository/ref. It never edits the release,
-# replaces assets or mutates tags.
+# actual GitHub Release, requires exactly the agreed asset set, downloads that
+# set, runs the local checksum/provenance verifier, and verifies the build
+# provenance attestation of ALL six archives against the repository, ref and
+# source commit. Missing or invalid attestations are a FAILURE, not a note.
+# It never edits the release, replaces assets or mutates tags.
 #
 # Usage:
 #   scripts/verify-gh-release.sh <owner/repo> <tag-or-release-name> [version]
@@ -18,24 +18,18 @@ trap 'rm -rf "$WORK"' EXIT
 
 command -v gh >/dev/null 2>&1 || { echo "gh CLI required for post-release verification" >&2; exit 1; }
 
-# List the release assets read-only.
-gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' > "$WORK/assets.txt"
+# The exact permanent release asset set.
+EXPECTED="SHA256SUMS provenance.json webfleet_${VERSION}_linux_amd64.tar.gz webfleet_${VERSION}_linux_arm64.tar.gz webfleet_${VERSION}_darwin_amd64.tar.gz webfleet_${VERSION}_darwin_arm64.tar.gz webfleet_${VERSION}_windows_amd64.zip webfleet_${VERSION}_windows_arm64.zip"
 
-EXPECTED="linux_amd64.tar.gz linux_arm64.tar.gz darwin_amd64.tar.gz darwin_arm64.tar.gz windows_amd64.zip windows_arm64.zip SHA256SUMS provenance.json"
-for suffix in $EXPECTED; do
-  base="webfleet_${VERSION}_${suffix}"
-  if ! grep -qxF "$base" "$WORK/assets.txt"; then
-    echo "release asset missing: $base" >&2; exit 1
-  fi
-done
-# Reject any release asset outside the exact expected set.
-allowed=""
-for suffix in $EXPECTED; do
-  allowed="$allowed webfleet_${VERSION}_${suffix}"
+# 1. Require exactly the agreed asset set (missing and extra are failures).
+gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' > "$WORK/assets.txt"
+for a in $EXPECTED; do
+  grep -qxF "$a" "$WORK/assets.txt" || { echo "missing release asset: $a" >&2; exit 1; }
 done
 while read -r name; do
+  [ -z "$name" ] && continue
   ok=0
-  for a in $allowed; do
+  for a in $EXPECTED; do
     [ "$name" = "$a" ] && ok=1
   done
   if [ "$ok" -eq 0 ]; then
@@ -43,17 +37,22 @@ while read -r name; do
   fi
 done < "$WORK/assets.txt"
 
-# Download and verify checksums + provenance using the local exact-set verifier.
-for name in SHA256SUMS provenance.json webfleet_${VERSION}_linux_amd64.tar.gz webfleet_${VERSION}_linux_arm64.tar.gz webfleet_${VERSION}_darwin_amd64.tar.gz webfleet_${VERSION}_darwin_arm64.tar.gz webfleet_${VERSION}_windows_amd64.zip webfleet_${VERSION}_windows_arm64.zip; do
-  gh release download "$TAG" --repo "$REPO" --pattern "$name" --dir "$WORK" >/dev/null
+# 2. Download exactly that set.
+for a in $EXPECTED; do
+  gh release download "$TAG" --repo "$REPO" --pattern "$a" --dir "$WORK" >/dev/null
 done
+
+# 3. Local checksum/provenance verification over the downloaded tree.
 scripts/verify-release.sh "$WORK"
 
-# Verify attestations if GitHub attestation tooling is available.
-if gh attestation verify "webfleet_${VERSION}_linux_amd64.tar.gz" --repo "$REPO" --format json > "$WORK/att.json" 2>/dev/null; then
-  echo "attestation verified for linux_amd64 (repo: $REPO, ref: $TAG)"
-else
-  echo "note: no attestation verification available for this environment (gh attestation dry-run unavailable)" >&2
-fi
+# 4. Attestation gate: every archive must carry a valid build provenance bound
+#    to this repository, ref and source commit. Failure exits non-zero.
+COMMIT="$(python3 -c "import json,sys;print(json.load(open('$WORK/provenance.json'))['commit'])")"
+for a in webfleet_${VERSION}_linux_amd64.tar.gz webfleet_${VERSION}_linux_arm64.tar.gz webfleet_${VERSION}_darwin_amd64.tar.gz webfleet_${VERSION}_darwin_arm64.tar.gz webfleet_${VERSION}_windows_amd64.zip webfleet_${VERSION}_windows_arm64.zip; do
+  if ! gh attestation verify "$WORK/$a" --repo "$REPO" --ref "$TAG" --sha "$COMMIT" >/dev/null 2>&1; then
+    echo "attestation verification FAILED for $a" >&2
+    exit 1
+  fi
+done
 
-echo "github release verified: $REPO $TAG (version $VERSION)"
+echo "github release verified: $REPO $TAG (version $VERSION, commit $COMMIT)"

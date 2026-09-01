@@ -34,7 +34,14 @@ func StateFor(st *store.Store, dataDir string) (State, error) {
 	if st.Dialect() == "postgres" {
 		running = "postgres"
 	}
-	state := State{Provider: chosen}
+	// The reported provider reflects what the deployment actually runs on: an
+	// environment-provisioned PostgreSQL deployment (no choice file) is
+	// reported as postgres, not the sqlite default.
+	provider := chosen
+	if running == "postgres" {
+		provider = "postgres"
+	}
+	state := State{Provider: provider}
 	if n == 0 {
 		switch chosen {
 		case "postgres":
