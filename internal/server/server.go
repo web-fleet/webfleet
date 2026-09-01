@@ -635,7 +635,6 @@ func (s *Server) handleOIDCConfigSave(w http.ResponseWriter, r *http.Request, p 
 }
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request, _ principal) {
 	w.Header().Set("Cache-Control", "no-store")
-	s.log.Info("dbg:status", "needs", "?", "cookies", len(r.Cookies()))
 	need, err := s.auth.NeedsSetup()
 	if err != nil {
 		writeError(w, 500, "setup status unavailable")
