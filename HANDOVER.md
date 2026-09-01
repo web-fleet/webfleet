@@ -234,9 +234,9 @@ As of this handover revision:
 
 - GitHub organization: `web-fleet`.
 - Main application repository: `web-fleet/webfleet`.
-- CP1-CP20 are complete in development. CP19 now includes the Trestle-style first-run SQLite/PostgreSQL selection UX; live PostgreSQL parity testing remains a CP30 battle-hardening gate.
+- CP1-CP25 are complete in development. CP19 includes the Trestle-style first-run SQLite/PostgreSQL selection UX; live PostgreSQL parity testing remains a CP30 battle-hardening gate. CP21-CP23 add organizations/RBAC, scoped API tokens and OIDC; CP24 adds optional process roles; CP25 records the no-extra-distributed-infrastructure-yet decision.
 - The companion `web-fleet.github.io` source/generated workspace documents the current development state.
-- The next implementation checkpoint is CP21 in `ROADMAP.md`.
+- The next implementation checkpoint is CP26 in `ROADMAP.md`.
 
 ## Immediate next step
 
