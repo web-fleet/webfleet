@@ -83,6 +83,12 @@ $('#logout').addEventListener('click',async()=>{try{await api('/api/logout',{met
 $('#new-group').onclick=()=>$('#group-dialog').showModal();
 $('#group-form').addEventListener('submit',async(e)=>{e.preventDefault();$('#group-error').textContent='';try{const g=await api('/api/groups',{method:'POST',body:JSON.stringify({name:$('#group-name').value})});$('#group-dialog').close();$('#group-form').reset();await loadGroups();$('#site-group').value=String(g.id);flash('Group created')}catch(err){$('#group-error').textContent=err.message}});
 $('#site-form').addEventListener('submit',async(e)=>{e.preventDefault();$('#site-error').textContent='';const body={name:$('#site-name').value,primary_url:$('#site-url').value,group_id:Number($('#site-group').value)};try{let s;if(state.editingSite){body.enabled=state.editingSite.enabled;s=await api(`/api/sites/${state.editingSite.id}`,{method:'PUT',body:JSON.stringify(body)})}else{s=await api('/api/sites',{method:'POST',body:JSON.stringify(body)})}$('#site-dialog').close();flash(state.editingSite?'Website updated':'Website added');state.editingSite=null;location.hash=`#/sites/${s.id}`;route()}catch(err){$('#site-error').textContent=err.message}});
-window.addEventListener('hashchange',route);boot().catch(e=>{$('#auth-title').textContent='Web Fleet could not start';$('#auth-copy').textContent=e.message});
+window.addEventListener('hashchange',route);
+function focusView(){
+  const w=$('#workspace');
+  if(w&&!w.contains(document.activeElement)){w.focus({preventScroll:true})}
+}
+const _origRoute=route;route=async function(){await _origRoute();focusView()};
+boot().catch(e=>{$('#auth-title').textContent='Web Fleet could not start';$('#auth-copy').textContent=e.message});
 
 const mobileNav=$('#mobile-nav');if(mobileNav){mobileNav.onclick=()=>{const open=$('#primary-rail').classList.toggle('mobile-open');mobileNav.setAttribute('aria-expanded',String(open))};window.addEventListener('resize',()=>{if(window.innerWidth>=800){$('#primary-rail').classList.remove('mobile-open');mobileNav.setAttribute('aria-expanded','false')}});document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('#primary-rail').classList.remove('mobile-open');mobileNav.setAttribute('aria-expanded','false')}})}
