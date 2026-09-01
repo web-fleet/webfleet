@@ -61,8 +61,20 @@ func (p *GuardedProxy) Addr() string { return p.addr }
 func (p *GuardedProxy) Close() error {
 	p.mu.Lock()
 	p.closed = true
+	conns := make([]net.Conn, 0, len(p.conns))
+	for c := range p.conns {
+		conns = append(conns, c)
+	}
+	p.conns = map[net.Conn]struct{}{}
 	p.mu.Unlock()
 	_ = p.ln.Close()
+	// Close every tracked client connection so an active tunnel cannot survive
+	// the proxy's teardown. handle() removes connections under the same lock,
+	// so this snapshot is race-safe: once closed is set, serve() accepts no new
+	// connections and any accepted-but-not-yet-tracked connection is rejected.
+	for _, c := range conns {
+		_ = c.Close()
+	}
 	p.client.CloseIdleConnections()
 	return nil
 }

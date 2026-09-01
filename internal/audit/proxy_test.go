@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/web-fleet/webfleet/internal/netguard"
 )
@@ -238,4 +239,40 @@ func TestProxyRejectsIPv4MappedAndAlternatePrivateForms(t *testing.T) {
 			t.Errorf("mapped CONNECT %s = %d, want 403", h, resp.StatusCode)
 		}
 	}
+}
+
+// TestProxyCloseTerminatesActiveTunnel proves an established tunnel does not
+// survive GuardedProxy.Close: the proxy tracks accepted connections and closes
+// them as part of deterministic teardown.
+func TestProxyCloseTerminatesActiveTunnel(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		for {
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			_ = c // hold the tunnel open
+		}
+	}()
+	port := strings.Split(upstream.Addr().String(), ":")[1]
+	p := proxyWith(true, mapResolver{"tunnel.test": {netip.MustParseAddr("127.0.0.1")}})
+	resp, c := connectReq(t, p, "tunnel.test:"+port)
+	if resp.StatusCode != http.StatusOK {
+		c.Close()
+		t.Fatalf("tunnel setup = %d, want 200", resp.StatusCode)
+	}
+	// The tunnel is established; Close must tear it down.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("active tunnel survived proxy Close")
+	}
+	c.Close()
 }

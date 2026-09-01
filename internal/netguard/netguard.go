@@ -62,12 +62,37 @@ func (g Guard) DialContext(ctx context.Context, network, address string) (net.Co
 	if e != nil {
 		return nil, &net.DNSError{Err: e.Error(), Name: host}
 	}
+	if len(ips) == 0 {
+		return nil, &net.DNSError{Err: "no addresses returned for " + host, Name: host}
+	}
+	// Validate the complete resolved set before attempting any connection. If
+	// the answer contains any blocked address the destination is unusable,
+	// regardless of answer ordering: a DNS rebinding cannot hide a private
+	// address behind a public one, and a connection is never attempted to any
+	// address from a set that is not entirely allowed. Only after the whole set
+	// passes may the allowed addresses be dialed, preserving ordinary
+	// multi-address fallback.
+	blocked := ""
+	allowed := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		ip = ip.Unmap()
+		if !g.AllowPrivate && Blocked(ip) {
+			if blocked == "" {
+				blocked = ip.String()
+			}
+			continue
+		}
+		allowed = append(allowed, ip)
+	}
+	if blocked != "" {
+		return nil, fmt.Errorf("target resolution contains blocked address %s", blocked)
+	}
+	if len(allowed) == 0 {
+		return nil, &net.DNSError{Err: "no usable target addresses for " + host, Name: host}
+	}
 	d := net.Dialer{Timeout: 5 * time.Second}
 	var last error
-	for _, ip := range ips {
-		if !g.AllowPrivate && Blocked(ip) {
-			return nil, fmt.Errorf("blocked target address %s", ip)
-		}
+	for _, ip := range allowed {
 		c, e := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if e == nil {
 			return c, nil
