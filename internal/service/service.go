@@ -18,6 +18,12 @@ import (
 const UnitPath = "/etc/systemd/system/webfleet.service"
 const BinaryPath = "/usr/local/bin/webfleet"
 
+// DefaultDataDir is the canonical data directory the installed service owns
+// and runs from. It must be independent of the CLI default (./data) because
+// `service install` is run as root with no runtime config and the unit it
+// writes embeds the path.
+const DefaultDataDir = "/var/lib/webfleet"
+
 // ServiceAccount is the dedicated unprivileged account the unit runs as. It is
 // created idempotently by Install so a clean machine needs no hidden manual
 // prerequisites.
@@ -26,7 +32,7 @@ const ServiceGroup = "webfleet"
 
 func Unit(dataDir, listen string) string {
 	if dataDir == "" {
-		dataDir = "/var/lib/webfleet"
+		dataDir = DefaultDataDir
 	}
 	if listen == "" {
 		listen = "127.0.0.1:8090"

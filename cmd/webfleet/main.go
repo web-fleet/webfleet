@@ -63,7 +63,10 @@ func main() {
 		}
 		switch os.Args[2] {
 		case "install":
-			if err := service.Install(service.Executable(), cfg.DataDir, cfg.Listen); err != nil {
+			// The installed unit runs under the webfleet service account with
+			// the canonical system data directory, independent of the CLI
+			// runtime default (./data).
+			if err := service.Install(service.Executable(), service.DefaultDataDir, cfg.Listen); err != nil {
 				log.Error("service install failed", "error", err)
 				os.Exit(1)
 			}

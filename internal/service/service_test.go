@@ -19,6 +19,20 @@ func TestUnitHardening(t *testing.T) {
 	}
 }
 
+// TestInstallUsesCanonicalDataDir guards the systemd-lifecycle contract: the
+// installed unit and its data directory must be the canonical system path
+// (/var/lib/webfleet), independent of the CLI runtime default (./data), which
+// is what native CI installs without a config. Editing Install's callers back
+// to cfg.DataDir silently breaks the install/ownership check.
+func TestInstallUsesCanonicalDataDir(t *testing.T) {
+	if DefaultDataDir != "/var/lib/webfleet" {
+		t.Fatalf("DefaultDataDir = %q", DefaultDataDir)
+	}
+	if !strings.Contains(Unit("", "127.0.0.1:8090"), "/var/lib/webfleet") {
+		t.Fatal("unit without an explicit data dir must default to the canonical path")
+	}
+}
+
 // TestInstallRequiresRootAndLinux guards the lifecycle boundary: without root a
 // clean machine cannot be installed, and the function must fail before doing
 // anything rather than half-installing.

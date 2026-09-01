@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -20,6 +21,19 @@ import (
 )
 
 func mustAddr(s string) netip.Addr { return netip.MustParseAddr(s) }
+
+// testSandbox returns "strict" by default; environments that cannot sandbox
+// Chromium (for example GitHub Actions runners with user namespaces disabled)
+// opt into the documented "allow-no-sandbox" mode via the CI-only
+// WEBFLEET_AUDIT_TEST_ALLOW_NO_SANDBOX variable. The production default is
+// never changed; TestBrowserArgsSandboxPosture still proves strict never
+// passes --no-sandbox.
+func testSandbox() string {
+	if os.Getenv("WEBFLEET_AUDIT_TEST_ALLOW_NO_SANDBOX") != "" {
+		return "allow-no-sandbox"
+	}
+	return "strict"
+}
 
 func newTestGuard(allowPrivate bool, r netguard.Resolver) netguard.Guard {
 	g := netguard.New()
@@ -111,7 +125,7 @@ func TestBrowserTrafficFlowsThroughGuardedProxy(t *testing.T) {
 
 	runner := BrowserRunner{
 		Binary:  bin,
-		Sandbox: "strict",
+		Sandbox: testSandbox(),
 		// audit.test resolves only through this injected resolver, so a proxy
 		// bypass would leave Chromium unable to reach the fixture at all.
 		guard: newTestGuard(true, mapResolver{"audit.test": {mustAddr("127.0.0.1")}}),
@@ -143,7 +157,7 @@ func TestBrowserCannotReachLoopbackDirectly(t *testing.T) {
 	var hits atomic.Int32
 	srv := newFixtureServer(&hits)
 	defer srv.Close()
-	runner := BrowserRunner{Binary: bin, Sandbox: "strict", guard: newTestGuard(false, nil)}
+	runner := BrowserRunner{Binary: bin, Sandbox: testSandbox(), guard: newTestGuard(false, nil)}
 	_, err := runner.Run(context.Background(), "http://127.0.0.1/")
 	if err == nil {
 		t.Fatal("loopback target accepted by guarded browser runner")
@@ -177,7 +191,7 @@ func TestBrowserTimeoutKillsProcess(t *testing.T) {
 	port := strings.Split(ln.Addr().String(), ":")[1]
 	runner := BrowserRunner{
 		Binary:  bin,
-		Sandbox: "strict",
+		Sandbox: testSandbox(),
 		Timeout: 3 * time.Second,
 		guard:   newTestGuard(true, mapResolver{"hang.test": {mustAddr("127.0.0.1")}}),
 	}
