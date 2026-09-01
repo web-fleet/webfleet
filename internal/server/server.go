@@ -51,19 +51,89 @@ type principal struct {
 // registered with the same signature and ignore the empty principal.
 type handler func(http.ResponseWriter, *http.Request, principal)
 
-// routeMeta describes one registered route. The same table drives both route
-// registration and the route/permission inventory contract test, so the
-// authorization contract and the shipped server cannot drift apart.
-type routeMeta struct {
-	Method string
-	Path   string
-	Action string
-	CSRF   bool
+// routeDef is one immutable route definition. The same definitions drive both
+// actual registration (Server.routes) and the route-inventory contract test,
+// so there is no mutable contract populated as a side effect of constructing a
+// server, and the authorization contract cannot drift from what is shipped.
+type routeDef struct {
+	method string
+	path   string
+	action string
+	csrf   bool
+	build  func(*Server) handler
 }
 
-// routeContract is the live, testable route/permission inventory. It is
-// populated by routes() and mirrored in docs/hardening/route-inventory.json.
-var routeContract []routeMeta
+var apiRouteDefs = []routeDef{
+	{"GET", "/healthz", "", false, func(s *Server) handler {
+		return func(w http.ResponseWriter, r *http.Request, _ principal) {
+			writeJSON(w, 200, map[string]any{"ok": true})
+		}
+	}},
+	{"GET", "/wf.js", "", false, func(s *Server) handler { return s.handleTracker }},
+	{"POST", "/api/analytics/event", "", false, func(s *Server) handler { return s.handleAnalyticsEvent }},
+	{"GET", "/api/setup/status", "", false, func(s *Server) handler { return s.handleSetupStatus }},
+	{"GET", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetupStatus }},
+	{"POST", "/api/setup/database", "", false, func(s *Server) handler { return s.handleDatabaseSetup }},
+	{"POST", "/api/setup", "", false, func(s *Server) handler { return s.handleSetup }},
+	{"POST", "/api/login", "", false, func(s *Server) handler { return s.handleLogin }},
+	{"GET", "/api/oidc/login", "", false, func(s *Server) handler { return s.handleOIDCLogin }},
+	{"GET", "/api/oidc/callback", "", false, func(s *Server) handler { return s.handleOIDCCallback }},
+	{"GET", "/api/oidc/config", "organization.read", false, func(s *Server) handler { return s.handleOIDCConfig }},
+	{"PUT", "/api/oidc/config", "organization.update", true, func(s *Server) handler { return s.handleOIDCConfigSave }},
+	{"POST", "/api/logout", "session", true, func(s *Server) handler { return s.handleLogout }},
+	{"GET", "/api/session", "session", false, func(s *Server) handler { return s.handleSession }},
+	{"POST", "/api/tokens", "tokens.manage", true, func(s *Server) handler { return s.handleCreateToken }},
+	{"DELETE", "/api/tokens/{id}", "tokens.manage", true, func(s *Server) handler { return s.handleRevokeToken }},
+	{"GET", "/api/notifications/webhooks", "webhooks.read", false, func(s *Server) handler { return s.handleWebhooks }},
+	{"POST", "/api/notifications/webhooks", "webhooks.manage", true, func(s *Server) handler { return s.handleWebhookCreate }},
+	{"GET", "/api/notifications/deliveries", "webhooks.read", false, func(s *Server) handler { return s.handleNotificationDeliveries }},
+	{"GET", "/api/organization/members", "organization.read", false, func(s *Server) handler { return s.handleMembers }},
+	{"POST", "/api/organization/members", "membership.update", true, func(s *Server) handler { return s.handleMemberUpdate }},
+	{"GET", "/api/groups", "site.read", false, func(s *Server) handler { return s.handleGroups }},
+	{"POST", "/api/groups", "site.create", true, func(s *Server) handler { return s.handleCreateGroup }},
+	{"GET", "/api/sites", "site.read", false, func(s *Server) handler { return s.handleSites }},
+	{"POST", "/api/sites", "site.create", true, func(s *Server) handler { return s.handleCreateSite }},
+	{"GET", "/api/sites/{id}/tags", "site.read", false, func(s *Server) handler { return s.handleSiteTags }},
+	{"PUT", "/api/sites/{id}/tags", "site.update", true, func(s *Server) handler { return s.handleSiteTagsUpdate }},
+	{"GET", "/api/sites/{id}", "site.read", false, func(s *Server) handler { return s.handleSite }},
+	{"PUT", "/api/sites/{id}", "site.update", true, func(s *Server) handler { return s.handleUpdateSite }},
+	{"POST", "/api/sites/{id}/archive", "site.archive", true, func(s *Server) handler { return s.handleArchiveSite }},
+	{"DELETE", "/api/sites/{id}", "site.delete", true, func(s *Server) handler { return s.handleDeleteSite }},
+	{"GET", "/api/sites/{id}/analytics", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsProperty }},
+	{"POST", "/api/sites/{id}/analytics", "analytics.manage", true, func(s *Server) handler { return s.handleEnableAnalytics }},
+	{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsSummary }},
+	{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsGoals }},
+	{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true, func(s *Server) handler { return s.handleCreateAnalyticsGoal }},
+	{"GET", "/api/maintenance", "maintenance.read", false, func(s *Server) handler { return s.handleMaintenance }},
+	{"PUT", "/api/maintenance", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceUpdate }},
+	{"POST", "/api/maintenance/run", "maintenance.manage", true, func(s *Server) handler { return s.handleMaintenanceRun }},
+	{"GET", "/api/fleet", "fleet.read", false, func(s *Server) handler { return s.handleFleet }},
+	{"GET", "/api/fleet/analytics", "analytics.read", false, func(s *Server) handler { return s.handleFleetAnalytics }},
+	{"GET", "/api/sites/{id}/audit", "audit.read", false, func(s *Server) handler { return s.handleAudit }},
+	{"POST", "/api/sites/{id}/audit", "audit.run", true, func(s *Server) handler { return s.handleRunAudit }},
+	{"PUT", "/api/sites/{id}/audit/history", "audit.configure", true, func(s *Server) handler { return s.handleAuditHistorySetting }},
+	{"POST", "/api/audits/resolve", "audit.read", true, func(s *Server) handler { return s.handleResolveAudits }},
+	{"POST", "/api/audits/batch", "audit.run", true, func(s *Server) handler { return s.handleBatchAudits }},
+	{"POST", "/api/sites/{id}/check", "monitor.run", true, func(s *Server) handler { return s.handleCheckSite }},
+	{"GET", "/api/sites/{id}/deployments", "deployments.read", false, func(s *Server) handler { return s.handleDeployments }},
+	{"POST", "/api/sites/{id}/deployments", "deployments.record", true, func(s *Server) handler { return s.handleDeploymentRecord }},
+	{"GET", "/api/sites/{id}/deployments/correlation", "deployments.read", false, func(s *Server) handler { return s.handleDeploymentCorrelation }},
+	{"GET", "/api/sites/{id}/checks", "monitor.read", false, func(s *Server) handler { return s.handleSiteChecks }},
+	{"GET", "/api/sites/{id}/performance", "monitor.read", false, func(s *Server) handler { return s.handleSitePerformance }},
+	{"GET", "/api/sites/{id}/incidents", "incidents.read", false, func(s *Server) handler { return s.handleSiteIncidents }},
+	{"POST", "/api/incidents/{id}/ack", "incidents.acknowledge", true, func(s *Server) handler { return s.handleAckIncident }},
+	{"GET", "/api/sites/{id}/tls", "tls.read", false, func(s *Server) handler { return s.handleSiteTLS }},
+	{"POST", "/api/sites/{id}/tls/inspect", "tls.run", true, func(s *Server) handler { return s.handleInspectTLS }},
+	{"GET", "/api/fleet/tls", "tls.read", false, func(s *Server) handler { return s.handleFleetTLS }},
+	{"GET", "/api/sites/{id}/dns", "dns.read", false, func(s *Server) handler { return s.handleSiteDNS }},
+	{"POST", "/api/sites/{id}/dns/observe", "dns.run", true, func(s *Server) handler { return s.handleObserveDNS }},
+	{"GET", "/api/sites/{id}/http-observations", "monitor.read", false, func(s *Server) handler { return s.handleHTTPObservations }},
+	{"GET", "/api/sites/{id}/crawl", "crawl.read", false, func(s *Server) handler { return s.handleSiteCrawl }},
+	{"POST", "/api/sites/{id}/crawl", "crawl.run", true, func(s *Server) handler { return s.handleCrawlSite }},
+	{"GET", "/api/fleet/link-regressions", "crawl.read", false, func(s *Server) handler { return s.handleFleetLinkRegressions }},
+	{"GET", "/api/sites/{id}/header-expectations", "monitor.read", false, func(s *Server) handler { return s.handleHeaderExpectations }},
+	{"PUT", "/api/sites/{id}/header-expectations", "monitor.update", true, func(s *Server) handler { return s.handleHeaderExpectationUpdate }},
+}
 
 type Server struct {
 	cfg           config.Config
@@ -108,93 +178,18 @@ func NewAnalyticsIngest(cfg config.Config, st *store.Store, log *slog.Logger) *S
 	return s
 }
 
-// routes registers the application HTTP surface from a single table. Every
-// authenticated route declares its required permission and CSRF posture here;
-// adding a handler without a permission here is a compile-time table change
-// that the route-inventory contract test will reject.
+// routes registers the application HTTP surface from the immutable apiRouteDefs
+// table. Every authenticated route declares its required permission and CSRF
+// posture here; adding a handler without a permission is a table change that
+// the route-inventory contract test will reject.
 func (s *Server) routes() {
-	health := func(w http.ResponseWriter, r *http.Request, _ principal) {
-		writeJSON(w, 200, map[string]any{"ok": true})
-	}
-	table := []struct {
-		routeMeta
-		handle handler
-	}{
-		{routeMeta{"GET", "/healthz", "", false}, health},
-		{routeMeta{"GET", "/wf.js", "", false}, s.handleTracker},
-		{routeMeta{"POST", "/api/analytics/event", "", false}, s.handleAnalyticsEvent},
-		{routeMeta{"GET", "/api/setup/status", "", false}, s.handleSetupStatus},
-		{routeMeta{"GET", "/api/setup/database", "", false}, s.handleDatabaseSetupStatus},
-		{routeMeta{"POST", "/api/setup/database", "", false}, s.handleDatabaseSetup},
-		{routeMeta{"POST", "/api/setup", "", false}, s.handleSetup},
-		{routeMeta{"POST", "/api/login", "", false}, s.handleLogin},
-		{routeMeta{"GET", "/api/oidc/login", "", false}, s.handleOIDCLogin},
-		{routeMeta{"GET", "/api/oidc/callback", "", false}, s.handleOIDCCallback},
-		{routeMeta{"GET", "/api/oidc/config", "organization.read", false}, s.handleOIDCConfig},
-		{routeMeta{"PUT", "/api/oidc/config", "organization.update", true}, s.handleOIDCConfigSave},
-		{routeMeta{"POST", "/api/logout", "session", true}, s.handleLogout},
-		{routeMeta{"GET", "/api/session", "session", false}, s.handleSession},
-		{routeMeta{"POST", "/api/tokens", "tokens.manage", true}, s.handleCreateToken},
-		{routeMeta{"DELETE", "/api/tokens/{id}", "tokens.manage", true}, s.handleRevokeToken},
-		{routeMeta{"GET", "/api/notifications/webhooks", "webhooks.read", false}, s.handleWebhooks},
-		{routeMeta{"POST", "/api/notifications/webhooks", "webhooks.manage", true}, s.handleWebhookCreate},
-		{routeMeta{"GET", "/api/notifications/deliveries", "webhooks.read", false}, s.handleNotificationDeliveries},
-		{routeMeta{"GET", "/api/organization/members", "organization.read", false}, s.handleMembers},
-		{routeMeta{"POST", "/api/organization/members", "membership.update", true}, s.handleMemberUpdate},
-		{routeMeta{"GET", "/api/groups", "site.read", false}, s.handleGroups},
-		{routeMeta{"POST", "/api/groups", "site.create", true}, s.handleCreateGroup},
-		{routeMeta{"GET", "/api/sites", "site.read", false}, s.handleSites},
-		{routeMeta{"POST", "/api/sites", "site.create", true}, s.handleCreateSite},
-		{routeMeta{"GET", "/api/sites/{id}/tags", "site.read", false}, s.handleSiteTags},
-		{routeMeta{"PUT", "/api/sites/{id}/tags", "site.update", true}, s.handleSiteTagsUpdate},
-		{routeMeta{"GET", "/api/sites/{id}", "site.read", false}, s.handleSite},
-		{routeMeta{"PUT", "/api/sites/{id}", "site.update", true}, s.handleUpdateSite},
-		{routeMeta{"POST", "/api/sites/{id}/archive", "site.archive", true}, s.handleArchiveSite},
-		{routeMeta{"DELETE", "/api/sites/{id}", "site.delete", true}, s.handleDeleteSite},
-		{routeMeta{"GET", "/api/sites/{id}/analytics", "analytics.read", false}, s.handleAnalyticsProperty},
-		{routeMeta{"POST", "/api/sites/{id}/analytics", "analytics.manage", true}, s.handleEnableAnalytics},
-		{routeMeta{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false}, s.handleAnalyticsSummary},
-		{routeMeta{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false}, s.handleAnalyticsGoals},
-		{routeMeta{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true}, s.handleCreateAnalyticsGoal},
-		{routeMeta{"GET", "/api/maintenance", "maintenance.read", false}, s.handleMaintenance},
-		{routeMeta{"PUT", "/api/maintenance", "maintenance.manage", true}, s.handleMaintenanceUpdate},
-		{routeMeta{"POST", "/api/maintenance/run", "maintenance.manage", true}, s.handleMaintenanceRun},
-		{routeMeta{"GET", "/api/fleet", "fleet.read", false}, s.handleFleet},
-		{routeMeta{"GET", "/api/fleet/analytics", "analytics.read", false}, s.handleFleetAnalytics},
-		{routeMeta{"GET", "/api/sites/{id}/audit", "audit.read", false}, s.handleAudit},
-		{routeMeta{"POST", "/api/sites/{id}/audit", "audit.run", true}, s.handleRunAudit},
-		{routeMeta{"PUT", "/api/sites/{id}/audit/history", "audit.configure", true}, s.handleAuditHistorySetting},
-		{routeMeta{"POST", "/api/audits/resolve", "audit.read", true}, s.handleResolveAudits},
-		{routeMeta{"POST", "/api/audits/batch", "audit.run", true}, s.handleBatchAudits},
-		{routeMeta{"POST", "/api/sites/{id}/check", "monitor.run", true}, s.handleCheckSite},
-		{routeMeta{"GET", "/api/sites/{id}/deployments", "deployments.read", false}, s.handleDeployments},
-		{routeMeta{"POST", "/api/sites/{id}/deployments", "deployments.record", true}, s.handleDeploymentRecord},
-		{routeMeta{"GET", "/api/sites/{id}/deployments/correlation", "deployments.read", false}, s.handleDeploymentCorrelation},
-		{routeMeta{"GET", "/api/sites/{id}/checks", "monitor.read", false}, s.handleSiteChecks},
-		{routeMeta{"GET", "/api/sites/{id}/performance", "monitor.read", false}, s.handleSitePerformance},
-		{routeMeta{"GET", "/api/sites/{id}/incidents", "incidents.read", false}, s.handleSiteIncidents},
-		{routeMeta{"POST", "/api/incidents/{id}/ack", "incidents.acknowledge", true}, s.handleAckIncident},
-		{routeMeta{"GET", "/api/sites/{id}/tls", "tls.read", false}, s.handleSiteTLS},
-		{routeMeta{"POST", "/api/sites/{id}/tls/inspect", "tls.run", true}, s.handleInspectTLS},
-		{routeMeta{"GET", "/api/fleet/tls", "tls.read", false}, s.handleFleetTLS},
-		{routeMeta{"GET", "/api/sites/{id}/dns", "dns.read", false}, s.handleSiteDNS},
-		{routeMeta{"POST", "/api/sites/{id}/dns/observe", "dns.run", true}, s.handleObserveDNS},
-		{routeMeta{"GET", "/api/sites/{id}/http-observations", "monitor.read", false}, s.handleHTTPObservations},
-		{routeMeta{"GET", "/api/sites/{id}/crawl", "crawl.read", false}, s.handleSiteCrawl},
-		{routeMeta{"POST", "/api/sites/{id}/crawl", "crawl.run", true}, s.handleCrawlSite},
-		{routeMeta{"GET", "/api/fleet/link-regressions", "crawl.read", false}, s.handleFleetLinkRegressions},
-		{routeMeta{"GET", "/api/sites/{id}/header-expectations", "monitor.read", false}, s.handleHeaderExpectations},
-		{routeMeta{"PUT", "/api/sites/{id}/header-expectations", "monitor.update", true}, s.handleHeaderExpectationUpdate},
-	}
-	routeContract = routeContract[:0]
-	for _, x := range table {
-		routeContract = append(routeContract, x.routeMeta)
-		pattern := x.Method + " " + x.Path
-		if x.Action == "" {
-			h := x.handle
+	for _, def := range apiRouteDefs {
+		pattern := def.method + " " + def.path
+		h := def.build(s)
+		if def.action == "" {
 			s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) { h(w, r, principal{}) })
 		} else {
-			s.mux.HandleFunc(pattern, s.authorize(x.Action, x.CSRF, x.handle))
+			s.mux.HandleFunc(pattern, s.authorize(def.action, def.csrf, h))
 		}
 	}
 	sub, _ := fs.Sub(embedded, "web")

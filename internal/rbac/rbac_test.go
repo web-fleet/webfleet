@@ -24,7 +24,7 @@ func TestRoleActionMatrix(t *testing.T) {
 		{"operator", "site.create", true},
 		{"operator", "site.update", true},
 		{"operator", "site.archive", true},
-		{"operator", "site.delete", true},
+		{"operator", "site.delete", false},
 		{"operator", "monitor.run", true},
 		{"operator", "monitor.update", true},
 		{"operator", "audit.run", true},
@@ -52,6 +52,7 @@ func TestRoleActionMatrix(t *testing.T) {
 		{"admin", "organization.delete", false},
 
 		{"owner", "organization.delete", true},
+		{"owner", "site.delete", true},
 		{"owner", "anything", true},
 		{"owner", "", true},
 

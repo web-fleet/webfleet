@@ -53,7 +53,9 @@ func (s *Service) Role(userID, orgID int64) (string, error) {
 //   - admin:   every action except organization.delete.
 //   - operator: read actions, site/monitor operations, and the operational
 //     run actions (audit, crawl, TLS, DNS, analytics management, deployment
-//     recording, incident acknowledgement).
+//     recording, incident acknowledgement). Operators may archive sites
+//     (reversible) but may not permanently delete them; site.delete is
+//     intentionally admin/owner only.
 //   - viewer:  read actions only.
 func Can(role, action string) bool {
 	switch role {
@@ -65,7 +67,10 @@ func Can(role, action string) bool {
 		if strings.HasSuffix(action, ".read") {
 			return true
 		}
-		if strings.HasPrefix(action, "site.") || strings.HasPrefix(action, "monitor.") {
+		if strings.HasPrefix(action, "monitor.") {
+			return true
+		}
+		if strings.HasPrefix(action, "site.") && action != "site.delete" {
 			return true
 		}
 		switch action {

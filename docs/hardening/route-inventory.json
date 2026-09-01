@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "checkpoint": "CP30-campaign1",
-  "description": "Authoritative route/permission inventory for the Web Fleet HTTP API. This document is enforced by the route-inventory contract test (internal/server/route_inventory_test.go), which derives minRole from the rbac role/action matrix and verifies every registered route. A route with action null is unauthenticated. 'session' means any authenticated organization member.",
+  "description": "Authoritative route/permission inventory for the Web Fleet HTTP API. This document is enforced by the route-inventory contract test (internal/server/route_inventory_test.go), which derives minRole from the rbac role/action matrix and verifies every registered route. A route with action null is unauthenticated. 'session' means any authenticated organization member. Policy decision (CP30 Campaign 1 closure): operators may archive sites (reversible, site.archive) but may not permanently delete them (site.delete is admin/owner only); the sole owner-only action, organization.delete, is deliberately not exposed over HTTP.",
   "actions": [
     "organization.read", "organization.update", "organization.delete",
     "membership.update",
@@ -51,7 +51,7 @@
     { "method": "GET", "path": "/api/sites/{id}", "action": "site.read", "csrf": false, "siteScoped": true, "minRole": "viewer" },
     { "method": "PUT", "path": "/api/sites/{id}", "action": "site.update", "csrf": true, "siteScoped": true, "minRole": "operator" },
     { "method": "POST", "path": "/api/sites/{id}/archive", "action": "site.archive", "csrf": true, "siteScoped": true, "minRole": "operator" },
-    { "method": "DELETE", "path": "/api/sites/{id}", "action": "site.delete", "csrf": true, "siteScoped": true, "minRole": "operator" },
+    { "method": "DELETE", "path": "/api/sites/{id}", "action": "site.delete", "csrf": true, "siteScoped": true, "minRole": "admin" },
     { "method": "GET", "path": "/api/sites/{id}/analytics", "action": "analytics.read", "csrf": false, "siteScoped": true, "minRole": "viewer" },
     { "method": "POST", "path": "/api/sites/{id}/analytics", "action": "analytics.manage", "csrf": true, "siteScoped": true, "minRole": "operator" },
     { "method": "GET", "path": "/api/sites/{id}/analytics/summary", "action": "analytics.read", "csrf": false, "siteScoped": true, "minRole": "viewer" },

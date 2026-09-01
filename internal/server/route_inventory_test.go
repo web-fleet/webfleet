@@ -18,13 +18,13 @@ var knownActions = map[string]bool{
 	"tokens.manage":     true,
 	"webhooks.read":     true, "webhooks.manage": true,
 	"maintenance.read": true, "maintenance.manage": true,
-	"fleet.read":        true,
-	"site.read":         true, "site.create": true, "site.update": true, "site.archive": true, "site.delete": true,
+	"fleet.read": true,
+	"site.read":  true, "site.create": true, "site.update": true, "site.archive": true, "site.delete": true,
 	"monitor.read": true, "monitor.run": true, "monitor.update": true,
 	"audit.read": true, "audit.run": true, "audit.configure": true,
 	"crawl.read": true, "crawl.run": true,
-	"tls.read":   true, "tls.run": true,
-	"dns.read":   true, "dns.run": true,
+	"tls.read": true, "tls.run": true,
+	"dns.read": true, "dns.run": true,
 	"analytics.read": true, "analytics.manage": true,
 	"incidents.read": true, "incidents.acknowledge": true,
 	"deployments.read": true, "deployments.record": true,
@@ -59,28 +59,28 @@ type docInventory struct {
 }
 
 func TestRouteContractIsCompleteAndConsistent(t *testing.T) {
-	if len(routeContract) == 0 {
-		t.Fatal("route contract is empty; routes() must populate it")
+	if len(apiRouteDefs) == 0 {
+		t.Fatal("route definitions are empty; apiRouteDefs must be populated")
 	}
 	seen := map[string]bool{}
-	for _, rt := range routeContract {
-		key := rt.Method + " " + rt.Path
+	for _, rt := range apiRouteDefs {
+		key := rt.method + " " + rt.path
 		if seen[key] {
 			t.Fatalf("duplicate route %s", key)
 		}
 		seen[key] = true
-		if rt.Action == "" {
+		if rt.action == "" {
 			continue
 		}
-		if !knownActions[rt.Action] {
-			t.Fatalf("route %s uses unknown action %q; extend knownActions deliberately", key, rt.Action)
+		if !knownActions[rt.action] {
+			t.Fatalf("route %s uses unknown action %q; extend knownActions deliberately", key, rt.action)
 		}
 		// CSRF posture: every state-changing authenticated route must be
 		// CSRF-protected; GET routes are read-only and exempt.
-		if rt.Method != "GET" && !rt.CSRF {
+		if rt.method != "GET" && !rt.csrf {
 			t.Fatalf("authenticated non-GET route %s must require CSRF", key)
 		}
-		if rt.Method == "GET" && rt.CSRF {
+		if rt.method == "GET" && rt.csrf {
 			t.Fatalf("GET route %s must not require CSRF", key)
 		}
 	}
@@ -111,32 +111,32 @@ func TestRouteInventoryMatchesDocumentedInventory(t *testing.T) {
 		}
 		docByKey[key] = d
 	}
-	if len(docByKey) != len(routeContract) {
-		t.Fatalf("inventory has %d routes, route table has %d", len(docByKey), len(routeContract))
+	if len(docByKey) != len(apiRouteDefs) {
+		t.Fatalf("inventory has %d routes, route table has %d", len(docByKey), len(apiRouteDefs))
 	}
-	for _, rt := range routeContract {
-		key := rt.Method + " " + rt.Path
+	for _, rt := range apiRouteDefs {
+		key := rt.method + " " + rt.path
 		d, ok := docByKey[key]
 		if !ok {
 			t.Fatalf("route %s is registered but missing from route-inventory.json", key)
 		}
 		action := d.Action
 		if action == "" {
-			action = rt.Action
+			action = rt.action
 		}
-		if action != rt.Action {
-			t.Fatalf("route %s action mismatch: doc=%q table=%q", key, action, rt.Action)
+		if action != rt.action {
+			t.Fatalf("route %s action mismatch: doc=%q table=%q", key, action, rt.action)
 		}
-		if d.CSRF != rt.CSRF {
-			t.Fatalf("route %s csrf mismatch: doc=%v table=%v", key, d.CSRF, rt.CSRF)
+		if d.CSRF != rt.csrf {
+			t.Fatalf("route %s csrf mismatch: doc=%v table=%v", key, d.CSRF, rt.csrf)
 		}
-		wantScoped := strings.HasPrefix(rt.Path, "/api/sites/{id}")
+		wantScoped := strings.HasPrefix(rt.path, "/api/sites/{id}")
 		if d.SiteScoped != wantScoped {
 			t.Fatalf("route %s siteScoped mismatch: doc=%v derived=%v", key, d.SiteScoped, wantScoped)
 		}
 		wantMin := ""
-		if rt.Action != "" {
-			wantMin = minRoleFor(rt.Action)
+		if rt.action != "" {
+			wantMin = minRoleFor(rt.action)
 		}
 		if d.MinRole != wantMin {
 			t.Fatalf("route %s minRole mismatch: doc=%q derived=%q", key, d.MinRole, wantMin)
@@ -149,12 +149,33 @@ func TestRouteInventoryMatchesDocumentedInventory(t *testing.T) {
 }
 
 func TestEveryAuthenticatedActionHasAMinimumRole(t *testing.T) {
-	for _, rt := range routeContract {
-		if rt.Action == "" {
+	for _, rt := range apiRouteDefs {
+		if rt.action == "" {
 			continue
 		}
-		if minRoleFor(rt.Action) == "" {
-			t.Fatalf("action %q grants no role", rt.Action)
+		if minRoleFor(rt.action) == "" {
+			t.Fatalf("action %q grants no role", rt.action)
 		}
+	}
+}
+
+// TestNoAuthenticatedRouteRequiresOwnerOnlyAction documents that the owner-only
+// action (organization.delete) is deliberately not exposed over HTTP. Admin and
+// owner therefore share the shipped API surface; the distinction is proven at
+// the rbac matrix boundary (admin denied organization.delete, owner allowed).
+func TestNoAuthenticatedRouteRequiresOwnerOnlyAction(t *testing.T) {
+	for _, rt := range apiRouteDefs {
+		if rt.action == "" || rt.action == "session" {
+			continue
+		}
+		if minRoleFor(rt.action) == "owner" {
+			t.Fatalf("route %s exposes an owner-only action %q; owner-only actions are not routed", rt.method+" "+rt.path, rt.action)
+		}
+	}
+	if rbac.Can("admin", "organization.delete") {
+		t.Fatal("admin must be denied the owner-only organization.delete action")
+	}
+	if !rbac.Can("owner", "organization.delete") {
+		t.Fatal("owner must retain the owner-only organization.delete action")
 	}
 }

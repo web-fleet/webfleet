@@ -192,10 +192,16 @@ func TestRBACOperatorOperational(t *testing.T) {
 	if rr.Code != 201 {
 		t.Fatalf("operator create site %d %s", rr.Code, rr.Body.String())
 	}
-	var out struct{ ID int64 `json:"id"` }
+	var out struct {
+		ID int64 `json:"id"`
+	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
 	if rr := doReq(t, s, op, "POST", fmt.Sprintf("/api/sites/%d/archive", out.ID), `{"archived":true}`); rr.Code != 200 {
 		t.Fatalf("operator archive %d %s", rr.Code, rr.Body.String())
+	}
+	// Operators may archive (reversible) but must not permanently delete sites.
+	if rr := doReq(t, s, op, "DELETE", fmt.Sprintf("/api/sites/%d", out.ID), ""); rr.Code != 403 {
+		t.Fatalf("operator site.delete %d, want 403", rr.Code)
 	}
 	// Privileged configuration stays admin/owner.
 	if rr := doReq(t, s, op, "POST", "/api/tokens", `{"name":"x","scopes":["sites:read"]}`); rr.Code != 403 {
@@ -206,6 +212,49 @@ func TestRBACOperatorOperational(t *testing.T) {
 	}
 	if rr := doReq(t, s, op, "PUT", "/api/maintenance", `{"check_days":30,"analytics_raw_days":14,"audit_days":90}`); rr.Code != 403 {
 		t.Fatalf("operator maintenance.manage %d", rr.Code)
+	}
+}
+
+// TestRBACAdminOperational proves the admin role at the server boundary: admin
+// may perform the administrative operations that operators cannot, including
+// the destructive site.delete action. The owner-only distinction (the
+// unexposed organization.delete action) is proven separately in the
+// route-inventory and rbac matrix tests because no HTTP route is owner-only.
+func TestRBACAdminOperational(t *testing.T) {
+	s, st := newRBACServer(t)
+	setupAdmin(t, s)
+	createUser(t, st, "adminrole@example.com", "secret7", "admin")
+	a := loginAs(t, s, "adminrole@example.com", "secret7")
+	createUser(t, st, "op@example.com", "secret7", "operator")
+	op := loginAs(t, s, "op@example.com", "secret7")
+
+	if rr := doReq(t, s, a, "GET", "/api/organization/members", ""); rr.Code != 200 {
+		t.Fatalf("admin members read %d", rr.Code)
+	}
+	if rr := doReq(t, s, a, "POST", "/api/tokens", `{"name":"ci","scopes":["sites:read"]}`); rr.Code != 201 {
+		t.Fatalf("admin tokens.manage %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doReq(t, s, a, "PUT", "/api/maintenance", `{"check_days":30,"analytics_raw_days":14,"audit_days":90}`); rr.Code != 200 {
+		t.Fatalf("admin maintenance.manage %d", rr.Code)
+	}
+	if rr := doReq(t, s, a, "POST", "/api/notifications/webhooks", `{"name":"hook","url":"https://example.com/hook"}`); rr.Code != 201 {
+		t.Fatalf("admin webhooks.manage %d %s", rr.Code, rr.Body.String())
+	}
+	// Admin can update a membership that an operator cannot.
+	if rr := doReq(t, s, a, "POST", "/api/organization/members", `{"email":"op@example.com","role":"viewer"}`); rr.Code != 200 {
+		t.Fatalf("admin membership.update %d", rr.Code)
+	}
+	// Admin may permanently delete a site (after archiving); the same call is
+	// denied to an operator.
+	siteID := createSiteViaAPI(t, s, a, "Expired", "https://127.0.0.1:1/")
+	if rr := doReq(t, s, a, "POST", fmt.Sprintf("/api/sites/%d/archive", siteID), `{"archived":true}`); rr.Code != 200 {
+		t.Fatalf("admin archive %d", rr.Code)
+	}
+	if rr := doReq(t, s, a, "DELETE", fmt.Sprintf("/api/sites/%d", siteID), ""); rr.Code != 200 {
+		t.Fatalf("admin site.delete %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doReq(t, s, op, "POST", "/api/tokens", `{"name":"x","scopes":["sites:read"]}`); rr.Code != 403 {
+		t.Fatalf("operator must not cross into admin tokens.manage: %d", rr.Code)
 	}
 }
 
@@ -255,7 +304,9 @@ func TestCrossOrganizationIsolation(t *testing.T) {
 		t.Fatalf("cross-org list leak: %s", rr.Body.String())
 	}
 	rr = doReq(t, s, v, "GET", "/api/fleet", "")
-	var sum struct{ Total int64 `json:"total"` }
+	var sum struct {
+		Total int64 `json:"total"`
+	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &sum)
 	if sum.Total != 1 {
 		t.Fatalf("cross-org fleet leak: total=%d", sum.Total)
@@ -265,7 +316,9 @@ func TestCrossOrganizationIsolation(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("resolve %d", rr.Code)
 	}
-	var resolved struct{ Count int `json:"count"` }
+	var resolved struct {
+		Count int `json:"count"`
+	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &resolved)
 	if resolved.Count != 1 {
 		t.Fatalf("cross-org audit scope leak: count=%d", resolved.Count)
