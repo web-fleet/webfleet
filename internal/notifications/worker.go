@@ -125,9 +125,11 @@ func (w *Worker) runOnce(ctx context.Context) {
 // deliver sends one outbox row with bounded retries. Each attempt signs the
 // exact body being delivered. 3xx responses are treated as failures because
 // redirects are never followed (a webhook could otherwise redirect to a
-// private destination).
+// private destination). The envelope carries the stable delivery row id as
+// event_id, which is the deduplication identity a receiver can rely on even if
+// the worker re-processes the row after a restart (sent_at then differs).
 func (w *Worker) deliver(ctx context.Context, id int64, kind, payload, url, secret string) {
-	body := buildEnvelope(kind, payload)
+	body := buildEnvelope(kind, payload, id)
 	var lastErr error
 	code := 0
 	for attempt := 1; attempt <= deliveryRetries; attempt++ {
@@ -166,11 +168,13 @@ func (w *Worker) deliver(ctx context.Context, id int64, kind, payload, url, secr
 }
 
 // buildEnvelope constructs the delivered JSON and is the input to the HMAC
-// signature, so the signature always covers exactly the delivered bytes.
-func buildEnvelope(kind, payload string) []byte {
+// signature, so the signature always covers exactly the delivered bytes. The
+// event_id is the stable delivery row id, the receiver's deduplication
+// identity.
+func buildEnvelope(kind, payload string, eventID int64) []byte {
 	var data any
 	_ = json.Unmarshal([]byte(payload), &data)
-	env := map[string]any{"event": kind, "data": data, "sent_at": store.Now()}
+	env := map[string]any{"event": kind, "event_id": eventID, "data": data, "sent_at": store.Now()}
 	b, _ := json.Marshal(env)
 	return b
 }

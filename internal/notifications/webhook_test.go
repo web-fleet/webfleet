@@ -77,6 +77,81 @@ func TestIncidentTransitionEnqueuesWebhookOutbox(t *testing.T) {
 	}
 }
 
+// TestIncidentTransitionOrgIsolation proves webhook enqueue is tenant-scoped:
+// an incident in organization A must never queue to organization B's webhooks,
+// and disabled same-org webhooks receive nothing.
+func TestIncidentTransitionOrgIsolation(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	// Organization A: one enabled webhook, one disabled webhook.
+	wa, _, e := New(st).Create(1, "a-enabled", "https://8.8.8.8/a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := sqlite.Exec(st.DB, `INSERT INTO notification_webhooks(organization_id,name,url,secret,enabled,created_at) VALUES(1,'a-disabled','https://8.8.8.8/ad','s',0,?)`, store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	// Organization B: an enabled webhook that must never see org A events.
+	if e := sqlite.Exec(st.DB, `INSERT INTO organizations(name,created_at) VALUES('B',?)`, store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	var orgB int64
+	if e := st.DB.QueryRow(`SELECT id FROM organizations WHERE name='B'`).Scan(&orgB); e != nil {
+		t.Fatal(e)
+	}
+	if e := sqlite.Exec(st.DB, `INSERT INTO notification_webhooks(organization_id,name,url,secret,enabled,created_at) VALUES(?,'b-enabled','https://8.8.8.8/b','s',1,?)`, orgB, store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	siteA := insertSite(t, st)
+	// Org B site too (same site id numbering cannot cross).
+	r, e := sqlite.Query(st.DB, `INSERT INTO sites(organization_id,name,primary_url,created_at,updated_at) VALUES(?,'b','https://example.com',?,?) RETURNING id`, orgB, store.Now(), store.Now())
+	if e != nil {
+		t.Fatal(e)
+	}
+	siteB := r[0]["id"].Int64
+
+	svc := incidents.New(st)
+	now := store.Now()
+	if e = svc.Transition(siteA, "unknown", "down", now); e != nil {
+		t.Fatal(e)
+	}
+	rows, e := sqlite.Query(st.DB, `SELECT d.webhook_id FROM notification_deliveries d`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(rows) != 1 || rows[0]["webhook_id"].Int64 != wa.ID {
+		t.Fatalf("org A incident queued to wrong webhooks: %v", rows)
+	}
+	// Recovery for org A also stays inside org A.
+	if e = svc.Transition(siteA, "down", "healthy", store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	rows, _ = sqlite.Query(st.DB, `SELECT event_kind FROM notification_deliveries WHERE webhook_id=?`, wa.ID)
+	if len(rows) != 2 {
+		t.Fatalf("org A recover not enqueued: %v", rows)
+	}
+	// Org B site transitions queue only to org B webhook.
+	if e = svc.Transition(siteB, "unknown", "down", store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	rows, _ = sqlite.Query(st.DB, `SELECT webhook_id FROM notification_deliveries WHERE event_kind='incident.open'`)
+	ids := map[int64]bool{}
+	for _, r := range rows {
+		ids[r["webhook_id"].Int64] = true
+	}
+	if len(ids) != 2 || !ids[wa.ID] {
+		t.Fatalf("expected deliveries to org A and org B webhooks only: %v", ids)
+	}
+	// Disabled org A webhook received nothing.
+	rows, _ = sqlite.Query(st.DB, `SELECT COUNT(*) n FROM notification_deliveries d JOIN notification_webhooks w ON w.id=d.webhook_id WHERE w.enabled=0`)
+	if rows[0]["n"].Int64 != 0 {
+		t.Fatalf("disabled webhook received a delivery")
+	}
+}
+
 func TestWorkerDeliversWithValidSignature(t *testing.T) {
 	st, e := store.Open(t.TempDir())
 	if e != nil {
@@ -118,11 +193,17 @@ func TestWorkerDeliversWithValidSignature(t *testing.T) {
 	select {
 	case body := <-got:
 		var env struct {
-			Event string          `json:"event"`
-			Data  json.RawMessage `json:"data"`
+			Event   string          `json:"event"`
+			EventID int64           `json:"event_id"`
+			Data    json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal(body, &env); err != nil || env.Event != "incident.open" {
 			t.Fatalf("envelope %s", body)
+		}
+		// The stable event_id is the delivery row id, the receiver's
+		// deduplication identity across reprocessing after restart.
+		if env.EventID != 1 {
+			t.Fatalf("event_id = %d, want 1 (delivery row id)", env.EventID)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("webhook never delivered")

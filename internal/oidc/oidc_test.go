@@ -26,6 +26,7 @@ const (
 	testClientID     = "webfleet-client"
 	testClientSecret = "provider-secret"
 	testRedirect     = "https://wf.example/callback"
+	testBrowser      = "browser-a"
 )
 
 // fakeProvider is a standards-shaped OIDC provider for adversarial tests. It
@@ -237,7 +238,7 @@ func newOIDCService(t *testing.T, fp *fakeProvider, auto, enabled bool) (*Servic
 
 func beginStateNonce(t *testing.T, svc *Service) (state, nonce string) {
 	t.Helper()
-	authURL, e := svc.Begin(context.Background(), testRedirect)
+	authURL, e := svc.Begin(context.Background(), testRedirect, testBrowser)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -254,7 +255,7 @@ func TestOIDCFullFlowAutoProvisionsViewer(t *testing.T) {
 	svc, st := newOIDCService(t, fp, true, true)
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
-	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect)
+	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -273,14 +274,14 @@ func TestOIDCStateMismatchAndReplay(t *testing.T) {
 	svc, _ := newOIDCService(t, fp, true, true)
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
-	if _, _, e := svc.Callback(context.Background(), "bogus-state", "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), "bogus-state", "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("bogus state accepted")
 	}
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e != nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e != nil {
 		t.Fatal(e)
 	}
 	// The state is single-use.
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("replayed state accepted")
 	}
 }
@@ -291,7 +292,7 @@ func TestOIDCNonceMismatch(t *testing.T) {
 	svc, _ := newOIDCService(t, fp, true, true)
 	state, _ := beginStateNonce(t, svc)
 	fp.setNonce("attacker-chosen-nonce")
-	_, _, e := svc.Callback(context.Background(), state, "code", testRedirect)
+	_, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
 	if e == nil || !strings.Contains(e.Error(), "nonce") {
 		t.Fatalf("nonce mismatch not rejected: %v", e)
 	}
@@ -304,7 +305,7 @@ func TestOIDCWrongIssuerRejected(t *testing.T) {
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
 	fp.setIssuerOverride("https://evil.example")
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("wrong issuer accepted")
 	}
 }
@@ -316,7 +317,7 @@ func TestOIDCWrongAudienceRejected(t *testing.T) {
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
 	fp.setAudOverride("another-client")
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("wrong audience accepted")
 	}
 }
@@ -328,7 +329,7 @@ func TestOIDCExpiredTokenRejected(t *testing.T) {
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
 	fp.setExpired()
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("expired ID token accepted")
 	}
 }
@@ -341,7 +342,7 @@ func TestOIDCInvalidSignatureRejected(t *testing.T) {
 	fp.setNonce(nonce)
 	other, _ := rsa.GenerateKey(rand.Reader, 2048)
 	fp.setWrongKey(other)
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("token signed by a different key accepted")
 	}
 }
@@ -352,7 +353,7 @@ func TestOIDCVerifiedEmailRequired(t *testing.T) {
 	svc, _ := newOIDCService(t, fp, true, true)
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("unverified email accepted")
 	}
 }
@@ -364,7 +365,7 @@ func TestOIDCUserinfoFallbackVerifiedEmail(t *testing.T) {
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
 	fp.setOmitEmail()
-	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect)
+	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
 	if e != nil {
 		t.Fatalf("userinfo fallback failed: %v", e)
 	}
@@ -381,7 +382,7 @@ func TestOIDCUserinfoFallbackUnverifiedRejected(t *testing.T) {
 	fp.setNonce(nonce)
 	fp.setOmitEmail()
 	fp.setUserinfoVerified(false)
-	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("unverified userinfo email accepted")
 	}
 }
@@ -397,7 +398,7 @@ func TestOIDCAutoProvisionDisabledAndAccountLinking(t *testing.T) {
 	}
 	state, nonce := beginStateNonce(t, svc)
 	fp.setNonce(nonce)
-	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect)
+	tok, sess, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -408,7 +409,7 @@ func TestOIDCAutoProvisionDisabledAndAccountLinking(t *testing.T) {
 	fp.setEmailForNext("other@example.com")
 	state2, nonce2 := beginStateNonce(t, svc)
 	fp.setNonce(nonce2)
-	if _, _, e := svc.Callback(context.Background(), state2, "code", testRedirect); e == nil || !strings.Contains(e.Error(), "not provisioned") {
+	if _, _, e := svc.Callback(context.Background(), state2, "code", testRedirect, testBrowser); e == nil || !strings.Contains(e.Error(), "not provisioned") {
 		t.Fatalf("auto-provision disabled leak: %v", e)
 	}
 }
@@ -423,15 +424,33 @@ func TestOIDCDisabledProvider(t *testing.T) {
 	fp := newFake(t, "user@example.com", true)
 	defer fp.Close()
 	svc, st := newOIDCService(t, fp, true, false)
-	if _, e := svc.Begin(context.Background(), testRedirect); e == nil {
+	if _, e := svc.Begin(context.Background(), testRedirect, testBrowser); e == nil {
 		t.Fatal("disabled provider began a flow")
 	}
 	// Seed a state directly; a disabled provider must reject the callback.
-	if e := sqlite.Exec(st.DB, `INSERT INTO oidc_states(state,nonce,expires_at) VALUES('st','nc',?)`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); e != nil {
+	if e := sqlite.Exec(st.DB, `INSERT INTO oidc_states(state,nonce,browser,expires_at) VALUES('st','nc',?,?)`, testBrowser, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); e != nil {
 		t.Fatal(e)
 	}
-	if _, _, e := svc.Callback(context.Background(), "st", "code", testRedirect); e == nil {
+	if _, _, e := svc.Callback(context.Background(), "st", "code", testRedirect, testBrowser); e == nil {
 		t.Fatal("disabled provider accepted a callback")
+	}
+}
+
+func TestOIDCBrowserBindingMismatchRejected(t *testing.T) {
+	fp := newFake(t, "user@example.com", true)
+	defer fp.Close()
+	svc, _ := newOIDCService(t, fp, true, true)
+	state, nonce := beginStateNonce(t, svc)
+	fp.setNonce(nonce)
+	// Another browser cannot consume a transaction initiated by a different
+	// browser, even with the correct state/code/nonce.
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, "browser-b"); e == nil || !strings.Contains(e.Error(), "browser") {
+		t.Fatalf("cross-browser state consumption not rejected: %v", e)
+	}
+	// The state was consumed by the failed callback; replay is denied even with
+	// the correct browser.
+	if _, _, e := svc.Callback(context.Background(), state, "code", testRedirect, testBrowser); e == nil {
+		t.Fatal("state replay after browser-mismatch allowed")
 	}
 }
 

@@ -6,12 +6,14 @@
     "scopes": ["sites:read", "sites:write", "fleet:read", "analytics:read", "audit:run"],
     "authentication": "Authorization: Bearer <token> on routes that declare a token scope; routes without a token scope are session-only and a token cannot reach them.",
     "identity": "The acting organization is the token's organization, fixed at creation. A token cannot cross organization boundaries and cannot inherit the creator's role or browser session privileges: its authorization is exactly its scopes.",
+    "abuseProtection": "Failed/malformed Bearer authentication is throttled per trusted-proxy-resolved client address with a bounded-memory fixed window, so spoofed X-Forwarded-For cannot bypass it and successful high-volume API use is not throttled. Rate-limit keys are client addresses, never token prefixes or raw token values.",
     "guarantees": [
       "malformed and unknown tokens denied with a generic error (no existence oracle)",
       "revoked tokens denied with the same generic error",
       "missing scope denied with 403",
       "correct scope allowed",
       "no CSRF required for token-authenticated mutations (the bearer credential is the CSRF control)",
+      "error responses are exactly one JSON document (single response owner)",
       "token secret returned only at creation and stored only as a SHA-256 hash",
       "last_used_at refreshed on successful authentication",
       "revocation scoped to the token's owner and organization"
@@ -19,11 +21,13 @@
   },
   "webhooks": {
     "eventSet": ["incident.open", "incident.recover"],
-    "outbox": "Incident transitions commit the incident state and insert pending delivery rows for enabled webhooks in the same transaction (payload_json attached). Delivery never runs in the transition path, so a slow or malicious webhook cannot block monitoring or incident state.",
+    "organizationIsolation": "A delivery row is enqueued only for enabled webhooks belonging to the incident site's own organization, derived from the persisted site inside the same transaction. An incident in organization A can never queue a payload to organization B's webhooks, and a disabled webhook never receives an event.",
+    "outbox": "Incident transitions commit the incident state and insert pending delivery rows for enabled same-organization webhooks in the same transaction (payload_json attached). Delivery never runs in the transition path, so a slow or malicious webhook cannot block monitoring or incident state.",
     "delivery": "A background worker processes pending rows with bounded retries (3), bounded timeout (8s), bounded response bodies (64KiB) and a global concurrency limit (2). 3xx responses are treated as failures because redirects are never followed.",
     "signature": "Header X-WebFleet-Signature: sha256=<hex HMAC-SHA256(secret, exact delivered body)>. The body is built once per delivery and reused across retries so every retry signs the exact payload being delivered.",
+    "duplicateBehavior": "At-least-once: a crash between enqueue and final status leaves the row pending and it is reprocessed, which can duplicate delivery. The delivered envelope carries a stable event_id (the delivery row id) as the receiver's deduplication identity; sent_at may differ across reprocessing, so the signature alone is not a stable dedup key.",
     "ssrf": "Destinations must be HTTPS and resolve to a public address at creation (netguard). Delivery uses the guarded dialer, which re-resolves the full answer set at dial time and fails closed on any blocked address or mixed public/private answer, so localhost, private, link-local, cloud-metadata and rebinding targets are unreachable even from a tampered row.",
-    "secrets": "Webhook secrets are cryptographically random, returned only at creation, and stored plaintext at rest because the worker must recover them to produce HMAC signatures. This is a documented threat-model decision: webhook secrets are not hashed like API tokens. Delivery errors are redacted and never include secrets or response bodies.",
-    "duplicateBehavior": "At-least-once: a crash between enqueue and final status leaves the row pending and it is reprocessed, which can duplicate delivery. This is understood and recorded; the signature header lets receivers deduplicate."
+    "singleBoundary": "notifications.Service.Deliver (the old synchronous unguarded delivery path) has been removed. The background worker is the only webhook delivery boundary; a future caller of a removed symbol cannot compile, preventing silent reintroduction of direct synchronous webhook HTTP.",
+    "secrets": "Webhook secrets are cryptographically random, returned only at creation, and stored plaintext at rest because the worker must recover them to produce HMAC signatures. This is a documented threat-model decision: webhook secrets are not hashed like API tokens. Delivery errors are redacted and never include secrets or response bodies."
   }
 }

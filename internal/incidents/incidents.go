@@ -97,9 +97,11 @@ func recordDelivery(tx *database.Tx, incidentID, siteID int64, kind, at string) 
 	return sqlite.Exec(tx, `INSERT INTO alert_deliveries(incident_id,site_id,transport,kind,status,created_at) VALUES(?,?,'in_app',?,'delivered',?)`, incidentID, siteID, kind, at)
 }
 
-// enqueueWebhooks writes a pending delivery row per enabled webhook with the
-// event payload attached, so delivery is attributable and retried later without
-// coupling the incident transition to an external call.
+// enqueueWebhooks writes a pending delivery row per enabled webhook belonging
+// to the site's own organization, derived from the persisted site within the
+// same transaction (never from an untrusted caller). This keeps an incident
+// event inside its tenant boundary, so an incident for organization A can never
+// queue a payload to organization B's webhooks.
 func enqueueWebhooks(tx *database.Tx, siteID, incidentID int64, kind, state, summary, at string) error {
 	payload, _ := json.Marshal(map[string]any{
 		"site_id":     siteID,
@@ -108,7 +110,7 @@ func enqueueWebhooks(tx *database.Tx, siteID, incidentID int64, kind, state, sum
 		"summary":     summary,
 		"at":          at,
 	})
-	return sqlite.Exec(tx, `INSERT INTO notification_deliveries(webhook_id,event_kind,status,payload_json,created_at) SELECT id,?, 'pending',?,? FROM notification_webhooks WHERE enabled=1`, kind, string(payload), at)
+	return sqlite.Exec(tx, `INSERT INTO notification_deliveries(webhook_id,event_kind,status,payload_json,created_at) SELECT w.id,?, 'pending',?,? FROM notification_webhooks w JOIN sites s ON s.id=? WHERE w.enabled=1 AND w.organization_id=s.organization_id`, kind, string(payload), at, siteID)
 }
 
 func (s *Service) List(siteID int64) ([]Incident, error) {

@@ -40,6 +40,12 @@ func New(st *store.Store, a *auth.Service) *Service {
 	return &Service{st: st, auth: a, client: &http.Client{Timeout: 10 * time.Second}, prov: map[string]*oidc.Provider{}}
 }
 
+// SetHTTPClient replaces the outbound client (discovery, token, userinfo).
+// Production uses the default bounded client; this is a test seam.
+func (s *Service) SetHTTPClient(c *http.Client) {
+	s.client = c
+}
+
 // rowConfig returns the stored configuration including the client secret.
 // Callers that must sign a token request (Begin, Callback) use it; the public
 // Config redacts the secret.
@@ -112,7 +118,11 @@ func token(n int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (s *Service) Begin(ctx context.Context, redirect string) (string, error) {
+// Begin starts an authorization transaction bound to the initiating browser.
+// browser is a short-lived transient value carried in an HttpOnly cookie that
+// the callback must reproduce; a state/code pair cannot be consumed by a
+// different browser (login CSRF / session swapping protection).
+func (s *Service) Begin(ctx context.Context, redirect, browser string) (string, error) {
 	c, e := s.rowConfig()
 	if e != nil || !c.Enabled {
 		return "", errors.New("OIDC is not enabled")
@@ -122,7 +132,7 @@ func (s *Service) Begin(ctx context.Context, redirect string) (string, error) {
 		return "", e
 	}
 	state, nonce := token(24), token(24)
-	if e = sqlite.Exec(s.st.DB, `INSERT INTO oidc_states(state,nonce,expires_at) VALUES(?,?,?)`, state, nonce, time.Now().UTC().Add(10*time.Minute).Format(time.RFC3339Nano)); e != nil {
+	if e = sqlite.Exec(s.st.DB, `INSERT INTO oidc_states(state,nonce,browser,expires_at) VALUES(?,?,?,?)`, state, nonce, browser, time.Now().UTC().Add(10*time.Minute).Format(time.RFC3339Nano)); e != nil {
 		return "", e
 	}
 	v := url.Values{
@@ -138,20 +148,24 @@ func (s *Service) Begin(ctx context.Context, redirect string) (string, error) {
 
 // Callback exchanges the authorization code, cryptographically verifies the ID
 // token (signature, issuer, audience, expiry) against the discovered keyset,
-// and enforces one-time state consumption and nonce equality before creating a
-// session. A syntactically JWT-shaped token is never accepted without passing
-// this verification.
-func (s *Service) Callback(ctx context.Context, state, code, redirect string) (string, auth.Session, error) {
+// enforces one-time state consumption, nonce equality and browser binding, and
+// requires a verified email before creating a session. A syntactically
+// JWT-shaped token is never accepted without passing this verification.
+func (s *Service) Callback(ctx context.Context, state, code, redirect, browser string) (string, auth.Session, error) {
 	if strings.TrimSpace(state) == "" || strings.TrimSpace(code) == "" {
 		return "", auth.Session{}, errors.New("OIDC callback is missing state or code")
 	}
-	r, e := sqlite.Query(s.st.DB, `SELECT expires_at,nonce FROM oidc_states WHERE state=?`, state)
+	r, e := sqlite.Query(s.st.DB, `SELECT expires_at,nonce,browser FROM oidc_states WHERE state=?`, state)
 	if e != nil || len(r) == 0 {
 		return "", auth.Session{}, errors.New("invalid OIDC state")
 	}
 	storedNonce := r[0]["nonce"].Text
+	storedBrowser := r[0]["browser"].Text
 	// The state is single-use: consume it before doing any provider work.
 	_ = sqlite.Exec(s.st.DB, `DELETE FROM oidc_states WHERE state=?`, state)
+	if storedBrowser == "" || storedBrowser != browser {
+		return "", auth.Session{}, errors.New("OIDC state does not match the initiating browser")
+	}
 	exp, _ := time.Parse(time.RFC3339Nano, r[0]["expires_at"].Text)
 	if time.Now().After(exp) {
 		return "", auth.Session{}, errors.New("expired OIDC state")

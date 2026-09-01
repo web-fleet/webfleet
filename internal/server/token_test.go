@@ -205,3 +205,102 @@ func TestTokenLastUsedAtUpdated(t *testing.T) {
 		t.Fatalf("last_used_at not updated: %v %v", rows, e)
 	}
 }
+
+// assertSingleJSONError proves the error response is exactly one valid JSON
+// document with the intended status. This catches the double-response bug
+// where two concatenated JSON objects were emitted.
+func assertSingleJSONError(t *testing.T, rr *httptest.ResponseRecorder, wantStatus int) {
+	t.Helper()
+	if rr.Code != wantStatus {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, wantStatus, rr.Body.String())
+	}
+	var v map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &v); err != nil {
+		t.Fatalf("response is not a single JSON document: %v (%s)", err, rr.Body.String())
+	}
+	if _, ok := v["error"]; !ok {
+		t.Fatalf("response has no error key: %s", rr.Body.String())
+	}
+}
+
+func TestBearerErrorResponsesAreSingleJSON(t *testing.T) {
+	s, _ := newRBACServer(t)
+	admin := setupAdmin(t, s)
+	tok := createToken(t, s, admin, "ci", `["sites:read"]`)
+	// Revoke a token to exercise the revoked path.
+	rt := doReq(t, s, admin, "POST", "/api/tokens", `{"name":"rev","scopes":["sites:read"]}`)
+	var rev struct {
+		ID    int64  `json:"id"`
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rt.Body.Bytes(), &rev)
+	if rr := doReq(t, s, admin, "DELETE", fmt.Sprintf("/api/tokens/%d", rev.ID), ""); rr.Code != 200 {
+		t.Fatalf("revoke %d", rr.Code)
+	}
+	cases := []struct {
+		name, token, method, path string
+		want                       int
+	}{
+		{"malformed-empty", "wf_", "GET", "/api/sites", 401},
+		{"unknown", "wf_doesnotexist", "GET", "/api/sites", 401},
+		{"revoked", rev.Token, "GET", "/api/sites", 401},
+		{"missing-scope", tok, "GET", "/api/fleet", 403},
+		{"session-only-route", tok, "GET", "/api/notifications/webhooks", 401},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertSingleJSONError(t, doReqWithBearer(t, s, tc.token, tc.method, tc.path, ""), tc.want)
+		})
+	}
+}
+
+func TestTokenInvalidAuthThrottled(t *testing.T) {
+	s, _ := newRBACServer(t)
+	for i := 0; i < 20; i++ {
+		if rr := doReqWithBearer(t, s, "wf_bogus", "GET", "/api/sites", ""); rr.Code != 401 {
+			t.Fatalf("invalid attempt %d = %d, want 401", i, rr.Code)
+		}
+	}
+	if rr := doReqWithBearer(t, s, "wf_bogus", "GET", "/api/sites", ""); rr.Code != 429 {
+		t.Fatalf("over-limit invalid token = %d, want 429", rr.Code)
+	}
+	// The throttle keys on the resolved client address, so a different source
+	// address is not limited together with the first.
+	req := strings.NewReader("")
+	r := httptest.NewRequest("GET", "/api/sites", req)
+	r.RemoteAddr = "198.51.100.9:9999"
+	r.Header.Set("Authorization", "Bearer wf_bogus")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, r)
+	if rr.Code != 401 {
+		t.Fatalf("different client address = %d, want 401", rr.Code)
+	}
+}
+
+func TestTokenInvalidAuthThrottleSurvivesSpoofedForwardedFor(t *testing.T) {
+	s, _ := newTrustedServer(t, "127.0.0.1/32")
+	for i := 0; i < 20; i++ {
+		req := strings.NewReader("")
+		r := httptest.NewRequest("GET", "/api/sites", req)
+		r.RemoteAddr = "127.0.0.1:9999"
+		// The attacker can vary the leftmost spoofed entry; the trusted proxy
+		// appends the real client as the rightmost untrusted value.
+		r.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d, 198.51.100.7", i))
+		r.Header.Set("Authorization", "Bearer wf_bogus")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, r)
+		if rr.Code != 401 {
+			t.Fatalf("attempt %d = %d, want 401", i, rr.Code)
+		}
+	}
+	req := strings.NewReader("")
+	r := httptest.NewRequest("GET", "/api/sites", req)
+	r.RemoteAddr = "127.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "203.0.113.99, 198.51.100.7")
+	r.Header.Set("Authorization", "Bearer wf_bogus")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, r)
+	if rr.Code != 429 {
+		t.Fatalf("spoofed forwarded-for bypassed throttle: %d", rr.Code)
+	}
+}

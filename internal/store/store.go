@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 24
+const schemaVersion = 25
 
 type migration struct {
 	version int
@@ -144,6 +144,9 @@ var migrations = []migration{
 	}},
 	{24, "webhook outbox payloads", []string{
 		`ALTER TABLE notification_deliveries ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';`,
+	}},
+	{25, "oidc browser binding", []string{
+		`ALTER TABLE oidc_states ADD COLUMN browser TEXT NOT NULL DEFAULT '';`,
 	}},
 }
 

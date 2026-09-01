@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
@@ -163,10 +165,11 @@ type Server struct {
 	proxy         requestmeta.Config
 	loginLim      *rateLimiter
 	setupLim      *rateLimiter
+	tokenLim      *rateLimiter
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000)}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
 	s.oidc = oidc.New(st, s.auth)
 	s.notifications = notifications.New(st)
 	s.routes()
@@ -235,7 +238,9 @@ func (s *Server) authorize(action string, csrf bool, tokenScopes []string, next 
 			return
 		}
 		if len(tokenScopes) > 0 {
-			if p, ok := s.tokenPrincipal(w, r, tokenScopes); ok {
+			if p, ok, handled := s.tokenPrincipal(w, r, tokenScopes); handled {
+				return
+			} else if ok {
 				next(w, r, p)
 				return
 			}
@@ -247,22 +252,29 @@ func (s *Server) authorize(action string, csrf bool, tokenScopes []string, next 
 // tokenPrincipal authenticates an API token and grants exactly the token's
 // scopes. The acting organization is the token's organization, so a token can
 // never cross organization boundaries or inherit the privileges of the browser
-// session that created it.
-func (s *Server) tokenPrincipal(w http.ResponseWriter, r *http.Request, requiredScopes []string) (principal, bool) {
+// session that created it. Failed/malformed authentication is throttled per
+// resolved client address (so spoofed X-Forwarded-For cannot bypass it) and
+// never keyed on token material. Exactly one layer writes the HTTP response:
+// handled=true means this function already did.
+func (s *Server) tokenPrincipal(w http.ResponseWriter, r *http.Request, requiredScopes []string) (principal, bool, bool) {
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, "Bearer ") {
-		return principal{}, false
+		return principal{}, false, false
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
 	if raw == "" {
-		return principal{}, false
+		return principal{}, false, false
 	}
 	uid, org, tokScopes, err := s.tokens.Authenticate(raw)
 	if err != nil {
+		if !s.tokenLim.Allow("token:" + s.proxy.ClientIP(r)) {
+			writeError(w, 429, "too many invalid token attempts")
+			return principal{}, false, true
+		}
 		// A single generic message for unknown and revoked tokens avoids
 		// leaking token existence.
 		writeError(w, 401, "invalid API token")
-		return principal{}, false
+		return principal{}, false, true
 	}
 	ok := false
 	for _, scope := range requiredScopes {
@@ -273,9 +285,9 @@ func (s *Server) tokenPrincipal(w http.ResponseWriter, r *http.Request, required
 	}
 	if !ok {
 		writeError(w, 403, "token scope denied")
-		return principal{}, false
+		return principal{}, false, true
 	}
-	return principal{UserID: uid, OrgID: org, Role: "token"}, true
+	return principal{UserID: uid, OrgID: org, Role: "token"}, true, false
 }
 
 // site loads a site after verifying it belongs to the caller's organization.
@@ -530,15 +542,33 @@ func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request, _ p
 	}
 	writeJSON(w, 200, x)
 }
+// oidcRedirect returns the canonical OIDC callback URI. When WEBFLEET_PUBLIC_URL
+// is configured it is the explicit external origin and the incoming Host header
+// is irrelevant; otherwise the trusted-proxy-aware scheme and the request Host
+// are used. X-Forwarded-Host and Forwarded are never trusted.
 func (s *Server) oidcRedirect(r *http.Request) string {
+	if s.cfg.PublicURL != "" {
+		return s.cfg.PublicURL + "/api/oidc/callback"
+	}
 	return s.proxy.Scheme(r) + "://" + r.Host + "/api/oidc/callback"
 }
+
+const oidcBindingCookie = "wf_oidc_binding"
+
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request, _ principal) {
-	u, e := s.oidc.Begin(r.Context(), s.oidcRedirect(r))
+	browser, e := randomToken(18)
+	if e != nil {
+		writeError(w, 500, "OIDC login unavailable")
+		return
+	}
+	u, e := s.oidc.Begin(r.Context(), s.oidcRedirect(r), browser)
 	if e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
+	// The binding cookie ties this authorization transaction to this browser
+	// and follows the same trusted-proxy Secure decision as the session cookie.
+	http.SetCookie(w, &http.Cookie{Name: oidcBindingCookie, Value: browser, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.proxy.Secure(r), MaxAge: 600})
 	http.Redirect(w, r, u, http.StatusFound)
 }
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, _ principal) {
@@ -546,11 +576,17 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, _ pr
 		writeError(w, 401, "OIDC authorization failed")
 		return
 	}
-	tok, _, e := s.oidc.Callback(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), s.oidcRedirect(r))
+	browser := ""
+	if c, err := r.Cookie(oidcBindingCookie); err == nil {
+		browser = c.Value
+	}
+	tok, _, e := s.oidc.Callback(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), s.oidcRedirect(r), browser)
 	if e != nil {
 		writeError(w, 401, e.Error())
 		return
 	}
+	// Consumed: clear the transient binding and establish the session.
+	http.SetCookie(w, &http.Cookie{Name: oidcBindingCookie, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.proxy.Secure(r), MaxAge: -1})
 	s.setSessionCookie(w, r, tok)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -1188,6 +1224,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request, p princip
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Value: token, Path: "/", HttpOnly: true, Secure: s.proxy.Secure(r), SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+}
+
+// randomToken returns a cryptographically random URL-safe token.
+func randomToken(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)

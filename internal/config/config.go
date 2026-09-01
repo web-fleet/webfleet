@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,7 @@ type Config struct {
 	CheckConcurrency int
 	AuditSandbox     string
 	TrustedProxies   []netip.Prefix
+	PublicURL        string
 }
 
 func Load() (Config, error) {
@@ -67,6 +69,12 @@ func Load() (Config, error) {
 		}
 		c.TrustedProxies = prefixes
 	}
+	if v := os.Getenv("WEBFLEET_PUBLIC_URL"); v != "" {
+		if err := validatePublicURL(v); err != nil {
+			return c, fmt.Errorf("WEBFLEET_PUBLIC_URL: %w", err)
+		}
+		c.PublicURL = strings.TrimRight(v, "/")
+	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {
 		c.DataDir = abs
@@ -108,6 +116,22 @@ func ParsePrefixList(raw string) ([]netip.Prefix, error) {
 		out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
 	}
 	return out, nil
+}
+
+// validatePublicURL accepts an http(s) origin with no path/query/fragment and
+// no userinfo, so it can serve as the canonical external origin.
+func validatePublicURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("must be an http(s) origin")
+	}
+	if u.User != nil || u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("must not contain a path, query, fragment or credentials")
+	}
+	return nil
 }
 
 func DatabaseChoicePath(dataDir string) string { return filepath.Join(dataDir, "database.json") }
