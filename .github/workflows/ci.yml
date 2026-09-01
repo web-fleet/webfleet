@@ -50,6 +50,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -131,6 +132,22 @@ jobs:
           cmp /tmp/wf /usr/local/bin/webfleet || { echo "binary not restored after rollback" >&2; exit 1; }
           sudo test -d /var/lib/webfleet
           # Installation can then be repeated successfully.
+          sudo /tmp/wf service install
+          curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
+          sudo /tmp/wf service uninstall || true
+          # Second branch: no pre-existing binary. Remove it, then the same
+          # failing activation must remove the newly copied binary too.
+          sudo rm -f /usr/local/bin/webfleet
+          set +e
+          sudo env "PATH=/tmp/fakebin:/usr/bin:/bin" /tmp/wf service install > /tmp/install-fail2.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "no-binary install with failing activation succeeded unexpectedly" >&2; exit 1; }
+          grep -q "rolled back" /tmp/install-fail2.log || { echo "no-binary install did not report rollback" >&2; exit 1; }
+          test ! -f /etc/systemd/system/webfleet.service || { echo "unit left behind after no-binary rollback" >&2; exit 1; }
+          test ! -f /usr/local/bin/webfleet || { echo "newly copied binary not removed after no-binary rollback" >&2; exit 1; }
+          sudo test -d /var/lib/webfleet
+          # A normal install then succeeds again.
           sudo /tmp/wf service install
           curl -fsS http://127.0.0.1:8090/healthz | grep '"ok":true'
           sudo /tmp/wf service uninstall || true

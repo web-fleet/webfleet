@@ -84,19 +84,28 @@ start_app
 SITES_AFTER=$(get /api/sites | jq -r '.total')
 [ "$SITES_AFTER" = "$SITES_BEFORE" ] && echo "restore after destructive change: ok ($SITES_AFTER sites)"
 
-# Binary update/rollback semantics: swap in a verified new binary, restart,
-# then swap the previous one back and restart.
-CGO_ENABLED=0 go build -o "$WORK/webfleet-v2" ./cmd/webfleet
-V2_SHA=$(sha256sum "$WORK/webfleet-v2" | cut -d' ' -f1)
-cp "$BIN" "$WORK/webfleet-v1"
-# verify-then-swap mimics service update
-echo "$V2_SHA  $WORK/webfleet-v2" | sha256sum -c - >/dev/null
+# Binary update/rollback semantics using separately produced release artifacts:
+# build a second release with the release contract, verify its recorded
+# checksum, swap in its binary, restart, then roll back to the first artifact.
+V2VERSION="0.0.0-update"
+V2_DIST="$WORK/dist2"
+VERSION="$V2VERSION" DIST="$V2_DIST" ./scripts/release.sh >/dev/null 2>&1
+V2_ARCHIVE=$(ls "$V2_DIST"/webfleet_${V2VERSION}_linux_amd64.tar.gz | head -1)
+V2_DIR=$(mktemp -d)
+tar -xzf "$V2_ARCHIVE" -C "$V2_DIR"
+V2_BIN="$V2_DIR"/$(basename "$V2_ARCHIVE" .tar.gz)/webfleet
+# The expected checksum comes from the release-build contract, not a self-hash.
+# The archive is verified against its recorded checksum; the binary is then
+# trusted because it is extracted from that verified archive.
+V2_SHA=$(grep "webfleet_${V2VERSION}_linux_amd64.tar.gz" "$V2_DIST/SHA256SUMS" | cut -d' ' -f1)
+echo "$V2_SHA  $V2_ARCHIVE" | sha256sum -c - >/dev/null
+cp "$BIN" "$WORK/webfleet-v1"   # the original release artifact binary
 stop_app
-cp "$WORK/webfleet-v2" "$BIN"
+cp "$V2_BIN" "$BIN"             # swap in the verified update artifact
 start_app
 echo "post-update health: $(curl -sS "$B/healthz" | jq -r '.ok')"
 echo "post-update session: $(curl -sS -b "$WORK/cookies" "$B/api/session" | jq -r '.email // .error')"
-# rollback
+# rollback restores the original artifact binary
 stop_app
 cp "$WORK/webfleet-v1" "$BIN"
 start_app

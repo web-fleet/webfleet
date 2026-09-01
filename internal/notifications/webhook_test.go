@@ -18,6 +18,7 @@ import (
 
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/netguard"
+	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 )
@@ -358,5 +359,74 @@ func TestIncidentTransitionIndependentOfWebhook(t *testing.T) {
 	rows, _ := sqlite.Query(st.DB, `SELECT state FROM incidents WHERE site_id=?`, siteID)
 	if len(rows) != 1 || rows[0]["state"].Text != "down" {
 		t.Fatalf("incident state: %v", rows)
+	}
+}
+
+// TestIncidentToWebhookDeliverySignature proves the full product path: an
+// incident transition enqueues the outbox, the worker delivers the exact body
+// to a real HTTP receiver, and the receiver can verify the HMAC signature and
+// the event payload.
+func TestIncidentToWebhookDeliverySignature(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	secret := "delivery-secret"
+	received := make(chan []byte, 1)
+	verified := make(chan bool, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		received <- body
+		verified <- r.Header.Get("X-WebFleet-Signature") == want
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	hostport := strings.TrimPrefix(srv.URL, "http://")
+	host := strings.Split(hostport, ":")[0]
+	g := testGuard(true)
+	g.Resolver = mapResolver{host: {netip.MustParseAddr("127.0.0.1")}}
+
+	// Create the site and a webhook pointing at the local receiver.
+	site, e := sites.New(st).Create(1, "Example", "https://127.0.0.1:1/", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := sqlite.Exec(st.DB, `INSERT INTO notification_webhooks(organization_id,name,url,secret,enabled,created_at) VALUES(1,'hook',?,?,1,?)`, srv.URL, secret, store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	// Incident open enqueues the webhook outbox.
+	if e := incidents.New(st).Transition(site.ID, "unknown", "down", store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	rows, e := sqlite.Query(st.DB, `SELECT event_kind FROM notification_deliveries`)
+	if e != nil || len(rows) != 1 || rows[0]["event_kind"].Text != "incident.open" {
+		t.Fatalf("outbox after incident: %v %v", rows, e)
+	}
+	// The worker delivers the exact signed body to the receiver.
+	w := NewWorkerWithGuard(st, slog.New(slog.NewTextHandler(io.Discard, nil)), g)
+	w.runOnce(context.Background())
+	select {
+	case body := <-received:
+		if !<-verified {
+			t.Fatalf("receiver could not verify the delivered HMAC signature")
+		}
+		var env struct {
+			Event string          `json:"event"`
+			Data  json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil || env.Event != "incident.open" {
+			t.Fatalf("delivered payload: %s", body)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook was never delivered")
+	}
+	// Delivery state is recorded.
+	rows, e = sqlite.Query(st.DB, `SELECT status FROM notification_deliveries`)
+	if e != nil || len(rows) != 1 || rows[0]["status"].Text != "delivered" {
+		t.Fatalf("delivery state: %v %v", rows, e)
 	}
 }

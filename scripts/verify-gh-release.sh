@@ -45,11 +45,16 @@ done
 # 3. Local checksum/provenance verification over the downloaded tree.
 scripts/verify-release.sh "$WORK"
 
-# 4. Attestation gate: every archive must carry a valid build provenance bound
-#    to this repository, ref and source commit. Failure exits non-zero.
+# 4. Attestation gate: every archive must carry valid build provenance bound to
+#    this repository, source ref (the tag), source commit and signer workflow,
+#    using the real gh attestation verify policy flags. Failure exits non-zero.
 COMMIT="$(python3 -c "import json,sys;print(json.load(open('$WORK/provenance.json'))['commit'])")"
 for a in webfleet_${VERSION}_linux_amd64.tar.gz webfleet_${VERSION}_linux_arm64.tar.gz webfleet_${VERSION}_darwin_amd64.tar.gz webfleet_${VERSION}_darwin_arm64.tar.gz webfleet_${VERSION}_windows_amd64.zip webfleet_${VERSION}_windows_arm64.zip; do
-  if ! gh attestation verify "$WORK/$a" --repo "$REPO" --ref "$TAG" --sha "$COMMIT" >/dev/null 2>&1; then
+  if ! gh attestation verify "$WORK/$a" \
+    --repo "$REPO" \
+    --source-ref "refs/tags/$TAG" \
+    --source-digest "$COMMIT" \
+    --signer-workflow "$REPO/.github/workflows/ci.yml" >/dev/null 2>&1; then
     echo "attestation verification FAILED for $a" >&2
     exit 1
   fi
