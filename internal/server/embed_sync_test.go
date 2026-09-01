@@ -7,58 +7,98 @@ import (
 	"testing"
 )
 
-// TestEmbeddedFrontendSync guards the source/generated/embedded contract: the
-// application's embedded web assets (internal/server/web) must be byte-identical
-// to the generated output (public), which the Nift frontend build copies in via
-// `make frontend`. Editing the embedded copy directly without updating the
-// generated output silently diverges and lets a rebuild erase the change.
-func TestEmbeddedFrontendSync(t *testing.T) {
-	generated, err := filepath.Abs("../../public")
+// TestFrontendSourceGeneratedEmbeddedSync guards the full source/generated/
+// embedded frontend contract. The application frontend has three copies:
+//
+//	content/assets/...        canonical Nift source
+//	public/assets/...         Nift-generated output (assets copied verbatim)
+//	internal/server/web/...   embedded into the binary (copied from public)
+//
+// The three verbatim application assets must be byte-identical across all
+// three copies, so editing the source without a Nift rebuild (or editing the
+// embedded copy directly) is caught. The generated<->embedded tree is also
+// exact in both directions, so an obsolete extra embedded file is rejected.
+// The HTML page is intentionally not compared source-to-generated because
+// Nift templates it.
+func TestFrontendSourceGeneratedEmbeddedSync(t *testing.T) {
+	repo, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	embedded, err := filepath.Abs("web")
-	if err != nil {
-		t.Fatal(err)
+	source := filepath.Join(repo, "content")
+	generated := filepath.Join(repo, "public")
+	embedded := filepath.Join(repo, "internal", "server", "web")
+
+	// Stage 1: canonical source assets must match the generated output.
+	verbatim := []string{
+		"assets/js/script.js",
+		"assets/js/database-setup-state.js",
+		"assets/css/style.css",
 	}
-	// The embedded directory is a straight copy of the generated output.
-	err = filepath.WalkDir(generated, func(path string, d fs.DirEntry, err error) error {
+	for _, rel := range verbatim {
+		src, serr := os.ReadFile(filepath.Join(source, rel))
+		if serr != nil {
+			t.Fatalf("read source %s: %v", rel, serr)
+		}
+		gen, gerr := os.ReadFile(filepath.Join(generated, rel))
+		if gerr != nil {
+			t.Fatalf("read generated %s: %v", rel, gerr)
+		}
+		if string(src) != string(gen) {
+			t.Errorf("content/%s differs from public/%s: run the Nift build", rel, rel)
+		}
+	}
+
+	// Stage 2: generated and embedded trees must be exact in both directions.
+	generatedFiles := map[string]string{}
+	if err := filepath.WalkDir(generated, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		if d.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(generated, path)
-		et := filepath.Join(embedded, rel)
-		gi, eerr := d.Info()
-		if eerr != nil {
-			return eerr
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		generatedFiles[rel] = string(b)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	embeddedFiles := map[string]string{}
+	if err := filepath.WalkDir(embedded, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 		if d.IsDir() {
-			di, derr := os.Stat(et)
-			if derr != nil || !di.IsDir() {
-				t.Errorf("generated dir %s missing in embedded web", rel)
-			}
 			return nil
 		}
-		eb, rerr := os.ReadFile(et)
+		rel, _ := filepath.Rel(embedded, path)
+		b, rerr := os.ReadFile(path)
 		if rerr != nil {
-			t.Errorf("generated file %s missing in embedded web: %v", rel, rerr)
-			return nil
+			return rerr
 		}
-		gb := make([]byte, gi.Size())
-		fh, oerr := os.Open(path)
-		if oerr != nil {
-			return oerr
-		}
-		defer fh.Close()
-		if _, oerr := fh.Read(gb); oerr != nil {
-			return oerr
-		}
-		if string(gb) != string(eb) {
-			t.Errorf("embedded web/%s differs from generated %s", rel, rel)
-		}
+		embeddedFiles[rel] = string(b)
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
+	}
+	for rel, gen := range generatedFiles {
+		emb, ok := embeddedFiles[rel]
+		if !ok {
+			t.Errorf("generated %s missing in embedded web: run make frontend", rel)
+			continue
+		}
+		if gen != emb {
+			t.Errorf("embedded web/%s differs from generated %s: run make frontend", rel, rel)
+		}
+	}
+	for rel := range embeddedFiles {
+		if _, ok := generatedFiles[rel]; !ok {
+			t.Errorf("stale embedded web/%s has no generated counterpart: run make frontend", rel)
+		}
 	}
 }
