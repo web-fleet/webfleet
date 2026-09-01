@@ -16,13 +16,14 @@ import (
 	"github.com/web-fleet/webfleet/internal/auth"
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
-	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/databasesetup"
+	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/performance"
+	"github.com/web-fleet/webfleet/internal/rbac"
 	"github.com/web-fleet/webfleet/internal/sites"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
@@ -40,6 +41,7 @@ type Server struct {
 	sites       *sites.Service
 	monitor     *monitor.Service
 	maintenance *maintenance.Service
+	rbac        *rbac.Service
 	incidents   *incidents.Service
 	tls         *tlshealth.Service
 	dns         *dnsobs.Service
@@ -50,7 +52,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -67,6 +69,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/logout", s.withSession(s.handleLogout, true))
 	s.mux.HandleFunc("GET /api/session", s.withSession(s.handleSession, false))
+	s.mux.HandleFunc("GET /api/organization/members", s.withSession(s.handleMembers, false))
+	s.mux.HandleFunc("POST /api/organization/members", s.withSession(s.handleMemberUpdate, true))
 	s.mux.HandleFunc("GET /api/groups", s.withSession(s.handleGroups, false))
 	s.mux.HandleFunc("POST /api/groups", s.withSession(s.handleCreateGroup, true))
 	s.mux.HandleFunc("GET /api/sites", s.withSession(s.handleSites, false))
@@ -304,8 +308,29 @@ func (s *Server) handleBatchAudits(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, 200, map[string]any{"results": s.audit.RunBatch(r.Context(), in.SiteIDs)})
 }
 
-func(s *Server)handleDatabaseSetupStatus(w http.ResponseWriter,r *http.Request){x,e:=databasesetup.StateFor(s.store,s.cfg.DataDir);if e!=nil{writeError(w,500,"database setup unavailable");return};writeJSON(w,200,x)}
-func(s *Server)handleDatabaseSetup(w http.ResponseWriter,r *http.Request){var in struct{Provider string `json:"provider"`;URL string `json:"url"`};if !decodeJSON(w,r,&in){return};x,e:=databasesetup.Apply(r.Context(),s.store,s.cfg.DataDir,in.Provider,in.URL);if e!=nil{writeError(w,400,e.Error());return};writeJSON(w,200,x)}
+func (s *Server) handleDatabaseSetupStatus(w http.ResponseWriter, r *http.Request) {
+	x, e := databasesetup.StateFor(s.store, s.cfg.DataDir)
+	if e != nil {
+		writeError(w, 500, "database setup unavailable")
+		return
+	}
+	writeJSON(w, 200, x)
+}
+func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Provider string `json:"provider"`
+		URL      string `json:"url"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	x, e := databasesetup.Apply(r.Context(), s.store, s.cfg.DataDir, in.Provider, in.URL)
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, x)
+}
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	need, err := s.auth.NeedsSetup()
 	if err != nil {
@@ -569,6 +594,38 @@ func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess a
 	writeJSON(w, 200, map[string]any{"checks": rows})
 }
 
+func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	role, e := s.rbac.Role(sess.UserID, 1)
+	if e != nil || !rbac.Can(role, "organization.read") {
+		writeError(w, 403, "permission denied")
+		return
+	}
+	m, e := s.rbac.Members(1)
+	if e != nil {
+		writeError(w, 500, "members unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"members": m, "role": role})
+}
+func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	role, e := s.rbac.Role(sess.UserID, 1)
+	if e != nil || !rbac.Can(role, "membership.update") {
+		writeError(w, 403, "permission denied")
+		return
+	}
+	var in struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if e = s.rbac.Add(sess.UserID, 1, in.Email, in.Role); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
 func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	groups, err := s.sites.Groups()
 	if err != nil {

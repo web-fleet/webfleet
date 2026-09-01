@@ -3,10 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -52,20 +52,51 @@ func Load() (Config, error) {
 		c.CheckConcurrency = n
 	}
 	abs, err := filepath.Abs(c.DataDir)
-	if err == nil { c.DataDir = abs }
-	if c.DatabaseURL=="" { if choice,e:=LoadDatabaseChoice(c.DataDir);e==nil&&choice.Provider=="postgres"{c.DatabaseURL=choice.URL} }
+	if err == nil {
+		c.DataDir = abs
+	}
+	if c.DatabaseURL == "" {
+		if choice, e := LoadDatabaseChoice(c.DataDir); e == nil && choice.Provider == "postgres" {
+			c.DatabaseURL = choice.URL
+		}
+	}
 	return c, nil
 }
 
-type DatabaseChoice struct { Provider string `json:"provider"`; URL string `json:"url,omitempty"` }
-func DatabaseChoicePath(dataDir string) string { return filepath.Join(dataDir,"database.json") }
-func LoadDatabaseChoice(dataDir string) (DatabaseChoice,error) {
-	b,err:=os.ReadFile(DatabaseChoicePath(dataDir));if os.IsNotExist(err){return DatabaseChoice{Provider:"sqlite"},nil};if err!=nil{return DatabaseChoice{},err}
-	var c DatabaseChoice;if err=json.Unmarshal(b,&c);err!=nil{return c,err};if c.Provider==""{c.Provider="sqlite"};return c,nil
+type DatabaseChoice struct {
+	Provider string `json:"provider"`
+	URL      string `json:"url,omitempty"`
 }
-func SaveDatabaseChoice(dataDir string,c DatabaseChoice) error {
-	if c.Provider!="sqlite"&&c.Provider!="postgres"{return fmt.Errorf("unsupported database provider")}
-	if c.Provider=="postgres"&&strings.TrimSpace(c.URL)==""{return fmt.Errorf("PostgreSQL URL is required")}
-	if err:=os.MkdirAll(dataDir,0o700);err!=nil{return err};_ = os.Chmod(dataDir,0o700)
-	b,_:=json.MarshalIndent(c,"","  ");return os.WriteFile(DatabaseChoicePath(dataDir),append(b,'\n'),0o600)
+
+func DatabaseChoicePath(dataDir string) string { return filepath.Join(dataDir, "database.json") }
+func LoadDatabaseChoice(dataDir string) (DatabaseChoice, error) {
+	b, err := os.ReadFile(DatabaseChoicePath(dataDir))
+	if os.IsNotExist(err) {
+		return DatabaseChoice{Provider: "sqlite"}, nil
+	}
+	if err != nil {
+		return DatabaseChoice{}, err
+	}
+	var c DatabaseChoice
+	if err = json.Unmarshal(b, &c); err != nil {
+		return c, err
+	}
+	if c.Provider == "" {
+		c.Provider = "sqlite"
+	}
+	return c, nil
+}
+func SaveDatabaseChoice(dataDir string, c DatabaseChoice) error {
+	if c.Provider != "sqlite" && c.Provider != "postgres" {
+		return fmt.Errorf("unsupported database provider")
+	}
+	if c.Provider == "postgres" && strings.TrimSpace(c.URL) == "" {
+		return fmt.Errorf("PostgreSQL URL is required")
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	_ = os.Chmod(dataDir, 0o700)
+	b, _ := json.MarshalIndent(c, "", "  ")
+	return os.WriteFile(DatabaseChoicePath(dataDir), append(b, '\n'), 0o600)
 }

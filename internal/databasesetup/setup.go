@@ -1,5 +1,62 @@
 package databasesetup
-import("context";"errors";"strings";"time";"github.com/web-fleet/webfleet/internal/config";"github.com/web-fleet/webfleet/internal/store")
-type State struct{Selectable bool `json:"selectable"`;Provider string `json:"provider"`;RestartRequired bool `json:"restart_required"`}
-func StateFor(st *store.Store,dataDir string)(State,error){var n int;if e:=st.DB.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n);e!=nil{return State{},e};c,e:=config.LoadDatabaseChoice(dataDir);if e!=nil{return State{},e};return State{Selectable:n==0,Provider:c.Provider},nil}
-func Apply(ctx context.Context,st *store.Store,dataDir,provider,url string)(State,error){state,e:=StateFor(st,dataDir);if e!=nil{return state,e};if !state.Selectable{return state,errors.New("database provider is locked after administrator creation")};provider=strings.ToLower(strings.TrimSpace(provider));switch provider{case"sqlite":if e=config.SaveDatabaseChoice(dataDir,config.DatabaseChoice{Provider:"sqlite"});e!=nil{return state,e};return State{Selectable:true,Provider:"sqlite"},nil;case"postgres":if strings.TrimSpace(url)==""{return state,errors.New("PostgreSQL URL is required")};c,cancel:=context.WithTimeout(ctx,10*time.Second);defer cancel();pg,e:=store.OpenPostgres(c,url);if e!=nil{return state,e};pg.Close();if e=config.SaveDatabaseChoice(dataDir,config.DatabaseChoice{Provider:"postgres",URL:url});e!=nil{return state,e};return State{Selectable:false,Provider:"postgres",RestartRequired:true},nil;default:return state,errors.New("unsupported database provider")}}
+
+import (
+	"context"
+	"errors"
+	"github.com/web-fleet/webfleet/internal/config"
+	"github.com/web-fleet/webfleet/internal/store"
+	"strings"
+	"time"
+)
+
+type State struct {
+	Selectable      bool   `json:"selectable"`
+	Provider        string `json:"provider"`
+	RestartRequired bool   `json:"restart_required"`
+}
+
+func StateFor(st *store.Store, dataDir string) (State, error) {
+	var n int
+	if e := st.DB.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); e != nil {
+		return State{}, e
+	}
+	c, e := config.LoadDatabaseChoice(dataDir)
+	if e != nil {
+		return State{}, e
+	}
+	return State{Selectable: n == 0, Provider: c.Provider}, nil
+}
+func Apply(ctx context.Context, st *store.Store, dataDir, provider, url string) (State, error) {
+	state, e := StateFor(st, dataDir)
+	if e != nil {
+		return state, e
+	}
+	if !state.Selectable {
+		return state, errors.New("database provider is locked after administrator creation")
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "sqlite":
+		if e = config.SaveDatabaseChoice(dataDir, config.DatabaseChoice{Provider: "sqlite"}); e != nil {
+			return state, e
+		}
+		return State{Selectable: true, Provider: "sqlite"}, nil
+	case "postgres":
+		if strings.TrimSpace(url) == "" {
+			return state, errors.New("PostgreSQL URL is required")
+		}
+		c, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		pg, e := store.OpenPostgres(c, url)
+		if e != nil {
+			return state, e
+		}
+		pg.Close()
+		if e = config.SaveDatabaseChoice(dataDir, config.DatabaseChoice{Provider: "postgres", URL: url}); e != nil {
+			return state, e
+		}
+		return State{Selectable: false, Provider: "postgres", RestartRequired: true}, nil
+	default:
+		return state, errors.New("unsupported database provider")
+	}
+}

@@ -250,7 +250,7 @@ No checkpoint is being promoted ahead of CP21. The next block should start with 
 
 ## Phase 5 - multi-user, agency and enterprise scale
 
-### CP21 - Users, organizations and RBAC
+### CP21 - Users, organizations and RBAC [COMPLETE]
 
 - Multiple users.
 - Organization membership.
