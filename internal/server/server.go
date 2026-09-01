@@ -38,6 +38,7 @@ type Server struct {
 	cfg         config.Config
 	store       *store.Store
 	analytics   *analytics.Service
+	tokens      *apitokens.Service
 	audit       *audit.Service
 	auth        *auth.Service
 	sites       *sites.Service

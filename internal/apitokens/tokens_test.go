@@ -12,6 +12,7 @@ func TestScopeAndRevoke(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer st.Close()
+	sqlite.Exec(st.DB, `INSERT INTO organizations(name,created_at) SELECT 'Default',? WHERE NOT EXISTS(SELECT 1 FROM organizations WHERE id=1)`, store.Now())
 	sqlite.Exec(st.DB, `INSERT INTO users(email,password_hash,created_at) VALUES('a@b.c','x',?)`, store.Now())
 	s := New(st)
 	x, e := s.Create(1, 1, "ci", []string{"sites:read"})
