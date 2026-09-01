@@ -170,8 +170,10 @@ func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
 	return s, nil
 }
 func postgresSQL(q string) string {
-	q = strings.ReplaceAll(q, "INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY")
-	q = strings.ReplaceAll(q, "datetime('now')", "CURRENT_TIMESTAMP::text")
+	q = strings.ReplaceAll(q, "INTEGER PRIMARY KEY", "SERIAL PRIMARY KEY")
+	q = strings.ReplaceAll(q, " BLOB ", " BYTEA ")
+	q = strings.ReplaceAll(q, "datetime('now')", "CURRENT_TIMESTAMP")
+	q = strings.ReplaceAll(q, "CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP::text")
 	return q
 }
 func (s *Store) initializePostgres(ctx context.Context) error {
