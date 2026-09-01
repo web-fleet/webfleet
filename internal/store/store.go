@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 20
+const schemaVersion = 21
 
 type migration struct {
 	version int
@@ -129,6 +129,10 @@ var migrations = []migration{
 	{20, "oidc configuration", []string{
 		`CREATE TABLE oidc_config(id INTEGER PRIMARY KEY, issuer TEXT NOT NULL, client_id TEXT NOT NULL, client_secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, auto_provision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);`,
 		`CREATE TABLE oidc_states(state TEXT PRIMARY KEY, nonce TEXT NOT NULL, expires_at TEXT NOT NULL);`,
+	}},
+	{21, "deployment observations", []string{
+		`CREATE TABLE deployment_events(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, provider TEXT NOT NULL, external_id TEXT NOT NULL DEFAULT '', revision TEXT NOT NULL DEFAULT '', environment TEXT NOT NULL DEFAULT 'production', status TEXT NOT NULL DEFAULT 'deployed', url TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}', deployed_at TEXT NOT NULL, received_at TEXT NOT NULL, UNIQUE(site_id,provider,external_id));`,
+		`CREATE INDEX deployment_events_site_time_idx ON deployment_events(site_id,deployed_at DESC);`,
 	}},
 }
 

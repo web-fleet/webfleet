@@ -294,7 +294,7 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 
 ## Phase 6 - integrations and release readiness
 
-### CP26 - Deployment observations
+### CP26 - Deployment observations [COMPLETE]
 
 - GitHub/webhook/API ingestion of external deployment events.
 - Correlate deployments with uptime/performance/link/traffic changes.

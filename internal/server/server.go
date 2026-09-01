@@ -18,6 +18,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/databasesetup"
+	"github.com/web-fleet/webfleet/internal/deployments"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
@@ -49,6 +50,7 @@ type Server struct {
 	incidents   *incidents.Service
 	tls         *tlshealth.Service
 	dns         *dnsobs.Service
+	deployments *deployments.Service
 	crawler     *crawler.Service
 	log         *slog.Logger
 	http        *http.Server
@@ -56,7 +58,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.oidc = oidc.New(st, s.auth)
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
@@ -117,6 +119,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/audits/resolve", s.withSession(s.handleResolveAudits, true))
 	s.mux.HandleFunc("POST /api/audits/batch", s.withSession(s.handleBatchAudits, true))
 	s.mux.HandleFunc("POST /api/sites/{id}/check", s.withSession(s.handleCheckSite, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/deployments", s.withSession(s.handleDeployments, false))
+	s.mux.HandleFunc("POST /api/sites/{id}/deployments", s.withSession(s.handleDeploymentRecord, true))
+	s.mux.HandleFunc("GET /api/sites/{id}/deployments/correlation", s.withSession(s.handleDeploymentCorrelation, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/checks", s.withSession(s.handleSiteChecks, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/performance", s.withSession(s.handleSitePerformance, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/incidents", s.withSession(s.handleSiteIncidents, false))
@@ -651,6 +656,47 @@ func (s *Server) handleSitePerformance(w http.ResponseWriter, r *http.Request, s
 	writeJSON(w, 200, out)
 }
 
+func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	x, e := s.deployments.History(id)
+	if e != nil {
+		writeError(w, 500, "deployments unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deployments": x})
+}
+func (s *Server) handleDeploymentRecord(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	var x deployments.Event
+	if !decodeJSON(w, r, &x) {
+		return
+	}
+	x.SiteID = id
+	v, e := s.deployments.Record(x)
+	if e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 201, v)
+}
+func (s *Server) handleDeploymentCorrelation(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	x, e := s.deployments.Correlate(id)
+	if e != nil {
+		writeError(w, 500, "deployment correlation unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"correlation": x})
+}
 func (s *Server) handleSiteChecks(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	id, ok := pathSiteID(w, r)
 	if !ok {
