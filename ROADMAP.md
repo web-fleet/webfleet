@@ -211,12 +211,13 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Fresh-install, upgrade and rollback tests.
 - Keep non-Linux application builds compiling even if service installation is platform-specific.
 
-### CP19 - PostgreSQL [COMPLETE]
+### CP19 - PostgreSQL [IMPLEMENTED - LIVE INTEGRATION GATE PENDING]
 
 - Storage abstraction only where necessary.
 - PostgreSQL migrations and integration tests.
 - Behavioural equivalence for core monitoring/auth/analytics paths.
 - Migration/import story from SQLite where feasible.
+- Before public preview, run the full PostgreSQL behavioural/integration suite against a real PostgreSQL server; the current sandbox cannot provide one.
 
 ### CP20 - Retention and maintenance [COMPLETE]
 
@@ -226,6 +227,12 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Disk-usage visibility and guardrails.
 
 **Phase 4 exit:** ordinary self-hosters can install, update, back up, restore and operate Web Fleet confidently.
+
+## CP11-CP20 ordering review
+
+The sequence remains sound after implementation. Performance and Audit needed to precede analytics so browser-derived and server-derived measurements stayed distinct. Analytics property/storage/dashboard/events formed one coherent block. Backup/restore and the Linux service lifecycle correctly preceded the larger-database path. PostgreSQL is implemented before enterprise identity work so CP21+ can be designed against both storage modes. CP20 retention belongs before multi-user scale because disk growth is already a concern for monitoring and analytics.
+
+No checkpoint is being promoted ahead of CP21. The next block should start with users/organizations/RBAC, then API tokens and OIDC. PostgreSQL live integration validation remains a release gate and should be run as soon as a real PostgreSQL test environment is available.
 
 ## Phase 5 - multi-user, agency and enterprise scale
 
