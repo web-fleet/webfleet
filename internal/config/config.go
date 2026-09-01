@@ -17,10 +17,11 @@ type Config struct {
 	CheckInterval    time.Duration
 	CrawlInterval    time.Duration
 	CheckConcurrency int
+	AuditSandbox     string
 }
 
 func Load() (Config, error) {
-	c := Config{DataDir: "./data", Listen: "127.0.0.1:8090", CheckInterval: time.Minute, CrawlInterval: 6 * time.Hour, CheckConcurrency: 8}
+	c := Config{DataDir: "./data", Listen: "127.0.0.1:8090", CheckInterval: time.Minute, CrawlInterval: 6 * time.Hour, CheckConcurrency: 8, AuditSandbox: "strict"}
 	if v := os.Getenv("WEBFLEET_DATABASE_URL"); v != "" {
 		c.DatabaseURL = v
 	}
@@ -50,6 +51,12 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("WEBFLEET_CHECK_CONCURRENCY must be 1..128")
 		}
 		c.CheckConcurrency = n
+	}
+	if v := os.Getenv("WEBFLEET_AUDIT_SANDBOX"); v != "" {
+		if v != "strict" && v != "allow-no-sandbox" {
+			return c, fmt.Errorf("WEBFLEET_AUDIT_SANDBOX must be strict or allow-no-sandbox")
+		}
+		c.AuditSandbox = v
 	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "checkpoint": "CP30-campaign2",
+  "description": "Machine-readable evidence for the Web Fleet browser Audit network boundary. Audit is a manual, operator-triggered browser evaluation. The hard requirement is that Chromium cannot resolve or navigate to any destination the Go process would have rejected, because Chromium owns its own networking. Evidence lives in internal/audit/proxy_test.go, internal/audit/browser_test.go and internal/audit/proc_unix.go.",
+  "architecture": {
+    "proxy": "An in-process GuardedProxy listens on 127.0.0.1 and is passed to Chromium via --proxy-server with --proxy-bypass-list=<-loopback>, so even loopback traffic flows through the proxy. Chromium never resolves or dials the target itself; it hands the hostname to the proxy.",
+    "validation": "Every CONNECT and absolute-form HTTP request through the proxy is validated by the same netguard public-network guard used by monitoring and crawling (scheme http/https only; resolved addresses must be public).",
+    "dialTimeRecheck": "The guarded dial re-resolves and re-checks the address at connection time, so a DNS rebinding that flips between validation and connection is still blocked.",
+    "redirects": "The proxy never follows redirects. Chromium follows them itself, and each redirect hop is a fresh proxied request that is validated again.",
+    "prevalidation": "The target URL is also validated before the browser launches as a fast-fail and defense-in-depth check.",
+    "sandbox": "Chromium runs with its own OS sandbox by default (WEBFLEET_AUDIT_SANDBOX=strict, no --no-sandbox). --no-sandbox is only used when the operator explicitly sets WEBFLEET_AUDIT_SANDBOX=allow-no-sandbox, documented as a downgrade for environments that cannot sandbox Chromium.",
+    "processLifecycle": "The browser runs in its own process group; on timeout or cancellation the whole tree is SIGKILLed (proc_unix.go) so renderers are not orphaned.",
+    "bounds": "Per-audit execution timeout (45s default), bounded DOM output (16MiB) and stderr (1MiB), and a global audit concurrency semaphore (2) that bounds simultaneous browser processes including batch audits."
+  },
+  "blockedDestinations": [
+    "loopback IPv4/IPv6", "private RFC1918", "unique-local and link-local IPv6",
+    "link-local multicast", "multicast/unspecified", "0.0.0.0/8", "100.64.0.0/10",
+    "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "240.0.0.0/4", "2001:db8::/32",
+    "IPv4-mapped IPv6 (::ffff:x.x.x.x)", "alternate numeric/hex/octal IP forms that do not resolve to a canonical public address"
+  ],
+  "tested": [
+    { "test": "TestProxyBlocksPrivateDestinations", "case": "CONNECT to loopback/private/link-local/reserved/documentation/cloud-metadata (169.254.169.254) and IPv6 forms returns 403" },
+    { "test": "TestProxyRejectsIPv4MappedAndAlternatePrivateForms", "case": "IPv4-mapped IPv6 private targets return 403" },
+    { "test": "TestProxyDNSRebindingBlockedAtDial", "case": "resolver returns a public address for validation then a private address at dial; the connection is refused" },
+    { "test": "TestProxyRedirectHopMustBeRevalidated", "case": "proxy returns a 302 without following it, and a follow-up CONNECT to the private redirect target is refused" },
+    { "test": "TestProxyRejectsNonHTTPAndOriginForm", "case": "non-http schemes and origin-form requests are refused" },
+    { "test": "TestProxyAllowsPublicConnectThroughTunnel", "case": "a public target tunnels successfully" },
+    { "test": "TestProxyPlainHTTPValidatesAndForwards", "case": "absolute-form HTTP is validated and forwarded" },
+    { "test": "TestBrowserTrafficFlowsThroughGuardedProxy", "case": "REAL Chromium: the target hostname resolves only through the injected proxy resolver; the fixture is reached, proving Chromium routed through the guarded proxy (a bypass would leave it unable to fetch)" },
+    { "test": "TestBrowserCannotReachLoopbackDirectly", "case": "loopback target is refused before launch under the production guard" },
+    { "test": "TestBrowserTimeoutKillsProcess", "case": "a hung upstream cannot exceed the per-audit timeout and is not reported as success" },
+    { "test": "TestLimitedBufferBoundsOutput", "case": "browser DOM output is bounded and excess output is consumed without blocking the child" },
+    { "test": "TestAuditConcurrencyIsBounded", "case": "the global audit semaphore allows exactly two concurrent browser audits" },
+    { "test": "TestAuditIsManualAndHistoryOptIn", "case": "audits only run on explicit request and history defaults off" },
+    { "test": "TestBrowserArgsSandboxPosture", "case": "strict sandbox never passes --no-sandbox; allow-no-sandbox is explicit opt-in" }
+  ],
+  "knownBehavior": [
+    "Chromium performs background connectivity probes (e.g. CONNECT www.google.com:443) through the guarded proxy. They are validated like any other request: public destinations pass, private/unresolvable ones are refused. Audit therefore requires the host to reach the public internet; operators should expect these probes.",
+    "Batch audits run at the same global concurrency as single audits and are org-filtered by the route layer; a batch can therefore take a long time but cannot exhaust the process."
+  ],
+  "manualAndHistory": {
+    "manualByDefault": true,
+    "historyOptIn": true,
+    "evidence": "Audit runs only from the explicit POST /api/sites/{id}/audit and /api/audits/batch routes (permission audit.run); no scheduler or crawler path invokes the audit runner. audit_settings.history_enabled defaults to 0 and is only flipped by the operator."
+  }
+}

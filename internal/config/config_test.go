@@ -14,7 +14,7 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != "127.0.0.1:8090" || c.CheckInterval != 45*time.Second || c.CheckConcurrency != 12 {
+	if c.Listen != "127.0.0.1:8090" || c.CheckInterval != 45*time.Second || c.CheckConcurrency != 12 || c.AuditSandbox != "strict" {
 		t.Fatalf("unexpected config: %+v", c)
 	}
 }
@@ -25,4 +25,19 @@ func TestLoadRejectsBadConcurrency(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	os.Unsetenv("WEBFLEET_CHECK_CONCURRENCY")
+}
+func TestLoadAuditSandboxOverride(t *testing.T) {
+	t.Setenv("WEBFLEET_DATA_DIR", t.TempDir())
+	t.Setenv("WEBFLEET_AUDIT_SANDBOX", "allow-no-sandbox")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AuditSandbox != "allow-no-sandbox" {
+		t.Fatalf("audit sandbox = %q", c.AuditSandbox)
+	}
+	t.Setenv("WEBFLEET_AUDIT_SANDBOX", "bogus")
+	if _, err := Load(); err == nil {
+		t.Fatal("bogus audit sandbox accepted")
+	}
 }

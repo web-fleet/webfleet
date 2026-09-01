@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/web-fleet/webfleet/internal/netguard"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -31,60 +31,18 @@ type Result struct {
 type Runner interface {
 	Run(context.Context, string) (Result, error)
 }
-type BrowserRunner struct{ Binary string }
 
-func (b BrowserRunner) Run(ctx context.Context, u string) (Result, error) {
-	bin := b.Binary
-	if bin == "" {
-		for _, x := range []string{"chromium", "chromium-browser", "google-chrome"} {
-			if p, e := exec.LookPath(x); e == nil {
-				bin = p
-				break
-			}
-		}
-	}
-	if bin == "" {
-		return Result{}, errors.New("browser audit runtime is not installed")
-	}
-	start := time.Now()
-	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	out, e := exec.CommandContext(cctx, bin, "--headless", "--disable-gpu", "--no-sandbox", "--dump-dom", u).Output()
-	d := time.Since(start).Milliseconds()
-	if e != nil {
-		return Result{}, fmt.Errorf("browser audit: %w", e)
-	}
-	html := strings.ToLower(string(out))
-	find := []string{}
-	a, bp, disc := 100, 100, 100
-	if !strings.Contains(html, "<title") {
-		disc -= 20
-		find = append(find, "Missing document title")
-	}
-	if !strings.Contains(html, "name=\"description\"") && !strings.Contains(html, "name='description'") {
-		disc -= 15
-		find = append(find, "Missing meta description")
-	}
-	if strings.Contains(html, "<img") && !strings.Contains(html, " alt=") {
-		a -= 15
-		find = append(find, "Images may be missing alt text")
-	}
-	if !strings.Contains(html, "<html lang=") {
-		a -= 10
-		find = append(find, "Missing document language")
-	}
-	if strings.Contains(html, "http://") {
-		bp -= 15
-		find = append(find, "Rendered document contains insecure HTTP references")
-	}
-	perf := 100 - int(d/50)
-	if perf < 20 {
-		perf = 20
-	}
-	if perf > 100 {
-		perf = 100
-	}
-	return Result{Status: "complete", Performance: perf, Accessibility: a, BestPractices: bp, Discoverability: disc, Findings: find, DurationMS: d, URL: u}, nil
+// Options configures the browser audit runner. Sandbox defaults to "strict"
+// (never --no-sandbox); "allow-no-sandbox" is an explicit operator opt-in for
+// environments that cannot sandbox Chromium. Resolver/AllowPrivate are test
+// seams and must not be set in production.
+type Options struct {
+	Binary       string
+	Sandbox      string
+	Timeout      time.Duration
+	MaxOutput    int64
+	Resolver     netguard.Resolver
+	AllowPrivate bool
 }
 
 type Service struct {
@@ -93,11 +51,21 @@ type Service struct {
 	sem    chan struct{}
 }
 
-func New(st *store.Store) *Service {
-	return &Service{st: st, runner: BrowserRunner{}, sem: make(chan struct{}, 2)}
+func New(st *store.Store) *Service { return NewWithOptions(st, Options{}) }
+func NewWithOptions(st *store.Store, o Options) *Service {
+	g := netguard.New()
+	if o.Resolver != nil {
+		g.Resolver = o.Resolver
+	}
+	g.AllowPrivate = o.AllowPrivate
+	return &Service{
+		st:     st,
+		runner: BrowserRunner{Binary: o.Binary, Sandbox: o.Sandbox, Timeout: o.Timeout, MaxOutput: o.MaxOutput, guard: g},
+		sem:    make(chan struct{}, auditConcurrency),
+	}
 }
 func NewWithRunner(st *store.Store, r Runner) *Service {
-	return &Service{st: st, runner: r, sem: make(chan struct{}, 2)}
+	return &Service{st: st, runner: r, sem: make(chan struct{}, auditConcurrency)}
 }
 func (s *Service) Run(ctx context.Context, siteID int64) (Result, error) {
 	rows, e := sqlite.Query(s.st.DB, `SELECT primary_url FROM sites WHERE id=? AND archived_at IS NULL`, siteID)
