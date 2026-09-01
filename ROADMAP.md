@@ -314,7 +314,7 @@ The next checkpoint remains CP26 deployment observations. CP30 is the appropriat
 - Search/filter/tag/group workflows proven at large site counts.
 - No page-level dashboard overflow regressions.
 
-### CP29 - Hosting and deployment documentation
+### CP29 - Hosting and deployment documentation [COMPLETE]
 
 - Publish substantial hosting/deployment documentation alongside the application.
 - Document direct VPS/systemd deployment, reverse proxies, TLS termination, firewall/listen-address expectations, upgrades, rollback, backup/restore and PostgreSQL deployment considerations.
