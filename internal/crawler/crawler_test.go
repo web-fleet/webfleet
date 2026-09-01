@@ -410,3 +410,116 @@ func TestCrawlSitemapDiagnostics(t *testing.T) {
 		t.Fatalf("/only-internal origin=%q want internal", originOf[base+"/only-internal"])
 	}
 }
+
+// TestCrawlResourceMarkupDiscovery proves the inventory sees real browser
+// resource markup (link[href], script[src], img[src], img[srcset],
+// source[src]) rather than only <a href>, and that resource references never
+// inflate page counts or the navigation-link metric.
+func TestCrawlResourceMarkupDiscovery(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<link rel="stylesheet" href="/style.css"><script src="/app.js"></script><img src="/one.webp"><img srcset="/one.webp 1x, /two.webp 2x"><source src="/clip.webm">`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(base)
+	site, _ := sites.New(st).Create(1, "x", base, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := d.Run
+	if r.PagesCrawled != 1 || r.PagesDiscovered != 1 {
+		t.Fatalf("pages crawled=%d discovered=%d want 1 (resource refs are not pages)", r.PagesCrawled, r.PagesDiscovered)
+	}
+	if r.CSSFiles != 1 || r.JavaScriptFiles != 1 || r.ImageFiles != 2 || r.MediaFiles != 1 {
+		t.Fatalf("asset counts css=%d js=%d img=%d media=%d want 1/1/2/1 (srcset dedups one.webp)", r.CSSFiles, r.JavaScriptFiles, r.ImageFiles, r.MediaFiles)
+	}
+	if r.InternalLinks != 0 {
+		t.Fatalf("internal_links=%d want 0 (resource references must not inflate the navigation-link metric)", r.InternalLinks)
+	}
+}
+
+// TestCrawlSitemapCountIsExact proves sitemap_urls equals the unique HTML URLs
+// actually obtained from the sitemap, with and without the root present, and
+// that the set-difference arithmetic reconciles.
+func TestCrawlSitemapCountIsExact(t *testing.T) {
+	for _, rootInSitemap := range []bool{true, false} {
+		var base string
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<a href="/a">a</a><a href="/b">b</a>`)
+		})
+		mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "a")
+		})
+		mux.HandleFunc("/b", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "b")
+		})
+		mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml")
+			var sb strings.Builder
+			sb.WriteString("<urlset>")
+			if rootInSitemap {
+				fmt.Fprintf(&sb, "<url><loc>%s/</loc></url>", base)
+			}
+			fmt.Fprintf(&sb, "<url><loc>%s/a</loc></url><url><loc>%s/sm-only</loc></url>", base, base)
+			sb.WriteString("</urlset>")
+			w.Write([]byte(sb.String()))
+		})
+		mux.HandleFunc("/sm-only", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "sm")
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		base = srv.URL
+		st, e := store.Open(t.TempDir())
+		if e != nil {
+			t.Fatal(e)
+		}
+		u, _ := url.Parse(base)
+		site, _ := sites.New(st).Create(1, "x", base, 0)
+		d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+		st.Close()
+		if e != nil {
+			t.Fatal(e)
+		}
+		wantSitemap := 2
+		if rootInSitemap {
+			wantSitemap = 3
+		}
+		if d.Run.SitemapURLsDiscovered != wantSitemap {
+			t.Fatalf("rootInSitemap=%v sitemap_urls=%d want %d", rootInSitemap, d.Run.SitemapURLsDiscovered, wantSitemap)
+		}
+		// Arithmetic invariant: internal-only + sitemap-only + both == discovered
+		var internalOnly, sitemapOnly, both int
+		for _, p := range d.Pages {
+			switch p.Origin {
+			case "internal":
+				internalOnly++
+			case "sitemap":
+				sitemapOnly++
+			case "both":
+				both++
+			}
+		}
+		if internalOnly+sitemapOnly+both != d.Run.PagesDiscovered {
+			t.Fatalf("rootInSitemap=%v set partition %d+%d+%d != discovered %d", rootInSitemap, internalOnly, sitemapOnly, both, d.Run.PagesDiscovered)
+		}
+		if rootInSitemap && d.Run.SitemapURLsDiscovered != sitemapOnly+both {
+			t.Fatalf("rootInSitemap=%v sitemap_urls=%d != sitemap-origin pages %d", rootInSitemap, d.Run.SitemapURLsDiscovered, sitemapOnly+both)
+		}
+	}
+}

@@ -815,3 +815,84 @@ func TestA11yInitialLoadShowsOnlyLoading(t *testing.T) {
 	}
 	assertAtMostOnePanelRendered(t, ctx)
 }
+
+// TestA11yDeleteDialogLayout proves the destructive Delete row in the edit
+// dialog renders the "Type <name> to confirm" instruction inline, keeps the
+// confirm input and Delete button in a row with an explicit gap (right-aligned
+// on desktop, wrapping below the input on narrow widths), and only enables
+// Delete when the typed name matches.
+func TestA11yDeleteDialogLayout(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	a11ySetup(t, ctx, srv)
+	siteID := a11yAddSite(t, srv)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`location.hash="#/sites/%d"`, siteID), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#edit-site`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#edit-site`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(`#site-dialog`)); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('delete-site-name').textContent`, &name)); err != nil {
+		t.Fatal(err)
+	}
+	if name != "S" {
+		t.Fatalf("delete target name = %q want S", name)
+	}
+	// "Type <name> to confirm" stays on a single line (inline sentence).
+	var inline bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){var s=document.getElementById('delete-site-name'),p=s.closest('.delete-prompt');return Math.abs(s.getBoundingClientRect().top-p.getBoundingClientRect().top)<4})()`, &inline)); err != nil {
+		t.Fatal(err)
+	}
+	if !inline {
+		var dbg string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(function(){var s=document.getElementById('delete-site-name'),p=document.querySelector('.delete-prompt');return 's.top='+s.getBoundingClientRect().top+' p.top='+p.getBoundingClientRect().top+' ptext='+p.textContent+' sdisp='+getComputedStyle(s).display})()`, &dbg))
+		t.Fatalf("delete confirmation sentence is not inline: %s", dbg)
+	}
+	// Input and Delete button sit in a row with an explicit gap (button right).
+	var gap bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){var i=document.getElementById('delete-confirm'),b=document.getElementById('delete-site-btn');return b.getBoundingClientRect().left>i.getBoundingClientRect().right})()`, &gap)); err != nil {
+		t.Fatal(err)
+	}
+	if !gap {
+		t.Fatal("delete button is not separated from the confirmation input")
+	}
+	// Button stays disabled until the exact site name is typed.
+	var disabled bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('delete-site-btn').disabled`, &disabled)); err != nil {
+		t.Fatal(err)
+	}
+	if !disabled {
+		t.Fatal("delete button enabled before confirmation")
+	}
+	if err := chromedp.Run(ctx, chromedp.SetValue(`#delete-confirm`, "wrong", chromedp.ByID)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('delete-site-btn').disabled === true`) {
+		t.Fatal("delete enabled for a non-matching name")
+	}
+	if err := chromedp.Run(ctx, chromedp.SetValue(`#delete-confirm`, "S", chromedp.ByID)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('delete-site-btn').disabled === false`) {
+		t.Fatal("delete stayed disabled after the matching name was typed")
+	}
+	// Narrow width: the destructive row wraps so the button moves below the input.
+	if err := chromedp.Run(ctx, chromedp.EmulateViewport(320, 700)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	var wrapped bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){var i=document.getElementById('delete-confirm'),b=document.getElementById('delete-site-btn');return b.getBoundingClientRect().top>i.getBoundingClientRect().top})()`, &wrapped)); err != nil {
+		t.Fatal(err)
+	}
+	if !wrapped {
+		t.Fatal("delete row did not wrap below the input at 320px")
+	}
+}

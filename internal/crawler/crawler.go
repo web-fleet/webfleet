@@ -42,7 +42,7 @@ type Run struct {
 	PagesDiscovered       int    `json:"pages_discovered"`
 	PageLimit             int    `json:"page_limit"`
 	LimitReached          bool   `json:"limit_reached"`
-	SitemapURLsDiscovered int    `json:"sitemap_urls_discovered"`
+	SitemapURLsDiscovered int    `json:"sitemap_urls"`
 	CurrentURL            string `json:"current_url"`
 	PagesFailed           int    `json:"pages_failed"`
 	CSSFiles              int    `json:"css_files"`
@@ -108,7 +108,14 @@ func NewForTests(st *store.Store, g netguard.Guard) *Service {
 	return &Service{store: st, guard: g, inflight: map[int64]bool{}}
 }
 
-var hrefRE = regexp.MustCompile(`(?i)\bhref\s*=\s*["']([^"'#]+)["']`)
+// aHrefRE matches navigation links only (<a href>), keeping the page/link
+// metric distinct from asset/resource references.
+var aHrefRE = regexp.MustCompile(`(?is)<a\b[^>]*\bhref\s*=\s*["']([^"'#]+)["']`)
+var linkTagRE = regexp.MustCompile(`(?is)<link\b([^>]*)>`)
+var linkRelRE = regexp.MustCompile(`(?i)\brel\s*=\s*["']([^"']+)["']`)
+var linkHrefRE = regexp.MustCompile(`(?i)\bhref\s*=\s*["']([^"'#]+)["']`)
+var srcRE = regexp.MustCompile(`(?i)\b(src|poster)\s*=\s*["']([^"']+)["']`)
+var srcsetRE = regexp.MustCompile(`(?i)\bsrcset\s*=\s*["']([^"']+)["']`)
 var locRE = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
 
 func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
@@ -149,7 +156,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	seen := map[string]bool{}
 	known := map[string]bool{root.String(): true}
 	discovered := 1
-	sitemapPages := map[string]bool{root.String(): true}
+	sitemapPages := map[string]bool{}
 	internalPages := map[string]bool{root.String(): true}
 	assets := map[string]string{}
 	for _, sm := range sitemaps {
@@ -159,11 +166,16 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 				if pu, perr := url.Parse(u); perr == nil && isAsset(pu) {
 					continue
 				}
-				sitemapPages[u] = true
+				// Every unique HTML URL actually obtained from sitemap data is
+				// recorded regardless of whether it was already known from
+				// another source, so the sitemap count is exact.
+				if !sitemapPages[u] {
+					sitemapPages[u] = true
+					detail.Run.SitemapURLsDiscovered++
+				}
 				if !known[u] {
 					known[u] = true
 					discovered++
-					detail.Run.SitemapURLsDiscovered++
 					queue = append(queue, queued{u: u, depth: 0})
 				}
 			}
@@ -225,7 +237,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 			_ = s.persistProgress(runID, detail, discovered)
 			continue
 		}
-		links := extractLinks(fr.body, fr.final)
+		links := extractNavigationLinks(fr.body, fr.final)
 		if len(links) > MaxLinksPerPage {
 			links = links[:MaxLinksPerPage]
 		}
@@ -258,6 +270,22 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 				}
 			}
 			_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_links(run_id,site_id,from_url,to_url,kind,status_code,broken,error) VALUES(?,?,?,?,?,0,0,'') RETURNING id`, runID, siteID, q.u, target, kind)
+		}
+		// Resource references (<link href>, src, srcset, poster) are
+		// inventoried as assets; they are not navigation links and never pages.
+		for _, res := range extractResources(fr.body, fr.final) {
+			ru, rerr := url.Parse(res)
+			if rerr != nil || !strings.EqualFold(ru.Hostname(), root.Hostname()) {
+				continue
+			}
+			if _, ok := assets[res]; !ok {
+				cls := assetClass(ru)
+				if cls == "" {
+					cls = "other"
+				}
+				assets[res] = cls
+				_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,asset_class,origin,ok) VALUES(?,?,?,0,0,'','asset',?,'internal',0) RETURNING id`, runID, siteID, res, cls)
+			}
 		}
 		_ = s.persistProgress(runID, detail, discovered)
 	}
@@ -323,6 +351,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 	}
 	detail.Run.PagesCrawled = len(detail.Pages)
 	detail.Run.PagesDiscovered = discovered
+	detail.Run.SitemapURLsDiscovered = len(sitemapPages)
 	detail.Run.PageLimit = MaxPages
 	// The crawl is truncated only when it stopped at the page ceiling while
 	// undiscovered work still remained in the queue.
@@ -438,6 +467,15 @@ func assetClass(u *url.URL) string {
 
 func isAsset(u *url.URL) bool { return assetClass(u) != "" }
 
+// isAssetLinkRel reports whether a <link rel> references a resource asset
+// (stylesheet/icon/manifest/preload/prefetch) rather than a page or feed
+// reference such as rel="canonical" or rel="alternate".
+func isAssetLinkRel(rel string) bool {
+	rel = strings.ToLower(rel)
+	return strings.Contains(rel, "stylesheet") || strings.Contains(rel, "icon") || strings.Contains(rel, "manifest") ||
+		strings.Contains(rel, "preload") || strings.Contains(rel, "prefetch") || rel == "mask-icon"
+}
+
 // assetClassByContentType classifies a fetched resource that carried no
 // classifiable path extension, using the authoritative response Content-Type.
 func assetClassByContentType(ct string) string {
@@ -480,35 +518,89 @@ func disallowed(rules []string, path string) bool {
 	}
 	return false
 }
-func extractLinks(body []byte, base string) []string {
+
+// resolveURL resolves raw against base, keeping only http(s) absolute URLs
+// with fragments stripped.
+func resolveURL(raw, base string) (string, bool) {
+	u, e := url.Parse(raw)
+	if e != nil {
+		return "", false
+	}
 	b, e := url.Parse(base)
 	if e != nil {
-		return nil
+		return "", false
 	}
+	u = b.ResolveReference(u)
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", false
+	}
+	u.Fragment = ""
+	return u.String(), true
+}
+
+// extractNavigationLinks returns deduplicated <a href> links: the page
+// navigation/download link set that drives crawl pages and internal/external
+// link counts.
+func extractNavigationLinks(body []byte, base string) []string {
 	seen := map[string]bool{}
 	out := []string{}
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
+	for _, m := range aHrefRE.FindAllSubmatch(body, -1) {
 		raw := strings.TrimSpace(string(m[1]))
-		u, e := url.Parse(raw)
-		if e != nil {
+		if isTemplateLiteral(raw) {
 			continue
 		}
-		u = b.ResolveReference(u)
-		if u.Scheme != "http" && u.Scheme != "https" {
+		x, ok := resolveURL(raw, base)
+		if !ok || seen[x] {
 			continue
 		}
-		u.Fragment = ""
-		x := u.String()
-		if isTemplateLiteral(x) {
+		seen[x] = true
+		out = append(out, x)
+	}
+	return out
+}
+
+// extractResources returns deduplicated resource references from real browser
+// markup: <link href> (stylesheets/manifests/icons), src/poster attributes
+// (script/img/source/video/audio) and srcset candidates. These are inventoried
+// as assets; they are never crawl pages.
+func extractResources(body []byte, base string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(raw string) {
+		x, ok := resolveURL(strings.TrimSpace(raw), base)
+		if !ok || seen[x] {
+			return
+		}
+		seen[x] = true
+		out = append(out, x)
+	}
+	for _, m := range linkTagRE.FindAllSubmatch(body, -1) {
+		tag := string(m[1])
+		rel := ""
+		if rm := linkRelRE.FindStringSubmatch(tag); rm != nil {
+			rel = rm[1]
+		}
+		if !isAssetLinkRel(rel) {
 			continue
 		}
-		if !seen[x] {
-			seen[x] = true
-			out = append(out, x)
+		if hm := linkHrefRE.FindStringSubmatch(tag); hm != nil {
+			add(hm[1])
+		}
+	}
+	for _, m := range srcRE.FindAllSubmatch(body, -1) {
+		add(string(m[2]))
+	}
+	for _, m := range srcsetRE.FindAllSubmatch(body, -1) {
+		for _, cand := range strings.Split(string(m[1]), ",") {
+			parts := strings.Fields(cand)
+			if len(parts) > 0 {
+				add(parts[0])
+			}
 		}
 	}
 	return out
 }
+
 func (s *Service) fetch(ctx context.Context, method, raw string, max int64) fetchResult {
 	u, e := url.Parse(raw)
 	if e != nil {
