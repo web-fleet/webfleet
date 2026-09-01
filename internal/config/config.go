@@ -22,6 +22,7 @@ type Config struct {
 	AuditSandbox     string
 	TrustedProxies   []netip.Prefix
 	PublicURL        string
+	AnalyticsServerSide bool
 }
 
 func Load() (Config, error) {
@@ -74,6 +75,9 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("WEBFLEET_PUBLIC_URL: %w", err)
 		}
 		c.PublicURL = strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv("WEBFLEET_ANALYTICS_SERVER_SIDE"); v == "1" || strings.EqualFold(v, "true") {
+		c.AnalyticsServerSide = true
 	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {

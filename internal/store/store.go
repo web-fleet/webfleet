@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 27
+const schemaVersion = 28
 
 type migration struct {
 	version int
@@ -154,6 +154,14 @@ var migrations = []migration{
 	{27, "scheduler due claims", []string{
 		`CREATE TABLE scheduler_claims(claim_kind TEXT NOT NULL, site_id INTEGER NOT NULL, next_due_at TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', generation INTEGER NOT NULL DEFAULT 0, lease_until TEXT NOT NULL DEFAULT '', PRIMARY KEY(claim_kind, site_id));`,
 	}},
+	{28, "deployment idempotency partial index", []string{
+		`ALTER TABLE deployment_events RENAME TO deployment_events_old;`,
+		`CREATE TABLE deployment_events(id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, provider TEXT NOT NULL, external_id TEXT NOT NULL DEFAULT '', revision TEXT NOT NULL DEFAULT '', environment TEXT NOT NULL DEFAULT 'production', status TEXT NOT NULL DEFAULT 'deployed', url TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}', deployed_at TEXT NOT NULL, received_at TEXT NOT NULL);`,
+		`INSERT INTO deployment_events(id,site_id,provider,external_id,revision,environment,status,url,metadata_json,deployed_at,received_at) SELECT id,site_id,provider,external_id,revision,environment,status,url,metadata_json,deployed_at,received_at FROM deployment_events_old;`,
+		`DROP TABLE deployment_events_old;`,
+		`CREATE INDEX deployment_events_site_time_idx ON deployment_events(site_id,deployed_at DESC);`,
+		`CREATE UNIQUE INDEX deployment_events_idem_idx ON deployment_events(site_id,provider,external_id) WHERE external_id <> '';`,
+	}},
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -270,6 +278,37 @@ func (s *Store) initializePostgres(ctx context.Context) error {
 			return err
 		}
 		ok = true
+	}
+	return s.syncSerialSequences(ctx)
+}
+
+// syncSerialSequences repairs PostgreSQL sequences after migrations that rebuild
+// tables by copying explicit ids (e.g. the deployment partial-index rebuild),
+// so new auto ids never collide with preserved rows.
+func (s *Store) syncSerialSequences(ctx context.Context) error {
+	rows, err := s.DB.QueryContext(ctx, `SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND column_default LIKE 'nextval(%'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type col struct{ table, column string }
+	var cols []col
+	for rows.Next() {
+		var c col
+		if err := rows.Scan(&c.table, &c.column); err != nil {
+			return err
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range cols {
+		// setval(pg_get_serial_sequence(...), max(id), true) advances the
+		// sequence to the highest preserved id.
+		if _, err := s.DB.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('`+c.table+`','`+c.column+`'), COALESCE(MAX(`+c.column+`),1), true) FROM `+c.table); err != nil {
+			return fmt.Errorf("sync serial sequence for %s.%s: %w", c.table, c.column, err)
+		}
 	}
 	return nil
 }

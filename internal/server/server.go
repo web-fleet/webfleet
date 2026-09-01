@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -169,7 +170,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide}), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
 	s.oidc = oidc.New(st, s.auth)
 	s.notifications = notifications.New(st)
 	s.routes()
@@ -178,7 +179,7 @@ func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 }
 
 func NewAnalyticsIngest(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide}), log: log, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "mode": "analytics-ingest"})
 	})
@@ -313,9 +314,13 @@ func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	origin := r.Header.Get("Origin")
-	ip := r.RemoteAddr
-	if i := strings.LastIndex(ip, ":"); i > 0 {
-		ip = ip[:i]
+	ip := s.proxy.ClientIP(r)
+	if ip == "" {
+		if h, _, e := net.SplitHostPort(r.RemoteAddr); e == nil {
+			ip = h
+		} else {
+			ip = r.RemoteAddr
+		}
 	}
 	if err := s.analytics.Ingest(in, origin, ip, r.UserAgent()); err != nil {
 		writeError(w, 400, err.Error())
@@ -543,6 +548,7 @@ func (s *Server) handleDatabaseSetup(w http.ResponseWriter, r *http.Request, _ p
 	}
 	writeJSON(w, 200, x)
 }
+
 // oidcRedirect returns the canonical OIDC callback URI. The external origin is
 // explicit and fail-closed: it comes only from WEBFLEET_PUBLIC_URL and never
 // from the incoming Host header, X-Forwarded-Host or Forwarded. Without a

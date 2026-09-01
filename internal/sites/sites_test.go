@@ -1,6 +1,7 @@
 package sites
 
 import (
+	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"testing"
 )
@@ -53,5 +54,59 @@ func TestSiteCRUDSearchGroupPagination(t *testing.T) {
 	}
 	if e = svc.Delete(1, id); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestListByTagCombinationsAndIsolation(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	svc := New(st)
+	g, e := svc.CreateGroup(1, "Clients")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i, name := range []string{"Alpha", "Beta", "Gamma"} {
+		s, e := svc.Create(1, name, "https://example.com", g.ID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if i < 2 {
+			if e := svc.SetTags(1, s.ID, []string{"prod"}); e != nil {
+				t.Fatal(e)
+			}
+		}
+	}
+	// Tag filter narrows to tagged sites.
+	tagged, e := svc.ListByTag(1, "", 0, "prod", 1, 20)
+	if e != nil || tagged.Total != 2 {
+		t.Fatalf("tag filter: %+v %v", tagged, e)
+	}
+	// Tag + text search.
+	search, e := svc.ListByTag(1, "alpha", 0, "prod", 1, 20)
+	if e != nil || search.Total != 1 || search.Sites[0].Name != "Alpha" {
+		t.Fatalf("tag+search: %+v %v", search, e)
+	}
+	// Tag + group + pagination.
+	page, e := svc.ListByTag(1, "", g.ID, "prod", 1, 1)
+	if e != nil || len(page.Sites) != 1 || page.Total != 2 || page.Pages != 2 {
+		t.Fatalf("tag+group+page: %+v %v", page, e)
+	}
+	// Organization isolation: a second org's tagged sites are invisible.
+	if e := sqlite.Exec(st.DB, `INSERT INTO organizations(name,created_at) VALUES('B',?)`, store.Now()); e != nil {
+		t.Fatal(e)
+	}
+	var orgB int64
+	_ = st.DB.QueryRow(`SELECT id FROM organizations WHERE name='B'`).Scan(&orgB)
+	sB, e := svc.Create(orgB, "Bsite", "https://b.example", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = svc.SetTags(orgB, sB.ID, []string{"prod"})
+	isolated, e := svc.ListByTag(1, "", 0, "prod", 1, 20)
+	if e != nil || isolated.Total != 2 {
+		t.Fatalf("cross-org tag leak: %+v %v", isolated, e)
 	}
 }

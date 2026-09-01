@@ -45,7 +45,7 @@ func (s *Service) Record(e Event) (Event, error) {
 	}
 	e.ReceivedAt = store.Now()
 	m, _ := json.Marshal(e.Metadata)
-	r, x := sqlite.Query(s.st.DB, `INSERT INTO deployment_events(site_id,provider,external_id,revision,environment,status,url,metadata_json,deployed_at,received_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,provider,external_id) DO UPDATE SET revision=excluded.revision,status=excluded.status,url=excluded.url,metadata_json=excluded.metadata_json,deployed_at=excluded.deployed_at RETURNING id`, e.SiteID, e.Provider, e.ExternalID, e.Revision, e.Environment, e.Status, e.URL, string(m), e.DeployedAt, e.ReceivedAt)
+	r, x := sqlite.Query(s.st.DB, `INSERT INTO deployment_events(site_id,provider,external_id,revision,environment,status,url,metadata_json,deployed_at,received_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,provider,external_id) WHERE external_id <> '' DO UPDATE SET revision=excluded.revision,status=excluded.status,url=excluded.url,metadata_json=excluded.metadata_json,deployed_at=excluded.deployed_at RETURNING id`, e.SiteID, e.Provider, e.ExternalID, e.Revision, e.Environment, e.Status, e.URL, string(m), e.DeployedAt, e.ReceivedAt)
 	if x != nil {
 		return e, x
 	}

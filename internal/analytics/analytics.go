@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,11 +26,22 @@ type Property struct {
 	CreatedAt     string `json:"created_at"`
 }
 type Service struct {
-	st   *store.Store
-	salt string
+	st            *store.Store
+	salt          string
+	allowNoOrigin bool
+	validLim      *limiter
+	badLim        *limiter
 }
 
-func New(st *store.Store) *Service {
+// Options configures the analytics service. AllowNoOrigin enables a deliberate
+// server-side ingestion mode (empty Origin accepted); the default is the
+// browser-tracker contract where Origin must match the property.
+type Options struct {
+	AllowNoOrigin bool
+}
+
+func New(st *store.Store) *Service { return NewWithOptions(st, Options{}) }
+func NewWithOptions(st *store.Store, o Options) *Service {
 	r, _ := sqlite.Query(st.DB, `SELECT value FROM app_settings WHERE key='analytics_visitor_salt'`)
 	salt := ""
 	if len(r) > 0 {
@@ -37,7 +51,7 @@ func New(st *store.Store) *Service {
 		salt = randomKey(24)
 		_ = sqlite.Exec(st.DB, `INSERT INTO app_settings(key,value,updated_at) VALUES('analytics_visitor_salt',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, salt, store.Now())
 	}
-	return &Service{st: st, salt: salt}
+	return &Service{st: st, salt: salt, allowNoOrigin: o.AllowNoOrigin, validLim: newLimiter(time.Minute, 300, 20000), badLim: newLimiter(time.Minute, 60, 20000)}
 }
 func randomKey(n int) string {
 	b := make([]byte, n)
@@ -84,11 +98,21 @@ type Event struct {
 func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	r, e := sqlite.Query(s.st.DB, `SELECT id,enabled,allowed_origin FROM analytics_properties WHERE public_key=?`, ev.Key)
 	if e != nil || len(r) == 0 {
+		// Unknown-property traffic is abuse-controlled per client address so
+		// attacker-supplied keys cannot grow the limiter without bound.
+		if !s.badLim.Allow("ip:" + ip) {
+			return errors.New("analytics rate limited")
+		}
 		return errors.New("unknown analytics property")
 	}
 	x := r[0]
 	if x["enabled"].Int64 == 0 {
 		return errors.New("analytics disabled")
+	}
+	// Origin is not authentication (a non-browser client can forge it), but the
+	// browser-tracker contract requires it to match the property origin.
+	if origin == "" && !s.allowNoOrigin {
+		return errors.New("analytics origin required")
 	}
 	if origin != "" && origin != x["allowed_origin"].Text {
 		return errors.New("origin not allowed")
@@ -96,11 +120,23 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	if ev.Kind == "" {
 		ev.Kind = "pageview"
 	}
+	if len(ev.Kind) > 64 || hasControlChars(ev.Kind) {
+		return errors.New("invalid analytics event kind")
+	}
 	if ev.Path == "" {
 		ev.Path = "/"
 	}
 	if len(ev.Path) > 2048 || len(ev.Referrer) > 2048 || len(ev.Payload) > 8192 {
 		return errors.New("analytics event too large")
+	}
+	if ev.Payload != "" && !json.Valid([]byte(ev.Payload)) {
+		return errors.New("analytics payload must be valid JSON")
+	}
+	// Valid-property traffic is rate limited per client address and property,
+	// keeping legitimate tracker volume practical while bounding memory.
+	pid := x["id"].Int64
+	if !s.validLim.Allow("ip:" + ip + ":pid:" + strconv.FormatInt(pid, 10)) {
+		return errors.New("analytics rate limited")
 	}
 	day := time.Now().UTC().Format("2006-01-02")
 	h := sha256.Sum256([]byte(day + "|" + s.salt + "|" + ip + "|" + ua))
@@ -109,7 +145,6 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	if class == "bot" {
 		return nil
 	}
-	pid := x["id"].Int64
 	if e := sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, pid, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, store.Now()); e != nil {
 		return e
 	}
@@ -122,6 +157,63 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 		}
 	}
 	return nil
+}
+
+func hasControlChars(s string) bool {
+	for _, c := range s {
+		if c < 0x20 || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// limiter is a bounded-memory fixed-window rate limiter shared by the analytics
+// ingress paths. It is intentionally in-memory: raw client addresses are never
+// persisted.
+type limiter struct {
+	mu      sync.Mutex
+	window  time.Duration
+	limit   int
+	maxKeys int
+	buckets map[string]*limiterBucket
+}
+
+type limiterBucket struct {
+	count int
+	reset time.Time
+}
+
+func newLimiter(window time.Duration, limit, maxKeys int) *limiter {
+	return &limiter{window: window, limit: limit, maxKeys: maxKeys, buckets: map[string]*limiterBucket{}}
+}
+
+func (l *limiter) Allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	b, ok := l.buckets[key]
+	if !ok {
+		for k, old := range l.buckets {
+			if now.After(old.reset) {
+				delete(l.buckets, k)
+			}
+		}
+		if len(l.buckets) >= l.maxKeys {
+			return false
+		}
+		b = &limiterBucket{reset: now.Add(l.window)}
+		l.buckets[key] = b
+	}
+	if now.After(b.reset) {
+		b.count = 0
+		b.reset = now.Add(l.window)
+	}
+	if b.count >= l.limit {
+		return false
+	}
+	b.count++
+	return true
 }
 func RemoteIP(remote string) string {
 	if h, _, e := net.SplitHostPort(remote); e == nil {

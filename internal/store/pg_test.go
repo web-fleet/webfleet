@@ -543,3 +543,36 @@ func (m mapResolver) LookupNetIP(ctx context.Context, network, host string) ([]n
 	}
 	return nil, &net.DNSError{Err: "no such host", Name: host}
 }
+
+func TestPostgresDeploymentIdempotency(t *testing.T) {
+	st, _ := openFreshPG(t)
+	site, err := sites.New(st).Create(1, "x", "https://example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep := deployments.New(st)
+	a1, err := dep.Record(deployments.Event{SiteID: site.ID, Provider: "github", ExternalID: "rev-1", Revision: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := dep.Record(deployments.Event{SiteID: site.ID, Provider: "github", ExternalID: "rev-1", Revision: "def"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a1.ID != a2.ID {
+		t.Fatalf("postgres dedup produced two rows: %d vs %d", a1.ID, a2.ID)
+	}
+	// Empty external_id must not collapse, and the auto id sequence must not
+	// collide with preserved ids after the rebuild.
+	empty1, err := dep.Record(deployments.Event{SiteID: site.ID, Provider: "github", Revision: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty2, err := dep.Record(deployments.Event{SiteID: site.ID, Provider: "github", Revision: "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty1.ID == empty2.ID || empty1.ID == a1.ID || empty2.ID == a1.ID {
+		t.Fatalf("postgres empty external_id collapse or sequence collision: %d %d %d", empty1.ID, empty2.ID, a1.ID)
+	}
+}
