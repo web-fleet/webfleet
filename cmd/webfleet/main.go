@@ -21,6 +21,9 @@ import (
 	"time"
 )
 
+// version is overridden at release build time via -ldflags -X main.version.
+var version = "dev"
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -28,6 +31,7 @@ func main() {
 		log.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
+	log.Info("webfleet version", "version", version)
 	if len(os.Args) >= 3 && os.Args[1] == "backup" {
 		provider := store.Provider(cfg.DatabaseURL)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

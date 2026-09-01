@@ -16,6 +16,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: go mod verify
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/webfleet
@@ -27,4 +28,41 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: go mod verify
       - run: go test -race ./...
+  crosscompile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cross-compile the supported matrix
+        run: |
+          set -e
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -o "/tmp/wf-$os-$arch" ./cmd/webfleet
+          done
+  release-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build release matrix and checksums
+        run: |
+          scripts/release.sh
+      - name: Verify the release tree (read-only)
+        run: |
+          scripts/verify-release.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webfleet-release
+          path: dist/*
+          if-no-files-found: error

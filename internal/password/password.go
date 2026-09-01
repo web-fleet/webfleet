@@ -1,46 +1,100 @@
+// Package password hashes and verifies passwords with Argon2id using the pure
+// Go implementation (golang.org/x/crypto/argon2), so builds do not depend on a
+// system libargon2 and work on Linux, macOS and Windows. Hashes use the PHC
+// string format ($argon2id$v=19$m=...,t=...,p=...$salt$hash), which is also the
+// format the previous cgo libargon2 binding produced, so existing stored hashes
+// continue to verify without rehashing.
 package password
-
-/*
-#cgo LDFLAGS: -L/lib/x86_64-linux-gnu -l:libargon2.so.1
-#include <stdlib.h>
-#include <stdint.h>
-int argon2id_hash_encoded(const uint32_t t_cost, const uint32_t m_cost, const uint32_t parallelism,
-                          const void *pwd, const size_t pwdlen, const void *salt, const size_t saltlen,
-                          const size_t hashlen, char *encoded, const size_t encodedlen);
-int argon2id_verify(const char *encoded, const void *pwd, const size_t pwdlen);
-*/
-import "C"
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
-	"unsafe"
+	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/argon2"
 )
 
+const (
+	argonTime    = 3
+	argonMemory  = 64 * 1024
+	argonThreads = 1
+	argonKeyLen  = 32
+	saltLen      = 16
+)
+
+// Hash derives a PHC-encoded Argon2id hash for the password.
 func Hash(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, e := rand.Read(salt); e != nil {
-		return "", e
+	salt := make([]byte, saltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
 	}
-	out := make([]byte, 256)
-	p := C.CBytes([]byte(password))
-	defer C.free(p)
-	sp := C.CBytes(salt)
-	defer C.free(sp)
-	rc := C.argon2id_hash_encoded(3, 64*1024, 1, p, C.size_t(len(password)), sp, C.size_t(len(salt)), 32, (*C.char)(unsafe.Pointer(&out[0])), C.size_t(len(out)))
-	if rc != 0 {
-		return "", errors.New("argon2id hash failed")
-	}
-	n := 0
-	for n < len(out) && out[n] != 0 {
-		n++
-	}
-	return string(out[:n]), nil
+	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		19, argonMemory, argonTime, argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key)), nil
 }
+
+// Verify checks a password against a PHC-encoded Argon2id hash using a
+// constant-time comparison. The decoder tolerates both padded and unpadded
+// base64 so hashes produced by different argon2 libraries verify correctly.
 func Verify(encoded, password string) bool {
-	c := C.CString(encoded)
-	defer C.free(unsafe.Pointer(c))
-	p := C.CBytes([]byte(password))
-	defer C.free(p)
-	return C.argon2id_verify(c, p, C.size_t(len(password))) == 0
+	salt, key, time, memory, threads, err := parsePHC(encoded)
+	if err != nil {
+		return false
+	}
+	got := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(key)))
+	return subtle.ConstantTimeCompare(got, key) == 1
+}
+
+func parsePHC(encoded string) (salt, key []byte, t, m uint32, p uint8, err error) {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 {
+		return nil, nil, 0, 0, 0, errors.New("malformed password hash")
+	}
+	if parts[1] != "argon2id" {
+		return nil, nil, 0, 0, 0, errors.New("unsupported hash algorithm")
+	}
+	if parts[2] != "v=19" {
+		return nil, nil, 0, 0, 0, errors.New("unsupported hash version")
+	}
+	// m=65536,t=3,p=1
+	params := strings.Split(parts[3], ",")
+	if len(params) != 3 {
+		return nil, nil, 0, 0, 0, errors.New("malformed hash parameters")
+	}
+	var mi, ti int
+	if _, e := fmt.Sscanf(params[0], "m=%d", &mi); e != nil {
+		return nil, nil, 0, 0, 0, errors.New("malformed memory parameter")
+	}
+	if _, e := fmt.Sscanf(params[1], "t=%d", &ti); e != nil {
+		return nil, nil, 0, 0, 0, errors.New("malformed iterations parameter")
+	}
+	var pi int
+	if _, e := fmt.Sscanf(params[2], "p=%d", &pi); e != nil {
+		return nil, nil, 0, 0, 0, errors.New("malformed parallelism parameter")
+	}
+	if mi <= 0 || ti <= 0 || pi <= 0 {
+		return nil, nil, 0, 0, 0, errors.New("invalid hash parameters")
+	}
+	salt, err = decodeB64(parts[4])
+	if err != nil {
+		return nil, nil, 0, 0, 0, errors.New("malformed salt")
+	}
+	key, err = decodeB64(parts[5])
+	if err != nil || len(key) < 16 {
+		return nil, nil, 0, 0, 0, errors.New("malformed hash")
+	}
+	return salt, key, uint32(ti), uint32(mi), uint8(pi), nil
+}
+
+// decodeB64 accepts standard base64 with or without padding.
+func decodeB64(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(s)
 }
