@@ -218,7 +218,7 @@ This is a living implementation plan. Update checkpoint status, evidence and fol
 - Behavioural equivalence for core monitoring/auth/analytics paths.
 - Migration/import story from SQLite where feasible.
 
-### CP20 - Retention and maintenance
+### CP20 - Retention and maintenance [COMPLETE]
 
 - Check-history retention/compaction.
 - Analytics raw-event retention.

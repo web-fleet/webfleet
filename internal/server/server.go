@@ -19,6 +19,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/fleet"
 	"github.com/web-fleet/webfleet/internal/incidents"
+	"github.com/web-fleet/webfleet/internal/maintenance"
 	"github.com/web-fleet/webfleet/internal/monitor"
 	"github.com/web-fleet/webfleet/internal/performance"
 	"github.com/web-fleet/webfleet/internal/sites"
@@ -30,24 +31,25 @@ import (
 var embedded embed.FS
 
 type Server struct {
-	cfg       config.Config
-	store     *store.Store
-	analytics *analytics.Service
-	audit     *audit.Service
-	auth      *auth.Service
-	sites     *sites.Service
-	monitor   *monitor.Service
-	incidents *incidents.Service
-	tls       *tlshealth.Service
-	dns       *dnsobs.Service
-	crawler   *crawler.Service
-	log       *slog.Logger
-	http      *http.Server
-	mux       *http.ServeMux
+	cfg         config.Config
+	store       *store.Store
+	analytics   *analytics.Service
+	audit       *audit.Service
+	auth        *auth.Service
+	sites       *sites.Service
+	monitor     *monitor.Service
+	maintenance *maintenance.Service
+	incidents   *incidents.Service
+	tls         *tlshealth.Service
+	dns         *dnsobs.Service
+	crawler     *crawler.Service
+	log         *slog.Logger
+	http        *http.Server
+	mux         *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, analytics: analytics.New(st), audit: audit.New(st), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux()}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -75,6 +77,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sites/{id}/analytics/summary", s.withSession(s.handleAnalyticsSummary, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/analytics/goals", s.withSession(s.handleAnalyticsGoals, false))
 	s.mux.HandleFunc("POST /api/sites/{id}/analytics/goals", s.withSession(s.handleCreateAnalyticsGoal, true))
+	s.mux.HandleFunc("GET /api/maintenance", s.withSession(s.handleMaintenance, false))
+	s.mux.HandleFunc("PUT /api/maintenance", s.withSession(s.handleMaintenanceUpdate, true))
+	s.mux.HandleFunc("POST /api/maintenance/run", s.withSession(s.handleMaintenanceRun, true))
 	s.mux.HandleFunc("GET /api/fleet", s.withSession(s.handleFleet, false))
 	s.mux.HandleFunc("GET /api/fleet/analytics", s.withSession(s.handleFleetAnalytics, false))
 	s.mux.HandleFunc("GET /api/sites/{id}/audit", s.withSession(s.handleAudit, false))
@@ -122,6 +127,32 @@ func (s *Server) handleAnalyticsEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	x, e := s.maintenance.Status()
+	if e != nil {
+		writeError(w, 500, "maintenance status unavailable")
+		return
+	}
+	writeJSON(w, 200, x)
+}
+func (s *Server) handleMaintenanceUpdate(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	var v maintenance.Settings
+	if !decodeJSON(w, r, &v) {
+		return
+	}
+	if e := s.maintenance.Set(v); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	if e := s.maintenance.Run(); e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleFleetAnalytics(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))

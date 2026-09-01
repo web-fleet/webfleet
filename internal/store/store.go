@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 15
+const schemaVersion = 16
 
 type migration struct {
 	version int
@@ -110,6 +110,10 @@ var migrations = []migration{
 	}},
 	{15, "analytics goals", []string{
 		`CREATE TABLE analytics_goals(id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES analytics_properties(id) ON DELETE CASCADE, name TEXT NOT NULL, event_kind TEXT NOT NULL, path_match TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(property_id,name));`,
+	}},
+	{16, "retention and maintenance", []string{
+		`CREATE TABLE maintenance_settings(id INTEGER PRIMARY KEY, check_days INTEGER NOT NULL DEFAULT 90, analytics_raw_days INTEGER NOT NULL DEFAULT 30, audit_days INTEGER NOT NULL DEFAULT 180, updated_at TEXT NOT NULL);`,
+		`INSERT INTO maintenance_settings(id,check_days,analytics_raw_days,audit_days,updated_at) VALUES(1,90,30,180,CURRENT_TIMESTAMP);`,
 	}},
 }
 
