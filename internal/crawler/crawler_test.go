@@ -253,3 +253,56 @@ func TestCrawlLinksPerPageBeyond200(t *testing.T) {
 		t.Fatalf("internal_links=%d, want >200 links discovered from one page", d.Run.InternalLinks)
 	}
 }
+
+func TestCrawlExcludesAssetsAndTemplateLiterals(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<a href="/style.css">css</a><a href="/asset.zip">zip</a><a href="/real">real</a><a href="$[item.url]">literal</a><a href="/docs/@pathto(">literal2</a>`)
+	})
+	mux.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		fmt.Fprint(w, "body{}")
+	})
+	mux.HandleFunc("/asset.zip", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		fmt.Fprint(w, "zip")
+	})
+	mux.HandleFunc("/real", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "real")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	u, _ := url.Parse(base)
+	site, _ := sites.New(st).Create(1, "x", base, 0)
+	d, e := NewForTests(st, netguard.Guard{Resolver: resolver{netip.MustParseAddr(u.Hostname())}, AllowPrivate: true}).CrawlSite(context.Background(), site.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, p := range d.Pages {
+		for _, bad := range []string{"/style.css", "/asset.zip", "$[", "@pathto("} {
+			if strings.Contains(p.URL, bad) {
+				t.Fatalf("asset/template-literal URL counted as a page: %s", p.URL)
+			}
+		}
+	}
+	// root + /real are the only pages; the asset and literal links are internal
+	// links but never crawled pages.
+	if d.Run.PagesCrawled != 2 {
+		t.Fatalf("pages_crawled=%d want 2 (root + /real)", d.Run.PagesCrawled)
+	}
+	if d.Run.PagesDiscovered != 2 {
+		t.Fatalf("pages_discovered=%d want 2", d.Run.PagesDiscovered)
+	}
+	if d.Run.InternalLinks < 3 {
+		t.Fatalf("internal_links=%d want >=3 (asset links still count as internal links; template literals are filtered)", d.Run.InternalLinks)
+	}
+}

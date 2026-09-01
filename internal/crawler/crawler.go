@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -138,6 +139,9 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 		if urls := s.loadSitemap(ctx, sm, root); len(urls) > 0 {
 			detail.Run.SitemapFound = true
 			for _, u := range urls {
+				if pu, perr := url.Parse(u); perr == nil && isAsset(pu) {
+					continue
+				}
 				if !known[u] {
 					known[u] = true
 					discovered++
@@ -166,6 +170,17 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 		if fr.err != nil {
 			page.Error = fr.err.Error()
 		}
+		isHTML := true
+		if ct := strings.ToLower(fr.header.Get("Content-Type")); ct != "" && !strings.Contains(ct, "text/html") {
+			isHTML = false
+		}
+		// Only HTML documents (or broken/errored responses) count as crawled
+		// pages; linked stylesheets, images, downloads and API endpoints are
+		// resources, not pages.
+		if !isHTML && fr.err == nil && fr.status < 400 {
+			_ = s.persistProgress(runID, detail, discovered)
+			continue
+		}
 		detail.Pages = append(detail.Pages, page)
 		_, _ = sqlite.Query(s.store.DB, `INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error) VALUES(?,?,?,?,?,?) RETURNING id`, runID, siteID, q.u, page.StatusCode, q.depth, page.Error)
 		if fr.err != nil || fr.status >= 400 {
@@ -173,7 +188,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 			_ = s.persistProgress(runID, detail, discovered)
 			continue
 		}
-		if !strings.Contains(strings.ToLower(fr.header.Get("Content-Type")), "text/html") && fr.header.Get("Content-Type") != "" {
+		if !isHTML {
 			_ = s.persistProgress(runID, detail, discovered)
 			continue
 		}
@@ -190,7 +205,7 @@ func (s *Service) CrawlSite(ctx context.Context, siteID int64) (Detail, error) {
 			if strings.EqualFold(tu.Hostname(), root.Hostname()) {
 				kind = "internal"
 				detail.Run.InternalLinks++
-				if !known[target] && q.depth < MaxDepth {
+				if !isAsset(tu) && !known[target] && q.depth < MaxDepth {
 					known[target] = true
 					discovered++
 					queue = append(queue, queued{u: target, depth: q.depth + 1})
@@ -335,6 +350,23 @@ func (s *Service) loadSitemap(ctx context.Context, raw string, root *url.URL) []
 	}
 	return out
 }
+
+// assetExtensions are URL suffixes that are almost never HTML pages. The
+// crawler avoids enqueueing them so pages_crawled/pages_discovered reflect
+// actual pages rather than every linked stylesheet/image/download.
+var assetExtensions = map[string]bool{"css": true, "js": true, "png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true, "svg": true, "ico": true, "zip": true, "tar": true, "gz": true, "7z": true, "pdf": true, "json": true, "xml": true, "md": true, "txt": true, "woff": true, "woff2": true, "ttf": true, "otf": true, "mp4": true, "mp3": true, "webm": true, "wasm": true, "map": true}
+
+func isAsset(u *url.URL) bool {
+	return assetExtensions[strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))]
+}
+
+// isTemplateLiteral detects documentation code-sample hrefs such as
+// href="$[item.url]" or @pathto(...) that resolve to real path strings but are
+// not actual links on the site.
+func isTemplateLiteral(raw string) bool {
+	return strings.ContainsAny(raw, " \t") || strings.Contains(raw, "$[") || strings.Contains(raw, "@pathto(") || strings.Contains(raw, "{{") || strings.Contains(raw, "{%")
+}
+
 func disallowed(rules []string, path string) bool {
 	for _, r := range rules {
 		if r != "/" && strings.HasPrefix(path, r) {
@@ -365,6 +397,9 @@ func extractLinks(body []byte, base string) []string {
 		}
 		u.Fragment = ""
 		x := u.String()
+		if isTemplateLiteral(x) {
+			continue
+		}
 		if !seen[x] {
 			seen[x] = true
 			out = append(out, x)
