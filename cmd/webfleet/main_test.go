@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +20,26 @@ func withStub(t *testing.T, stub func(serviceCommand) (string, error)) func(serv
 	execServiceCommand = stub
 	t.Cleanup(func() { execServiceCommand = old })
 	return old
+}
+
+// redirectUnitPath points the service unit path at a temp file so reinstall
+// preservation can be exercised without touching /etc/systemd.
+func redirectUnitPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	old := service.UnitPath
+	service.UnitPath = filepath.Join(dir, "webfleet.service")
+	t.Cleanup(func() { service.UnitPath = old })
+	return service.UnitPath
+}
+
+func parsedInstall(t *testing.T, args ...string) (serviceCommand, int) {
+	t.Helper()
+	var got serviceCommand
+	withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+	var out, errOut bytes.Buffer
+	code := runServiceIO(&out, &errOut, args)
+	return got, code
 }
 
 // unsetListenerEnv removes every listener-related variable so tests observe the
@@ -393,4 +414,121 @@ func TestRunServiceOutputWriters(t *testing.T) {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 	_ = io.Discard
+}
+
+func TestRunServiceBareReinstallPreservesExplicitListener(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	// Existing explicit unit on a custom port.
+	if err := os.WriteFile(path, []byte(service.UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7406")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, code := parsedInstall(t, "install")
+	if code != 0 {
+		t.Fatalf("bare reinstall exit %d", code)
+	}
+	if got.host != "127.0.0.1" || got.port != "7406" || got.listen != "" {
+		t.Fatalf("bare reinstall over explicit unit must preserve host/port, got %+v", got)
+	}
+}
+
+func TestRunServiceBareReinstallPreservesBootstrapListener(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	if err := os.WriteFile(path, []byte(service.Unit("/var/lib/webfleet", "127.0.0.1:8090")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, code := parsedInstall(t, "install")
+	if code != 0 {
+		t.Fatalf("bare reinstall exit %d", code)
+	}
+	if got.listen != "127.0.0.1:8090" || got.host != "" || got.port != "" {
+		t.Fatalf("bare reinstall over bootstrap unit must preserve the single listener, got %+v", got)
+	}
+}
+
+func TestRunServiceBareFreshInstallIsExplicitDefault(t *testing.T) {
+	unsetListenerEnv(t)
+	redirectUnitPath(t) // no unit file written -> fresh install
+	got, code := parsedInstall(t, "install")
+	if code != 0 {
+		t.Fatalf("bare install exit %d", code)
+	}
+	if got.host != "127.0.0.1" || got.port != "7336" || got.listen != "" {
+		t.Fatalf("fresh bare install must be explicit 127.0.0.1:7336, got %+v", got)
+	}
+}
+
+func TestRunServiceExplicitOverrideChangesExistingListener(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	if err := os.WriteFile(path, []byte(service.UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7406")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit --port must be authoritative over the existing explicit unit.
+	got, code := parsedInstall(t, "install", "--port", "9000")
+	if code != 0 {
+		t.Fatalf("override reinstall exit %d", code)
+	}
+	if got.host != "127.0.0.1" || got.port != "9000" || got.listen != "" {
+		t.Fatalf("--port override must win over existing listener, got %+v", got)
+	}
+}
+
+func TestRunServiceExplicitOverrideChangesBootstrapListener(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	if err := os.WriteFile(path, []byte(service.Unit("/var/lib/webfleet", "127.0.0.1:8090")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, code := parsedInstall(t, "install", "--host", "0.0.0.0", "--port", "9000")
+	if code != 0 {
+		t.Fatalf("override reinstall exit %d", code)
+	}
+	if got.host != "0.0.0.0" || got.port != "9000" || got.listen != "" {
+		t.Fatalf("--host/--port override must win over existing bootstrap listener, got %+v", got)
+	}
+}
+
+func TestRunServiceLegacyListenChangesExistingToBootstrap(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	if err := os.WriteFile(path, []byte(service.UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7406")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit legacy --listen must be authoritative and switch to bootstrap.
+	got, code := parsedInstall(t, "install", "--listen", "127.0.0.1:8090")
+	if code != 0 {
+		t.Fatalf("legacy override reinstall exit %d", code)
+	}
+	if got.listen != "127.0.0.1:8090" || got.host != "" || got.port != "" {
+		t.Fatalf("--listen override must win and be bootstrap, got %+v", got)
+	}
+}
+
+func TestRunServiceBareReinstallMalformedUnitFailsClosed(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	// A foreign/unmanaged unit must fail closed on bare reinstall rather than
+	// silently defaulting to 7336.
+	if err := os.WriteFile(path, []byte("[Unit]\nDescription=something else\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, code := parsedInstall(t, "install")
+	if code == 0 {
+		t.Fatal("bare reinstall over a foreign unit must fail closed")
+	}
+}
+
+func TestRunServiceBareReinstallModifiedUnitFailsClosed(t *testing.T) {
+	unsetListenerEnv(t)
+	path := redirectUnitPath(t)
+	unit := service.UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7406")
+	if err := os.WriteFile(path, []byte(strings.Replace(unit, "Restart=on-failure", "Restart=always", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, code := parsedInstall(t, "install")
+	if code == 0 {
+		t.Fatal("bare reinstall over a modified unit must fail closed")
+	}
 }

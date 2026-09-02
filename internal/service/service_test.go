@@ -2461,3 +2461,47 @@ func splitHostPort(t *testing.T, addr string) (string, string) {
 	}
 	return h, p
 }
+
+func TestBareReinstallLifecyclePreservesNonDefaultPort(t *testing.T) {
+	r := setupService(t)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	exe := BinaryPath
+	// Fresh explicit install on a non-default port.
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7406"); e != nil {
+		t.Fatal(e)
+	}
+	body, _ := os.ReadFile(UnitPath)
+	meta, err := readManagedUnit(string(body))
+	if err != nil {
+		t.Fatalf("installed unit should validate: %v", err)
+	}
+	if meta.listen != "127.0.0.1:7406" || meta.listenMode != modeExplicit {
+		t.Fatalf("recorded listener = %q mode=%q, want 127.0.0.1:7406 explicit", meta.listen, meta.listenMode)
+	}
+	if got := effectiveListen(meta); got != "127.0.0.1:7406" {
+		t.Fatalf("status/health effective listener = %q, want 127.0.0.1:7406", got)
+	}
+	// InstalledListener reports the recorded listener a bare reinstall preserves.
+	ln, explicit, exists, err := InstalledListener()
+	if err != nil || !exists || !explicit || ln != "127.0.0.1:7406" {
+		t.Fatalf("InstalledListener = %q explicit=%v exists=%v err=%v", ln, explicit, exists, err)
+	}
+	// A bare reinstall that preserves the recorded listener produces a
+	// byte-identical unit (the genuine no-op path), so status and health remain
+	// on the non-default port.
+	setState(r, "enabled", "active")
+	r.calls = nil
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7406"); e != nil {
+		t.Fatalf("preserving reinstall: %v", e)
+	}
+	after, _ := os.ReadFile(UnitPath)
+	if string(after) != string(body) {
+		t.Fatal("preserving bare reinstall changed the unit")
+	}
+	meta2, _ := readManagedUnit(string(after))
+	if got := effectiveListen(meta2); got != "127.0.0.1:7406" {
+		t.Fatalf("post-reinstall effective listener = %q, want 127.0.0.1:7406", got)
+	}
+}

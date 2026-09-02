@@ -266,6 +266,28 @@ func managedUnit(path string) bool {
 	return strings.Contains(string(b), unitMarker)
 }
 
+// InstalledListener returns the verified listener recorded by the currently
+// installed managed unit so a bare reinstall can preserve it. explicit reports
+// whether the existing unit uses the authoritative --host/--port form; false
+// means a legacy/bootstrap single-address unit. exists is false when no unit is
+// installed. An existing foreign, malformed or modified unit is returned as an
+// error so a bare reinstall fails closed rather than silently changing an
+// unverified installation.
+func InstalledListener() (listen string, explicit, exists bool, err error) {
+	b, err := os.ReadFile(UnitPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, false, nil
+		}
+		return "", false, false, err
+	}
+	meta, err := readManagedUnit(string(b))
+	if err != nil {
+		return "", false, true, err
+	}
+	return meta.listen, meta.listenMode == modeExplicit, true, nil
+}
+
 // requireManaged refuses to operate on a unit that is not installed or not
 // a webfleet-managed unit, so the CLI never touches an unrelated system service.
 func requireManaged(verb string) error {

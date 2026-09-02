@@ -198,6 +198,26 @@ func listenerOverrideSelected(fs *flag.FlagSet) bool {
 	return false
 }
 
+// listenerSelectionActive reports whether the user supplied any explicit
+// listener selection, through CLI flags or the WEBFLEET_HOST/WEBFLEET_PORT/
+// WEBFLEET_LISTEN environment variables. A bare invocation with none of these
+// is the reinstall-preservation path.
+func listenerSelectionActive(hostSet, portSet, listenSet bool) bool {
+	if hostSet || portSet || listenSet {
+		return true
+	}
+	if _, ok := os.LookupEnv("WEBFLEET_HOST"); ok {
+		return true
+	}
+	if _, ok := os.LookupEnv("WEBFLEET_PORT"); ok {
+		return true
+	}
+	if _, ok := os.LookupEnv("WEBFLEET_LISTEN"); ok {
+		return true
+	}
+	return false
+}
+
 // serviceCommand is the fully parsed `webfleet service <verb>` invocation.
 type serviceCommand struct {
 	verb     string
@@ -342,6 +362,27 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 		addr, legacy, err := resolveServiceInstall(*host, *port, *listen, flagProvided(fs, "host"), flagProvided(fs, "port"), flagProvided(fs, "listen"))
 		if err != nil {
 			return cmd, fmt.Errorf("install: %v", err)
+		}
+		// A bare reinstall with no explicit listener selection preserves an
+		// existing valid managed unit's recorded listener and form, so rerunning
+		// `webfleet service install` never silently changes a custom or legacy
+		// installation. A foreign/malformed/modified existing unit fails closed.
+		if !listenerSelectionActive(flagProvided(fs, "host"), flagProvided(fs, "port"), flagProvided(fs, "listen")) {
+			existingListen, existingExplicit, exists, ierr := service.InstalledListener()
+			if ierr != nil {
+				return cmd, fmt.Errorf("install: existing unit is not valid: %v", ierr)
+			}
+			if exists {
+				if existingExplicit {
+					cmd.host, cmd.port, ierr = net.SplitHostPort(existingListen)
+					if ierr != nil {
+						return cmd, fmt.Errorf("install: existing unit has an invalid recorded listener %q: %v", existingListen, ierr)
+					}
+					return cmd, nil
+				}
+				cmd.listen = existingListen
+				return cmd, nil
+			}
 		}
 		if legacy {
 			cmd.listen = addr
