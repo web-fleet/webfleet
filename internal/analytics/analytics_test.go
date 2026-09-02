@@ -1,6 +1,9 @@
 package analytics
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -322,5 +325,80 @@ func TestCountriesBreakdownDistinctVisitors(t *testing.T) {
 	}
 	if ct.Rows[0].Country != "AU" || ct.Rows[0].Visitors != 2 {
 		t.Fatalf("AU visitors=%d want 2 (distinct visitor_keys)", ct.Rows[0].Visitors)
+	}
+}
+
+// TestVisitorIdentityIsPeriodStableAcrossDays proves the weekly-bucket
+// pseudonym keeps one visitor as one visitor across days within the reporting
+// window (compatible with the headline and country COUNT(DISTINCT)), rotates
+// at the privacy boundary, and never persists the raw IP.
+func mustBucketIndex(b string) int {
+	var idx int
+	_, _ = fmt.Sscanf(b, "W%07d", &idx)
+	return idx
+}
+
+func TestVisitorIdentityIsPeriodStableAcrossDays(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	sqlite.Exec(st.DB, `INSERT INTO sites(organization_id,name,primary_url,created_at,updated_at) VALUES(1,'x','https://example.com',?,?)`, store.Now(), store.Now())
+	s := New(st)
+	p, _ := s.Enable(1)
+	saltRows, _ := sqlite.Query(st.DB, `SELECT value FROM app_settings WHERE key='analytics_visitor_salt'`)
+	if len(saltRows) != 1 {
+		t.Fatal("visitor salt missing")
+	}
+	salt := saltRows[0]["value"].Text
+	key := func(bucket, ip string) string {
+		mac := hmac.New(sha256.New, []byte(salt))
+		mac.Write([]byte(bucket + "|" + ip))
+		return hex.EncodeToString(mac.Sum(nil)[:12])
+	}
+	// Two days inside the same 7-day bucket within the last-7-days window.
+	b1 := weeklyBucket(time.Now().UTC())
+	day1 := weeklyEpoch.Add(time.Duration(mustBucketIndex(b1)) * 7 * 24 * time.Hour)
+	day2 := day1.Add(24 * time.Hour)
+	b2 := weeklyBucket(day2)
+	if b1 != b2 {
+		t.Fatalf("test dates span weekly buckets %s != %s", b1, b2)
+	}
+	for _, ev := range []struct{ ip, path, at, key string }{
+		{"203.0.113.10", "/a", day1.Format(time.RFC3339), key(b1, "203.0.113.10")},
+		{"203.0.113.10", "/b", day2.Format(time.RFC3339), key(b2, "203.0.113.10")},
+		{"198.51.100.20", "/a", day1.Format(time.RFC3339), key(b1, "198.51.100.20")},
+	} {
+		_ = sqlite.Exec(st.DB, `INSERT INTO analytics_events(property_id,kind,path,visitor_key,occurred_at) VALUES(?,'pageview',?,?,?)`, p.ID, ev.path, ev.key, ev.at)
+	}
+	sum, e := s.Summary(1, 7)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if sum.Visitors != 2 {
+		t.Fatalf("headline visitors=%d want 2 (same IP across two days counts once)", sum.Visitors)
+	}
+	if sum.Pageviews != 3 {
+		t.Fatalf("pageviews=%d want 3", sum.Pageviews)
+	}
+	// Rotates at the privacy boundary: a date in the next bucket differs.
+	day3 := day1.Add(8 * 24 * time.Hour)
+	if weeklyBucket(day3) == b1 {
+		t.Fatal("weekly bucket did not advance")
+	}
+	if key(weeklyBucket(day3), "203.0.113.10") == key(b1, "203.0.113.10") {
+		t.Fatal("visitor identity did not rotate at the privacy boundary")
+	}
+	// Raw IP absent from both analytics_events and analytics_daily_visitors.
+	for _, table := range []string{"analytics_events", "analytics_daily_visitors"} {
+		r, _ := sqlite.Query(st.DB, `SELECT * FROM `+table)
+		for _, row := range r {
+			for _, needle := range []string{"203.0.113.10", "198.51.100.20"} {
+				if strings.Contains(fmt.Sprintf("%+v", row), needle) {
+					t.Fatalf("raw IP %s present in %s", needle, table)
+				}
+			}
+		}
 	}
 }

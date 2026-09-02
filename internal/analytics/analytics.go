@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/web-fleet/webfleet/internal/geo"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
@@ -141,14 +142,17 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	if !s.validLim.Allow("ip:" + ip + ":pid:" + strconv.FormatInt(pid, 10)) {
 		return errors.New("analytics rate limited")
 	}
-	day := time.Now().UTC().Format("2006-01-02")
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	bucket := weeklyBucket(now)
 	// Anonymous visitor identity: HMAC-SHA256 keyed by the per-instance secret
-	// over (day, normalized source IP). The day component rotates the key so the
-	// identifier is never a permanent cross-period tracking identity; the raw IP
-	// is never persisted. The user agent is deliberately not part of the
-	// identity so a changed browser/UA does not fragment a visitor.
+	// over (fixed 7-day analytics bucket, normalized source IP). The identity is
+	// stable within the reporting bucket so a multi-day COUNT(DISTINCT) is a
+	// true unique-visitor estimate for that window, and it rotates at the weekly
+	// boundary so it is never a permanent tracking identity. The raw IP is never
+	// persisted and the user agent is deliberately not part of the identity.
 	mac := hmac.New(sha256.New, []byte(s.salt))
-	mac.Write([]byte(day + "|" + normalizedIP(ip)))
+	mac.Write([]byte(bucket + "|" + normalizedIP(ip)))
 	visitor := hex.EncodeToString(mac.Sum(nil)[:12])
 	class := clientClass(ua)
 	if class == "bot" {
@@ -230,6 +234,19 @@ func (l *limiter) Allow(key string) bool {
 
 // normalizedIP canonicalizes a source IP string so the same address always
 // produces the same anonymous visitor identifier regardless of notation.
+// weeklyBucket returns a stable 7-day analytics bucket (aligned to a fixed
+// UTC epoch) used as the reporting-period pseudonym input. The bucket is
+// documented in the UI: the anonymous visitor identity is stable within it and
+// rotates at the weekly boundary, so a "last 7 days" report counts distinct
+// identities in its window (which may span a bucket boundary; a visitor
+// crossing the boundary is counted once per bucket - a documented approximation
+// of a 7-day unique-visitor estimate).
+var weeklyEpoch = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func weeklyBucket(t time.Time) string {
+	return fmt.Sprintf("W%07d", int(t.UTC().Sub(weeklyEpoch)/(7*24*time.Hour)))
+}
+
 func normalizedIP(ip string) string {
 	if a, e := netip.ParseAddr(ip); e == nil {
 		return a.String()
@@ -288,11 +305,17 @@ func (s *Service) Summary(siteID int64, days int) (Summary, error) {
 		return Summary{}, e
 	}
 	out := Summary{Daily: []Daily{}, TopPages: []map[string]any{}, TopSources: []map[string]any{}}
+	// Headline totals are derived from the event table over the reporting
+	// window, using the same weekly-bucket pseudonym as the country breakdown
+	// so all three metrics share compatible visitor semantics.
+	if r, e := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT visitor_key) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=?`, p.ID, since); e == nil && len(r) > 0 {
+		out.Visitors = r[0]["n"].Int64
+	}
+	if r, e := sqlite.Query(s.st.DB, `SELECT COUNT(*) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=?`, p.ID, since); e == nil && len(r) > 0 {
+		out.Pageviews = r[0]["n"].Int64
+	}
 	for _, r := range rows {
-		d := Daily{r["day"].Text, r["pageviews"].Int64, r["visitors"].Int64}
-		out.Daily = append(out.Daily, d)
-		out.Pageviews += d.Pageviews
-		out.Visitors += d.Visitors
+		out.Daily = append(out.Daily, Daily{r["day"].Text, r["pageviews"].Int64, r["visitors"].Int64})
 	}
 	pages, _ := sqlite.Query(s.st.DB, `SELECT path,COUNT(*) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? GROUP BY path ORDER BY n DESC LIMIT 10`, p.ID, since)
 	for _, r := range pages {
@@ -434,11 +457,12 @@ func (s *Service) Pages(siteID int64, days, page, pageSize int) (PageViews, erro
 }
 
 type Countries struct {
-	Page     int   `json:"page"`
-	PageSize int   `json:"page_size"`
-	Total    int64 `json:"total"`
-	Pages    int   `json:"pages"`
-	Rows     []struct {
+	Available bool  `json:"available"`
+	Page      int   `json:"page"`
+	PageSize  int   `json:"page_size"`
+	Total     int64 `json:"total"`
+	Pages     int   `json:"pages"`
+	Rows      []struct {
 		Country  string `json:"country"`
 		Visitors int64  `json:"visitors"`
 	} `json:"rows"`
@@ -466,7 +490,7 @@ func (s *Service) Countries(siteID int64, days, page, pageSize int) (Countries, 
 	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT country) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND country<>''`, p.ID, since); qe == nil && len(r) > 0 {
 		total = r[0]["n"].Int64
 	}
-	out := Countries{Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
+	out := Countries{Available: geo.Available(), Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
 		Country  string `json:"country"`
 		Visitors int64  `json:"visitors"`
 	}{}}

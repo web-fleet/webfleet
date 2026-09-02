@@ -15,6 +15,12 @@ import "net/netip"
 // LookupCountry returns the two-letter ISO country code (e.g. "AU") for a
 // visitor source IP, or "" when it cannot be determined. Private/loopback
 // addresses always resolve to "".
+// Available reports whether a local GeoIP dataset is configured so
+// LookupCountry can resolve countries. It is false until an offline dataset is
+// wired in; the UI uses this to state that country data is unavailable rather
+// than presenting an always-empty report.
+func Available() bool { return false }
+
 func LookupCountry(ip string) string {
 	a, err := netip.ParseAddr(ip)
 	if err != nil {
