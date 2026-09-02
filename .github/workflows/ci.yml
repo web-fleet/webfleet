@@ -115,7 +115,8 @@ jobs:
           sudo /tmp/wf service install
           wait_healthz
           # start/stop/restart/status/enable/disable family
-          sudo /tmp/wf service status | grep -E 'active: *active' | grep -E 'enabled: *enabled'
+          sudo /tmp/wf service status | grep -E 'active: *active'
+          sudo /tmp/wf service status | grep -E 'enabled: *enabled'
           /tmp/wf service status | grep -E 'health:  ok'   # status is read-only, no sudo
           sudo /tmp/wf service stop
           sudo /tmp/wf service stop   # repeated stop is safe
