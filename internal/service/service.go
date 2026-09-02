@@ -615,7 +615,7 @@ func Status(out io.Writer) error {
 		fmt.Fprintln(out, "health:  not running")
 		return fmt.Errorf("webfleet.service is %q; expected active", strings.TrimSpace(active))
 	}
-	if err := healthCheck("http://" + listen + "/healthz"); err != nil {
+	if err := healthCheckFunc("http://" + listen + "/healthz"); err != nil {
 		fmt.Fprintf(out, "health:  unreachable (%v)\n", err)
 		return fmt.Errorf("service is active but its health check failed: %v", err)
 	}
@@ -623,7 +623,9 @@ func Status(out io.Writer) error {
 	return nil
 }
 
-func healthCheck(url string) error {
+var healthCheckFunc = func(url string) error { return healthCheckReal(url) }
+
+func healthCheckReal(url string) error {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -694,15 +696,26 @@ func Update(artifact, want string) error {
 	if e := Verify(artifact, want); e != nil {
 		return e
 	}
-	// Snapshot the prior active state so the update preserves the operator's
-	// operational state: a deliberately stopped service stays stopped.
-	priorActive, _ := unitStateWord("is-active")
+	// Transactional prior-state capture: read the current active state and
+	// persist the rollback marker BEFORE touching the binary. A failure to
+	// determine or record the state aborts the update so rollback can never
+	// later guess.
+	priorActive, err := unitStateWord("is-active")
+	if err != nil {
+		return fmt.Errorf("update: cannot determine current service state: %w", err)
+	}
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("update: unexpected service state %q; refusing to update", priorActive)
+	}
 	wasActive := priorActive == "active"
 	if _, e := os.Stat(BinaryPath); e == nil {
 		if e := copyFile(BinaryPath, BinaryPath+".rollback", 0o755); e != nil {
 			return e
 		}
-		_ = os.WriteFile(BinaryPath+".prior-active", []byte(priorActive), 0o600)
+		if e := os.WriteFile(BinaryPath+".prior-active", []byte(priorActive), 0o600); e != nil {
+			_ = os.Remove(BinaryPath + ".rollback")
+			return fmt.Errorf("update: cannot record rollback state: %w", e)
+		}
 	}
 	if e := copyFile(artifact, BinaryPath, 0o755); e != nil {
 		return e
@@ -711,16 +724,57 @@ func Update(artifact, want string) error {
 		// Preserve the stopped state: install the new binary, do not start it.
 		return nil
 	}
+	// Verify real activation/health after the restart: a zero exit from
+	// `restart` does not prove the process stayed alive.
 	if out, code, err := systemctl("restart", "webfleet.service"); err != nil || code != 0 {
-		// Restore the old binary and the prior active state on a failed activation.
-		_ = systemctlSuccess("stop", "webfleet.service")
-		if e := copyFile(BinaryPath+".rollback", BinaryPath, 0o755); e == nil {
-			_ = systemctlSuccess("restart", "webfleet.service")
-		}
-		_ = os.Remove(BinaryPath + ".prior-active")
+		restoreAfterFailedUpdate()
 		return fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
 	}
+	if e := verifyActiveAndHealthy(); e != nil {
+		restoreAfterFailedUpdate()
+		return fmt.Errorf("update: new binary failed to become healthy: %w", e)
+	}
+	_ = os.Remove(BinaryPath + ".prior-active")
 	return nil
+}
+
+var healthWindow = 30 * time.Second
+
+// verifyActiveAndHealthy polls a bounded window for the service to be active
+// and its healthz endpoint to return 200.
+func verifyActiveAndHealthy() error {
+	listen := DefaultListen
+	if b, e := os.ReadFile(UnitPath); e == nil {
+		if l := unitEnv(string(b), "WEBFLEET_LISTEN"); l != "" {
+			listen = l
+		}
+	}
+	deadline := time.Now().Add(healthWindow)
+	for time.Now().Before(deadline) {
+		active, _ := unitStateWord("is-active")
+		if strings.TrimSpace(active) == "active" {
+			if err := healthCheckFunc("http://" + listen + "/healthz"); err == nil {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("service did not become active and healthy within %s", healthWindow)
+}
+
+// restoreAfterFailedUpdate stops the failed/new service, restores the old
+// binary and re-activates it (best-effort, matching the originally active state).
+func restoreAfterFailedUpdate() {
+	priorActive := "active"
+	if b, e := os.ReadFile(BinaryPath + ".prior-active"); e == nil {
+		priorActive = strings.TrimSpace(string(b))
+	}
+	_ = systemctlSuccess("stop", "webfleet.service")
+	_ = copyFile(BinaryPath+".rollback", BinaryPath, 0o755)
+	_ = os.Remove(BinaryPath + ".prior-active")
+	if priorActive == "active" {
+		_ = systemctlSuccess("restart", "webfleet.service")
+	}
 }
 
 func Rollback() error {
@@ -736,11 +790,15 @@ func Rollback() error {
 	if _, e := os.Stat(BinaryPath + ".rollback"); e != nil {
 		return errors.New("no rollback binary available")
 	}
-	// Restore the operational state that existed before the update: read the
-	// persisted prior active state and only start the service if it was running.
-	priorActive := "active"
-	if b, e := os.ReadFile(BinaryPath + ".prior-active"); e == nil {
-		priorActive = strings.TrimSpace(string(b))
+	// Fail closed: the prior-active marker must exist and be valid. A missing
+	// marker is a degraded/legacy condition, not a signal to default to active.
+	b, err := os.ReadFile(BinaryPath + ".prior-active")
+	if err != nil {
+		return fmt.Errorf("rollback: no prior-state marker; refusing to guess the service state")
+	}
+	priorActive := strings.TrimSpace(string(b))
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("rollback: invalid prior-state marker %q", priorActive)
 	}
 	wasActive := priorActive == "active"
 	cur := BinaryPath + ".failed"
@@ -754,9 +812,11 @@ func Rollback() error {
 	}
 	_ = os.Remove(BinaryPath + ".prior-active")
 	if !wasActive {
-		// Preserve the stopped state: restore the old binary without starting it.
 		return nil
 	}
-	return systemctlSuccess("restart", "webfleet.service")
+	if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
+		return e
+	}
+	return verifyActiveAndHealthy()
 }
 func Executable() string { p, _ := os.Executable(); p, _ = filepath.Abs(p); return p }

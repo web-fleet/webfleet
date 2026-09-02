@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner records systemctl/journalctl invocations and returns scripted
@@ -49,6 +51,7 @@ func setupService(t *testing.T) *fakeRunner {
 	oldUnit, oldBin := UnitPath, BinaryPath
 	oldRoot, oldAccount, oldChown := isRoot, ensureAccount, chownData
 	oldRunner := defaultRunner
+	oldHealth := healthWindow
 	UnitPath = filepath.Join(dir, "webfleet.service")
 	BinaryPath = filepath.Join(dir, "webfleet")
 	os.WriteFile(BinaryPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -62,9 +65,26 @@ func setupService(t *testing.T) *fakeRunner {
 		UnitPath, BinaryPath = oldUnit, oldBin
 		isRoot, ensureAccount, chownData = oldRoot, oldAccount, oldChown
 		mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+		healthWindow = oldHealth
+		healthCheckFunc = func(url string) error { return healthCheckReal(url) }
 		defaultRunner = oldRunner
 	})
 	return r
+}
+
+// prepareUpdate sets up the fake state (is-active), the prior-state marker, and
+// a healthy health-check stub so update/rollback proceed on their normal path.
+func prepareUpdate(r *fakeRunner, active string, healthOK bool) {
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: active, code: 0}
+	old := healthCheckFunc
+	healthCheckFunc = func(url string) error {
+		if !healthOK {
+			return fmt.Errorf("health failed")
+		}
+		return nil
+	}
+	_ = old
+	_ = os.WriteFile(BinaryPath+".prior-active", []byte(active), 0o600)
 }
 
 func installManagedUnit(t *testing.T) {
@@ -431,6 +451,7 @@ func TestUpdatePreservesActiveState(t *testing.T) {
 	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 	// Active service -> update restarts it.
 	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
 	r.script["systemctl restart webfleet.service"] = fakeResult{}
 	if e := Update(exe, fakeSHA(exe)); e != nil {
 		t.Fatal(e)
@@ -441,6 +462,7 @@ func TestUpdatePreservesActiveState(t *testing.T) {
 	// Stopped service -> update installs the binary and leaves it stopped.
 	r.log = nil
 	setState(r, "enabled", "inactive")
+	prepareUpdate(r, "inactive", true)
 	if e := Update(exe, fakeSHA(exe)); e != nil {
 		t.Fatal(e)
 	}
@@ -456,6 +478,7 @@ func TestUpdateFailedActivationRestoresOldBinaryAndActive(t *testing.T) {
 	installManagedUnit(t)
 	oldBin := mustRead(t, BinaryPath)
 	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
 	exe := filepath.Join(t.TempDir(), "wf2")
 	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 	r.script["systemctl restart webfleet.service"] = fakeResult{out: "activation failed", code: 1}
@@ -478,6 +501,7 @@ func TestRollbackRestoresStoppedStateWithoutStarting(t *testing.T) {
 	oldBin := mustRead(t, BinaryPath)
 	// Prior stopped service: update keeps it stopped (no start).
 	setState(r, "enabled", "inactive")
+	prepareUpdate(r, "inactive", true)
 	exe := filepath.Join(t.TempDir(), "wf2")
 	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 	if e := Update(exe, fakeSHA(exe)); e != nil {
@@ -504,6 +528,7 @@ func TestRollbackRestoresRunningState(t *testing.T) {
 	installManagedUnit(t)
 	// Prior active service: update restarts (active), rollback restarts too.
 	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
 	exe := filepath.Join(t.TempDir(), "wf2")
 	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 	r.script["systemctl restart webfleet.service"] = fakeResult{}
@@ -511,6 +536,7 @@ func TestRollbackRestoresRunningState(t *testing.T) {
 		t.Fatal(e)
 	}
 	r.log = nil
+	os.WriteFile(BinaryPath+".prior-active", []byte("active"), 0o600)
 	if e := Rollback(); e != nil {
 		t.Fatal(e)
 	}
@@ -523,4 +549,75 @@ func TestRollbackRestoresRunningState(t *testing.T) {
 			t.Fatalf("update/rollback changed enablement: %s", call)
 		}
 	}
+}
+
+func TestUpdateVerifiesHealthNotJustRestartExit(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	// restart exits 0 but the service never becomes active/healthy -> update
+	// must fail and restore the old binary.
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", false) // health never OK
+	healthWindow = 1 * time.Second
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("update succeeded although the new binary never became healthy")
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("unhealthy update did not restore the old binary")
+	}
+}
+
+func TestUpdateActiveStateQueryFailureAborts(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	// Failure to query the current active state -> abort before binary mutation.
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: "", code: 1, err: fmt.Errorf("systemctl is-active failed")}
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("update proceeded when the active state could not be determined")
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("state-query failure still mutated the binary")
+	}
+}
+
+func TestUpdatePriorStateMarkerWriteFailureAborts(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	setState(r, "enabled", "inactive")
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: "inactive", code: 0}
+	// Make the marker write fail by creating a directory at that path.
+	os.MkdirAll(BinaryPath+".prior-active", 0o700)
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("update proceeded when the rollback marker could not be written")
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("marker-write failure still mutated the binary")
+	}
+}
+
+func TestRollbackFailClosedWithoutMarker(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	// A rollback binary exists but no prior-state marker -> rollback must
+	// refuse rather than defaulting to active.
+	os.WriteFile(BinaryPath+".rollback", []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	os.Remove(BinaryPath + ".prior-active")
+	if e := Rollback(); e == nil {
+		t.Fatal("rollback defaulted to active without a prior-state marker")
+	}
+	_ = r
 }
