@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,10 +175,24 @@ func TestBrowserCannotReachLoopbackDirectly(t *testing.T) {
 // TestBrowserTimeoutKillsProcess proves a hung target cannot hold an audit
 // beyond the configured timeout, and that cancellation is not silently
 // accepted as a successful audit.
+// fakeHangingBrowser returns an executable that never exits on its own, so the
+// timeout-kill path is exercised deterministically. Real Chromium with
+// --dump-dom can exit 0 with an error DOM before the timeout on a loaded -race
+// runner, which made the previous real-browser version flaky; the real browser
+// path remains covered by TestBrowserTrafficFlowsThroughGuardedProxy.
+func fakeHangingBrowser(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "browser")
+	if e := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 1000\n"), 0o755); e != nil {
+		t.Fatal(e)
+	}
+	return bin
+}
+
 func TestBrowserTimeoutKillsProcess(t *testing.T) {
-	bin := findBrowser(t)
-	// The fixture accepts the connection and never responds, so the browser
-	// would hang without the timeout.
+	// The fixture browser accepts the connection and never responds, so a real
+	// browser would hang without the timeout; here the fake browser hangs
+	// unconditionally, guaranteeing the timeout path fires.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +209,7 @@ func TestBrowserTimeoutKillsProcess(t *testing.T) {
 	}()
 	port := strings.Split(ln.Addr().String(), ":")[1]
 	runner := BrowserRunner{
-		Binary:  bin,
+		Binary:  fakeHangingBrowser(t),
 		Sandbox: testSandbox(),
 		Timeout: 3 * time.Second,
 		guard:   newTestGuard(true, mapResolver{"hang.test": {mustAddr("127.0.0.1")}}),
