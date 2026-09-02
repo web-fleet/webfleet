@@ -22,19 +22,20 @@ const geoFixtureCSV = `ip_start,ip_end,country
 2001:db8::,2001:db8::ffff:ffff,DE
 `
 
-func seedGeo(dir, url string, stale bool) error {
+func seedGeo(dir, url string, stale bool) (string, error) {
 	m := geo.NewManager(dir, url)
 	if e := m.EnsureCurrent(context.Background()); e != nil {
-		return e
+		return "", e
 	}
 	if stale {
 		upd := filepath.Join(dir, "geoip", ".updated")
 		t := time.Now().UTC().AddDate(0, 0, -31).Format(time.RFC3339)
 		if e := os.WriteFile(upd, []byte(t), 0o600); e != nil {
-			return e
+			return "", e
 		}
+		return t, nil
 	}
-	return nil
+	return m.LastUpdated(), nil
 }
 
 func geoServer(t *testing.T, dir, url string, auto bool, counting *atomic.Int64) *Server {
@@ -56,18 +57,19 @@ func TestServerGeoAutoUpdateRefreshesStaleDatabase(t *testing.T) {
 	}))
 	defer upstream.Close()
 	dir := t.TempDir()
-	if e := seedGeo(dir, upstream.URL, true); e != nil {
+	seeded, e := seedGeo(dir, upstream.URL, true)
+	if e != nil {
 		t.Fatal(e)
 	}
 	reqs.Store(0)
 	s := geoServer(t, dir, upstream.URL, true, &reqs)
-	staleUpd := time.Now().UTC().AddDate(0, 0, -31).Format(time.RFC3339)
 	// The production startup path must refresh the stale database: it issues a
-	// download request and activates the new database with an advanced timestamp.
+	// download request and activates the new database with an advanced timestamp
+	// that differs from the exact seeded value.
 	done := false
 	for i := 0; i < 50 && !done; i++ {
 		time.Sleep(100 * time.Millisecond)
-		if reqs.Load() > 0 && s.geo.DB() != nil && s.geo.LastUpdated() != staleUpd {
+		if reqs.Load() > 0 && s.geo.DB() != nil && s.geo.LastUpdated() != seeded {
 			done = true
 		}
 	}
@@ -87,7 +89,7 @@ func TestServerGeoAutoUpdateFreshIsNoNetwork(t *testing.T) {
 	}))
 	defer upstream.Close()
 	dir := t.TempDir()
-	if e := seedGeo(dir, upstream.URL, false); e != nil {
+	if _, e := seedGeo(dir, upstream.URL, false); e != nil {
 		t.Fatal(e)
 	}
 	reqs.Store(0)
@@ -106,7 +108,7 @@ func TestServerGeoAutoUpdateDisabledIsNoNetwork(t *testing.T) {
 	}))
 	defer upstream.Close()
 	dir := t.TempDir()
-	if e := seedGeo(dir, upstream.URL, true); e != nil {
+	if _, e := seedGeo(dir, upstream.URL, true); e != nil {
 		t.Fatal(e)
 	}
 	reqs.Store(0)
@@ -130,13 +132,14 @@ func TestServerGeoStaleRefreshFailureRetainsPrevious(t *testing.T) {
 	}))
 	defer broken.Close()
 	dir := t.TempDir()
-	if e := seedGeo(dir, valid.URL, true); e != nil {
+	seeded, e := seedGeo(dir, valid.URL, true)
+	if e != nil {
 		t.Fatal(e)
 	}
 	reqs.Store(0)
 	s := geoServer(t, dir, broken.URL, true, &reqs)
-	staleUpd := time.Now().UTC().AddDate(0, 0, -31).Format(time.RFC3339)
-	// The refresh attempt must be made, then fail and retain the old database.
+	// The refresh attempt must be made, then fail and retain the old database
+	// with its exact seeded last-updated timestamp.
 	sawAttempt := false
 	for i := 0; i < 50 && !sawAttempt; i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -148,7 +151,7 @@ func TestServerGeoStaleRefreshFailureRetainsPrevious(t *testing.T) {
 	if s.geo.DB() == nil || s.geo.DB().Lookup("203.0.113.7") != "AU" {
 		t.Fatal("failed refresh dropped the previous database")
 	}
-	if s.geo.LastUpdated() != staleUpd {
-		t.Fatalf("failed refresh advanced last-updated to %q", s.geo.LastUpdated())
+	if s.geo.LastUpdated() != seeded {
+		t.Fatalf("failed refresh changed last-updated to %q (want exact seeded %q)", s.geo.LastUpdated(), seeded)
 	}
 }
