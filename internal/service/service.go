@@ -149,6 +149,34 @@ func validateNoControl(v, what string) error {
 	return nil
 }
 
+// fileSHA256 returns the hex SHA-256 of a file (used to detect a changed
+// executable during reinstall).
+func fileSHA256(path string) (string, error) {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return "", e
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), nil
+}
+
+// validateManagedUnit performs the structural ownership/integrity check: the
+// unit must carry the webfleet marker AND contain the required Web Fleet
+// directives, so a stale or malformed managed unit is classified rather than
+// treated as healthy.
+func validateManagedUnit(body []byte) error {
+	t := string(body)
+	if !strings.Contains(t, unitMarker) {
+		return errors.New("not a webfleet-managed unit")
+	}
+	for _, want := range []string{"[Unit]", "[Service]", "[Install]", "Description=Web Fleet", "ExecStart=" + BinaryPath, "User=" + ServiceUser, "Environment=WEBFLEET_DATA_DIR", "WantedBy=multi-user.target"} {
+		if !strings.Contains(t, want) {
+			return fmt.Errorf("malformed managed unit: missing %q", want)
+		}
+	}
+	return nil
+}
+
 // managedUnit reports whether the unit file carries the webfleet managed marker.
 func managedUnit(path string) bool {
 	b, e := os.ReadFile(path)
@@ -161,11 +189,15 @@ func managedUnit(path string) bool {
 // requireManaged refuses to operate on a unit that is not installed or not
 // owned by webfleet, so the CLI never touches an unrelated system service.
 func requireManaged(verb string) error {
-	if !managedUnit(UnitPath) {
-		if _, e := os.Stat(UnitPath); errors.Is(e, os.ErrNotExist) {
-			return fmt.Errorf("refusing to %s webfleet.service: unit is not installed (run `webfleet service install`)", verb)
-		}
-		return fmt.Errorf("refusing to %s webfleet.service: %s is not a webfleet-managed unit", verb, UnitPath)
+	b, e := os.ReadFile(UnitPath)
+	if errors.Is(e, os.ErrNotExist) {
+		return fmt.Errorf("refusing to %s webfleet.service: unit is not installed (run `webfleet service install`)", verb)
+	}
+	if e != nil {
+		return fmt.Errorf("refusing to %s webfleet.service: %w", verb, e)
+	}
+	if ve := validateManagedUnit(b); ve != nil {
+		return fmt.Errorf("refusing to %s webfleet.service: %v", verb, ve)
 	}
 	return nil
 }
@@ -307,22 +339,38 @@ func Install(exe, dataDir, listen string) error {
 	if b, e := os.ReadFile(UnitPath); e == nil {
 		hadUnit = true
 		priorUnit = b
-		if !managedUnit(UnitPath) {
-			return fmt.Errorf("refusing to reinstall webfleet.service: %s is not a webfleet-managed unit", UnitPath)
+		if ve := validateManagedUnit(b); ve != nil {
+			return fmt.Errorf("refusing to reinstall webfleet.service: %v", ve)
 		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	// Snapshot the prior enablement/active states so rollback can reproduce them.
+	// Snapshot the prior enablement/active states so rollback can reproduce the
+	// exact previous operational state, positive and negative alike.
 	priorEnabled, priorActive := "", ""
 	if hadUnit {
 		priorEnabled, _ = unitStateWord("is-enabled")
 		priorActive, _ = unitStateWord("is-active")
 	}
-	// Preserve any existing binary so activation failure can roll back cleanly.
-	hadBinary := false
-	if _, e := os.Stat(BinaryPath); e == nil {
+	// Detect a changed executable: reinstall of a newer binary must restart the
+	// service even when the unit text is unchanged.
+	incomingDigest, err := fileSHA256(exe)
+	if err != nil {
+		return fmt.Errorf("read incoming executable: %w", err)
+	}
+	priorBinaryDigest, hadBinary := "", false
+	if d, e := fileSHA256(BinaryPath); e == nil {
 		hadBinary = true
+		priorBinaryDigest = d
+	}
+	binaryChanged := !hadBinary || incomingDigest != priorBinaryDigest
+	// Genuine no-op: identical unit bytes, identical executable, already enabled
+	// and active - nothing to rewrite, reload or restart.
+	if hadUnit && string(priorUnit) == unit && !binaryChanged && priorEnabled == "enabled" && priorActive == "active" {
+		return nil
+	}
+	// Preserve the prior binary so activation failure can roll back cleanly.
+	if hadBinary {
 		if e := copyFile(BinaryPath, BinaryPath+".preinstall", 0o755); e != nil {
 			return e
 		}
@@ -330,28 +378,53 @@ func Install(exe, dataDir, listen string) error {
 	installOK := false
 	restore := func() string {
 		var errs []string
+		// 1) Neutralize any attempted activation before restoring the binary so a
+		// previously running service is never restarted with the failing binary.
+		_ = systemctlSuccess("stop", "webfleet.service")
+		_ = systemctlSuccess("disable", "webfleet.service")
+		// 2) Restore the executable before the unit and before activation.
+		if hadBinary {
+			if e := copyFile(BinaryPath+".preinstall", BinaryPath, 0o755); e != nil {
+				errs = append(errs, fmt.Sprintf("restore binary: %v", e))
+			}
+		} else {
+			_ = os.Remove(BinaryPath)
+		}
+		_ = os.Remove(BinaryPath + ".preinstall")
+		// 3) Restore the unit.
 		if hadUnit {
 			if e := os.WriteFile(UnitPath, priorUnit, 0o644); e != nil {
 				errs = append(errs, fmt.Sprintf("restore unit: %v", e))
 			}
 		} else {
-			_ = systemctlSuccess("stop", "webfleet.service")
-			_ = systemctlSuccess("disable", "webfleet.service")
 			_ = os.Remove(UnitPath)
 		}
-		_ = systemctlSuccess("daemon-reload")
-		if hadUnit && priorEnabled == "enabled" {
-			_ = systemctlSuccess("enable", "webfleet.service")
+		if e := systemctlSuccess("daemon-reload"); e != nil {
+			errs = append(errs, fmt.Sprintf("reload systemd: %v", e))
 		}
-		if hadUnit && (priorActive == "active" || priorActive == "activating") {
-			_ = systemctlSuccess("start", "webfleet.service")
+		// 4) Restore the exact prior enablement and active states, negative
+		// states included.
+		if hadUnit {
+			if priorEnabled == "enabled" {
+				if e := systemctlSuccess("enable", "webfleet.service"); e != nil {
+					errs = append(errs, fmt.Sprintf("re-enable: %v", e))
+				}
+			} else if priorEnabled != "" && priorEnabled != "disabled" {
+				errs = append(errs, fmt.Sprintf("prior enablement %q cannot be restored", priorEnabled))
+			} else {
+				_ = systemctlSuccess("disable", "webfleet.service")
+			}
+			if priorActive == "active" {
+				if e := systemctlSuccess("start", "webfleet.service"); e != nil {
+					errs = append(errs, fmt.Sprintf("restart prior service: %v", e))
+				}
+			} else if priorActive != "" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+				errs = append(errs, fmt.Sprintf("prior active state %q cannot be restored", priorActive))
+			} else {
+				// Service stays stopped (already neutralized above).
+				_ = systemctlSuccess("stop", "webfleet.service")
+			}
 		}
-		if hadBinary {
-			_ = copyFile(BinaryPath+".preinstall", BinaryPath, 0o755)
-		} else {
-			_ = os.Remove(BinaryPath)
-		}
-		_ = os.Remove(BinaryPath + ".preinstall")
 		if len(errs) == 0 {
 			return ""
 		}
@@ -368,7 +441,8 @@ func Install(exe, dataDir, listen string) error {
 	if e := os.WriteFile(UnitPath, []byte(unit), 0o644); e != nil {
 		return e
 	}
-	changed := !hadUnit || string(priorUnit) != unit
+	unitChanged := !hadUnit || string(priorUnit) != unit
+	changed := unitChanged || binaryChanged
 	steps := [][]string{{"daemon-reload"}}
 	if changed {
 		steps = append(steps, []string{"enable", "webfleet.service"}, []string{"restart", "webfleet.service"})
@@ -492,10 +566,14 @@ func Uninstall() error {
 	if e := requireManaged("uninstall"); e != nil {
 		return e
 	}
-	_, _, _ = systemctl("disable", "--now", "webfleet.service")
-	_ = os.Remove(UnitPath)
-	_ = systemctlSuccess("daemon-reload")
-	return nil
+	// Surface a failed stop/disable rather than pretending uninstall succeeded.
+	if e := systemctlSuccess("disable", "--now", "webfleet.service"); e != nil {
+		return fmt.Errorf("uninstall: %w", e)
+	}
+	if e := os.Remove(UnitPath); e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	return systemctlSuccess("daemon-reload")
 }
 
 // Status reports the resolved service state, pid, data/listen configuration and
@@ -504,13 +582,16 @@ func Status(out io.Writer) error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
-	if !managedUnit(UnitPath) {
-		if _, e := os.Stat(UnitPath); errors.Is(e, os.ErrNotExist) {
-			return fmt.Errorf("webfleet.service is not installed (run `webfleet service install`)")
-		}
-		return fmt.Errorf("webfleet.service unit at %s is not webfleet-managed", UnitPath)
+	body, e := os.ReadFile(UnitPath)
+	if errors.Is(e, os.ErrNotExist) {
+		return fmt.Errorf("webfleet.service is not installed (run `webfleet service install`)")
 	}
-	body, _ := os.ReadFile(UnitPath)
+	if e != nil {
+		return fmt.Errorf("cannot read %s: %w", UnitPath, e)
+	}
+	if ve := validateManagedUnit(body); ve != nil {
+		return fmt.Errorf("webfleet.service unit at %s is not valid: %v", UnitPath, ve)
+	}
 	enabled, _ := unitStateWord("is-enabled")
 	active, _ := unitStateWord("is-active")
 	pid, _, _ := systemctl("show", "-p", "MainPID", "--value", "webfleet.service")
@@ -607,6 +688,9 @@ func Update(artifact, want string) error {
 	if !isRoot() {
 		return errors.New("update requires root")
 	}
+	if e := requireManaged("update"); e != nil {
+		return e
+	}
 	if e := Verify(artifact, want); e != nil {
 		return e
 	}
@@ -631,6 +715,9 @@ func Rollback() error {
 	}
 	if !isRoot() {
 		return errors.New("rollback requires root")
+	}
+	if e := requireManaged("rollback"); e != nil {
+		return e
 	}
 	if _, e := os.Stat(BinaryPath + ".rollback"); e != nil {
 		return errors.New("no rollback binary available")

@@ -27,15 +27,18 @@ import (
 var version = "dev"
 
 func main() {
+	// Service-management commands must remain usable even when the application
+	// configuration is unhealthy, so dispatch before any runtime config load.
+	if len(os.Args) >= 2 && os.Args[1] == "service" {
+		os.Exit(runService(os.Args[2:], service.DefaultListen))
+	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	if len(os.Args) < 2 || os.Args[1] != "service" {
-		log.Info("webfleet version", "version", version)
-	}
+	log.Info("webfleet version", "version", version)
 	if len(os.Args) >= 3 && os.Args[1] == "backup" {
 		provider := store.Provider(cfg.DatabaseURL)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -59,9 +62,6 @@ func main() {
 		}
 		log.Info("backup complete", "provider", provider, "path", os.Args[2])
 		return
-	}
-	if len(os.Args) >= 2 && os.Args[1] == "service" {
-		os.Exit(runService(os.Args[2:], cfg.Listen))
 	}
 	if len(os.Args) >= 3 && os.Args[1] == "restore" {
 		provider := store.Provider(cfg.DatabaseURL)
@@ -153,51 +153,70 @@ func main() {
 // Exit codes: 0 success, 1 operational failure, 2 usage error.
 func runService(args []string, defaultListen string) int {
 	cmd := "status"
-	rest := args
-	for i, a := range args {
+	var flags, positional []string
+	for _, a := range args {
 		if a != "" && !strings.HasPrefix(a, "-") {
-			cmd = a
-			rest = append(append([]string{}, args[:i]...), args[i+1:]...)
-			break
-		}
-	}
-	follow := false
-	data := ""
-	listen := ""
-	for i := 0; i < len(rest); i++ {
-		switch rest[i] {
-		case "--follow":
-			follow = true
-		case "--data":
-			if i+1 < len(rest) {
-				i++
-				data = rest[i]
-			} else {
-				fmt.Fprintln(os.Stderr, "webfleet service "+cmd+": --data requires a path")
-				return 2
+			if cmd == "status" && len(positional) == 0 {
+				cmd = a
+				continue
 			}
-		case "--listen":
-			if i+1 < len(rest) {
-				i++
-				listen = rest[i]
-			} else {
-				fmt.Fprintln(os.Stderr, "webfleet service "+cmd+": --listen requires an address")
-				return 2
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+	}
+	usage := func(msg string) int {
+		fmt.Fprintf(os.Stderr, "webfleet service %s: %s\n", cmd, msg)
+		return 2
+	}
+	if len(flags) > 0 {
+		switch cmd {
+		case "install":
+			for i := 0; i < len(flags); i++ {
+				switch flags[i] {
+				case "--data":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--data requires a path")
+					}
+				case "--listen":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--listen requires an address")
+					}
+				default:
+					return usage("unknown flag " + flags[i])
+				}
+			}
+		case "logs":
+			if len(flags) > 1 || flags[0] != "--follow" {
+				return usage("logs accepts only --follow")
 			}
 		default:
-			if strings.HasPrefix(rest[i], "-") {
-				fmt.Fprintf(os.Stderr, "webfleet service %s: unknown flag %s\n", cmd, rest[i])
-				return 2
-			}
+			return usage("no flags are accepted for " + cmd)
 		}
 	}
 	switch cmd {
 	case "install":
-		if data == "" {
-			data = service.DefaultDataDir
+		if len(positional) != 0 {
+			return usage("install takes no positional arguments")
 		}
-		if listen == "" {
-			listen = defaultListen
+		data, listen := service.DefaultDataDir, defaultListen
+		for i := 0; i < len(flags); i++ {
+			switch flags[i] {
+			case "--data":
+				if i+1 < len(flags) {
+					i++
+					data = flags[i]
+				}
+			case "--listen":
+				if i+1 < len(flags) {
+					i++
+					listen = flags[i]
+				}
+			}
 		}
 		if err := service.Install(service.Executable(), data, listen); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service install:", err)
@@ -206,46 +225,103 @@ func runService(args []string, defaultListen string) int {
 		fmt.Fprintln(os.Stdout, "webfleet.service installed and active.")
 		return 0
 	case "uninstall":
+		if len(positional) != 0 {
+			return usage("uninstall takes no positional arguments")
+		}
 		if err := service.Uninstall(); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service uninstall:", err)
 			return 1
 		}
 		fmt.Fprintln(os.Stdout, "webfleet.service uninstalled. Data in "+service.DefaultDataDir+" was preserved.")
 		return 0
-	case "start", "stop", "restart", "enable", "disable":
-		if err := lifecycleErr(cmd); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service "+cmd+":", err)
+	case "start":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		if err := service.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service start:", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "webfleet.service "+cmd+"ed.")
+		fmt.Fprintln(os.Stdout, "webfleet.service started.")
+		return 0
+	case "stop":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		if err := service.Stop(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service stop:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service stopped.")
+		return 0
+	case "restart":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		if err := service.Restart(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service restart:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service restarted.")
+		return 0
+	case "enable":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		if err := service.Enable(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service enable:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service enabled at boot.")
+		return 0
+	case "disable":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		if err := service.Disable(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service disable:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service disabled at boot.")
 		return 0
 	case "status":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
 		if err := service.Status(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service status:", err)
 			return 1
 		}
 		return 0
 	case "logs":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
+		follow := len(flags) > 0 && flags[0] == "--follow"
 		if err := service.Logs(follow, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service logs:", err)
 			return 1
 		}
 		return 0
 	case "update":
-		if len(rest) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: webfleet service update ARTIFACT SHA256")
-			return 2
+		if len(positional) != 2 {
+			return usage("usage: webfleet service update ARTIFACT SHA256")
 		}
-		if err := service.Update(rest[0], rest[1]); err != nil {
+		if err := service.Update(positional[0], positional[1]); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service update:", err)
 			return 1
 		}
+		fmt.Fprintln(os.Stdout, "webfleet.service updated and restarted.")
 		return 0
 	case "rollback":
+		if err := checkNoArgs(positional, cmd); err != "" {
+			return usage(err)
+		}
 		if err := service.Rollback(); err != nil {
 			fmt.Fprintln(os.Stderr, "webfleet service rollback:", err)
 			return 1
 		}
+		fmt.Fprintln(os.Stdout, "webfleet.service rolled back and restarted.")
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "webfleet: unknown service command %q\n\nUsage: webfleet service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]\n", cmd)
@@ -253,18 +329,9 @@ func runService(args []string, defaultListen string) int {
 	}
 }
 
-func lifecycleErr(verb string) error {
-	switch verb {
-	case "start":
-		return service.Start()
-	case "stop":
-		return service.Stop()
-	case "restart":
-		return service.Restart()
-	case "enable":
-		return service.Enable()
-	case "disable":
-		return service.Disable()
+func checkNoArgs(positional []string, cmd string) string {
+	if len(positional) != 0 {
+		return fmt.Sprintf("%s takes no positional arguments", cmd)
 	}
-	return errors.New("unknown lifecycle verb")
+	return ""
 }

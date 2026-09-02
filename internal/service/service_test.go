@@ -278,3 +278,148 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+func setState(r *fakeRunner, enabled, active string) {
+	r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: enabled, code: 0}
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: active, code: 0}
+}
+
+func writeForeignUnit(t *testing.T) {
+	t.Helper()
+	os.WriteFile(UnitPath, []byte("[Unit]\nDescription=admin\n[Service]\nExecStart=/usr/bin/thing\n[Install]\nWantedBy=multi-user.target\n"), 0o644)
+}
+
+func TestUpdateAndRollbackRefuseForeignUnit(t *testing.T) {
+	r := setupService(t)
+	writeForeignUnit(t)
+	before, _ := os.ReadFile(BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("update mutated a foreign unit")
+	}
+	if e := Rollback(); e == nil {
+		t.Fatal("rollback mutated a foreign unit")
+	}
+	after, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("update/rollback mutated the binary of a foreign unit")
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart webfleet.service") {
+			t.Fatalf("foreign unit triggered a restart: %s", call)
+		}
+	}
+}
+
+func TestReinstallChangedBinaryRestarts(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	// A different executable than the installed one -> restart must occur.
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# different binary\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatal("changed binary did not trigger a restart")
+	}
+}
+
+func TestReinstallSameBinaryIsNoOp(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	// Byte-identical executable + identical unit + enabled + active -> no-op.
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	for _, call := range r.log {
+		if strings.HasPrefix(call, "systemctl daemon-reload") {
+			t.Fatal("identical reinstall performed a daemon-reload")
+		}
+	}
+}
+
+func TestReinstallRestoresExactNegativeState(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	// Prior state: disabled + stopped.
+	setState(r, "disabled", "inactive")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+	// Changed unit (different listen) -> forward enable then restart fails.
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{out: "activation failed", code: 1}
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
+		t.Fatal("failed reinstall returned nil")
+	}
+	// Rollback must neutralize, restore binary+unit, and explicitly re-apply the
+	// negative states (disable + stop), not only the positive ones.
+	disableCalls, stopCalls := 0, 0
+	for _, call := range r.log {
+		if call == "systemctl disable webfleet.service" {
+			disableCalls++
+		}
+		if call == "systemctl stop webfleet.service" {
+			stopCalls++
+		}
+	}
+	if disableCalls < 2 {
+		t.Fatalf("negative enabled state not re-applied during rollback (disable calls=%d)", disableCalls)
+	}
+	if stopCalls < 1 {
+		t.Fatalf("negative active state not re-applied during rollback (stop calls=%d)", stopCalls)
+	}
+	// The prior unit must be restored.
+	b, _ := os.ReadFile(UnitPath)
+	if !strings.Contains(string(b), "127.0.0.1:8090") {
+		t.Fatal("prior unit not restored after failed reinstall")
+	}
+}
+
+func TestUninstallSurfacesStopDisableFailure(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	r.script["systemctl disable --now webfleet.service"] = fakeResult{out: "cannot stop", code: 1}
+	if e := Uninstall(); e == nil {
+		t.Fatal("uninstall ignored a failed disable --now")
+	}
+	if _, e := os.Stat(UnitPath); os.IsNotExist(e) {
+		t.Fatal("uninstall removed the unit despite the failed stop/disable")
+	}
+}
+
+func TestMalformedManagedUnitClassified(t *testing.T) {
+	r := setupService(t)
+	// Marker present but a required directive missing -> classified invalid.
+	os.WriteFile(UnitPath, []byte("# Managed by webfleet. Do not edit manually.\n[Unit]\n[Service]\n[Install]\n"), 0o644)
+	if e := lifecycle("start"); e == nil {
+		t.Fatal("malformed managed unit accepted for start")
+	}
+	if e := Status(io.Discard); e == nil {
+		t.Fatal("malformed managed unit accepted for status")
+	}
+	_ = r
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return b
+}
+
+func fakeSHA(path string) string {
+	h, _ := fileSHA256(path)
+	return h
+}

@@ -131,6 +131,15 @@ jobs:
           # idempotent reinstall while enabled+active
           sudo /tmp/wf service install
           wait_healthz
+          # prior disabled+stopped state is faithfully preserved across reinstall
+          sudo /tmp/wf service stop
+          sudo /tmp/wf service disable
+          sudo /tmp/wf service install
+          test "$(systemctl is-enabled webfleet.service)" = disabled
+          test "$(systemctl is-active webfleet.service)" = inactive
+          sudo /tmp/wf service enable
+          sudo /tmp/wf service start
+          wait_healthz
           # update with a verified artifact
           CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
           SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
