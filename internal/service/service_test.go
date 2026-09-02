@@ -867,39 +867,3 @@ func TestRecoveryFailsClosedWithoutMarker(t *testing.T) {
 	run("missing", func() { os.Remove(BinaryPath + ".prior-active") })
 	run("invalid", func() { os.WriteFile(BinaryPath+".prior-active", []byte("bogus"), 0o600) })
 }
-
-// TestInitialRestartFailureSurfacesRecoveryFailure proves the initial-restart
-// failure branch also surfaces a recovery failure (not just the health branch).
-func TestRecoveryFailsClosedIsGenuineRegression(t *testing.T) {
-	r := setupService(t)
-	installManagedUnit(t)
-	setState(r, "enabled", "active")
-	prepareUpdate(r, "active", false)
-	healthWindow = 1 * time.Second
-	exe := filepath.Join(t.TempDir(), "wf2")
-	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
-	r.script["systemctl restart webfleet.service"] = fakeResult{}
-	// Simulate a guess-to-active regression: recovery reads a missing marker but
-	// falls back to "active" and proceeds. The corrected seam must be the thing
-	// that catches it; here we emulate the regression and assert it would NOT be
-	// fail-closed (i.e. the marker-missing path must be the guard).
-	readPriorStateAtRecovery = func() (string, error) { return "active", nil }
-	// If recovery were guess-to-active, the update path would complete without a
-	// recovery error. We assert the production contract (via the seam default) is
-	// NOT guess-to-active by checking the default reads the file and reports
-	// missing. This documents that the guard lives in readPriorStateAtRecovery.
-	readPriorStateAtRecovery = func() (string, error) {
-		_, err := os.ReadFile(BinaryPath + ".prior-active")
-		if err != nil {
-			return "", err
-		}
-		return "active", nil
-	}
-	os.Remove(BinaryPath + ".prior-active")
-	if _, err := readPriorStateAtRecovery(); err == nil {
-		t.Fatal("missing marker was not surfaced as an error; a guess-to-active regression would hide this")
-	}
-}
-
-// TestInitialRestartFailureSurfacesRecoveryFailure proves the initial-restart
-// failure branch also surfaces a recovery failure (not just the health branch).
