@@ -129,8 +129,12 @@ func TestBrowserTrafficFlowsThroughGuardedProxy(t *testing.T) {
 		// audit.test resolves only through this injected resolver, so a proxy
 		// bypass would leave Chromium unable to reach the fixture at all.
 		guard: newTestGuard(true, mapResolver{"audit.test": {mustAddr("127.0.0.1")}}),
+		// Headless Chromium under -race on a loaded CI runner is far slower than
+		// the production defaultAuditTimeout, so this acceptance test uses a
+		// generous explicit timeout; the production audit bound stays 45s.
+		Timeout: 120 * time.Second,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	target := "http://audit.test:" + port + "/"
