@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -13,10 +14,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const UnitPath = "/etc/systemd/system/webfleet.service"
-const BinaryPath = "/usr/local/bin/webfleet"
+var UnitPath = "/etc/systemd/system/webfleet.service"
+var BinaryPath = "/usr/local/bin/webfleet"
 
 // DefaultDataDir is the canonical data directory the installed service owns
 // and runs from. It must be independent of the CLI default (./data) because
@@ -24,49 +26,169 @@ const BinaryPath = "/usr/local/bin/webfleet"
 // writes embeds the path.
 const DefaultDataDir = "/var/lib/webfleet"
 
+// DefaultListen is the canonical loopback listen address embedded in the unit.
+const DefaultListen = "127.0.0.1:8090"
+
 // ServiceAccount is the dedicated unprivileged account the unit runs as. It is
 // created idempotently by Install so a clean machine needs no hidden manual
 // prerequisites.
 const ServiceUser = "webfleet"
 const ServiceGroup = "webfleet"
 
-func Unit(dataDir, listen string) string {
-	if dataDir == "" {
-		dataDir = DefaultDataDir
-	}
-	if listen == "" {
-		listen = "127.0.0.1:8090"
-	}
-	return `[Unit]
-Description=Web Fleet website monitoring
-After=network-online.target
-Wants=network-online.target
+// unitMarker marks unit files written by `webfleet service`. Service operations
+// refuse to act on a unit that does not carry it, so the CLI can never modify
+// an unrelated system service that happens to share the unit name.
+const unitMarker = "# Managed by webfleet. Do not edit manually."
 
-[Service]
-Type=simple
-User=` + ServiceUser + `
-Group=` + ServiceGroup + `
-Environment=WEBFLEET_DATA_DIR=` + dataDir + `
-Environment=WEBFLEET_LISTEN=` + listen + `
-ExecStart=` + BinaryPath + `
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=` + dataDir + `
-
-[Install]
-WantedBy=multi-user.target
-`
+// Runner abstracts systemctl/journalctl so the CLI is testable without a real
+// systemd manager. Run returns captured combined output, the exit code (0 on
+// success, -1 when the command could not launch) and a launch error only.
+type Runner interface {
+	Run(name string, args ...string) (string, int, error)
+	Stream(name string, args ...string) (int, error)
 }
+
+type execRunner struct{}
+
+func (execRunner) Run(name string, args ...string) (string, int, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err == nil {
+		return string(out), 0, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return string(out), ee.ExitCode(), nil
+	}
+	return string(out), -1, err
+}
+
+func (execRunner) Stream(name string, args ...string) (int, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), nil
+	}
+	return -1, err
+}
+
+var defaultRunner Runner = execRunner{}
+
+// setRunner replaces the systemctl runner (test seam; nil restores the default).
+func setRunner(r Runner) { defaultRunner = r }
+
+func systemctl(args ...string) (string, int, error) { return defaultRunner.Run("systemctl", args...) }
+
+func bounded(s string) string {
+	const max = 2000
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
+}
+
+// systemctlSuccess runs a systemctl operation that must exit zero; launch
+// failures and nonzero exits are both errors.
+func systemctlSuccess(args ...string) error {
+	out, code, err := systemctl(args...)
+	if err != nil {
+		return fmt.Errorf("cannot run systemctl %s: %w", strings.Join(args, " "), err)
+	}
+	if code != 0 {
+		return fmt.Errorf("systemctl %s exited %d: %s", strings.Join(args, " "), code, bounded(strings.TrimSpace(out)))
+	}
+	return nil
+}
+
+// unitStateWord runs a state verb (is-enabled/is-active), tolerating a nonzero
+// exit for legitimate negative answers and returning the trimmed word.
+func unitStateWord(verb string) (string, error) {
+	out, code, err := systemctl(verb, "webfleet.service")
+	if err != nil {
+		return "", fmt.Errorf("cannot run systemctl %s: %w", verb, err)
+	}
+	if code == 0 {
+		return strings.TrimSpace(out), nil
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// systemdQuote escapes a value for a systemd ExecStart/Environment/ReadWritePaths
+// directive so paths containing spaces or systemd-special characters survive.
+func systemdQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '%':
+			b.WriteString("%%")
+		case '"', '\\', '$', '`':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// validateNoControl rejects CR, LF, NUL and other control characters so no
+// user-supplied value can inject directives into a systemd unit.
+func validateNoControl(v, what string) error {
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] == 0x7f {
+			return fmt.Errorf("%s %q contains a control character", what, v)
+		}
+	}
+	return nil
+}
+
+// managedUnit reports whether the unit file carries the webfleet managed marker.
+func managedUnit(path string) bool {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return false
+	}
+	return strings.Contains(string(b), unitMarker)
+}
+
+// requireManaged refuses to operate on a unit that is not installed or not
+// owned by webfleet, so the CLI never touches an unrelated system service.
+func requireManaged(verb string) error {
+	if !managedUnit(UnitPath) {
+		if _, e := os.Stat(UnitPath); errors.Is(e, os.ErrNotExist) {
+			return fmt.Errorf("refusing to %s webfleet.service: unit is not installed (run `webfleet service install`)", verb)
+		}
+		return fmt.Errorf("refusing to %s webfleet.service: %s is not a webfleet-managed unit", verb, UnitPath)
+	}
+	return nil
+}
+
 func requireLinux() error {
 	if runtime.GOOS != "linux" {
 		return errors.New("service management is supported on Linux only")
 	}
 	return nil
 }
+
+var isRoot = func() bool { return os.Geteuid() == 0 }
+var ensureAccount = func() error { return ensureServiceAccount() }
+var chownData = func(path string) error { return chownService(path) }
+var mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+
+func requireRoot(verb string) error {
+	if !isRoot() {
+		return fmt.Errorf("%s requires root (sudo webfleet service %s)", verb, verb)
+	}
+	return nil
+}
+
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, e := os.Open(src)
 	if e != nil {
@@ -91,28 +213,111 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	}
 	return os.Rename(tmp, dst)
 }
+
+// unitBody renders the systemd directives (no managed marker).
+func unitBody(dataDir, listen string) string {
+	if dataDir == "" {
+		dataDir = DefaultDataDir
+	}
+	if listen == "" {
+		listen = DefaultListen
+	}
+	return `[Unit]
+Description=Web Fleet website monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=` + ServiceUser + `
+Group=` + ServiceGroup + `
+Environment=WEBFLEET_DATA_DIR=` + systemdQuote(dataDir) + `
+Environment=WEBFLEET_LISTEN=` + systemdQuote(listen) + `
+ExecStart=` + BinaryPath + `
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=` + systemdQuote(dataDir) + `
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+// Unit returns the full managed unit content for the given data dir and listen
+// address.
+func Unit(dataDir, listen string) string {
+	return unitMarker + "\n" + unitBody(dataDir, listen)
+}
+
+// unitEnv reads an Environment=WEBFLEET_* value from a unit body.
+func unitEnv(body, key string) string {
+	prefix := "Environment=" + key + "="
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.Trim(strings.TrimPrefix(line, prefix), `"`)
+		}
+	}
+	return ""
+}
+
+// Install installs (or idempotently reinstalls) the webfleet systemd unit: it
+// creates the service account and data directory, copies the current binary,
+// writes the managed unit, daemon-reloads, enables and starts/restarts the
+// service. A partial failure restores the prior unit, enablement, active state
+// and binary. A byte-identical unit that is already enabled and active is a
+// no-op.
 func Install(exe, dataDir, listen string) error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
-	if os.Geteuid() != 0 {
+	if !isRoot() {
 		return errors.New("service install requires root")
 	}
-	if e := ensureServiceAccount(); e != nil {
+	for _, v := range []struct{ val, name string }{{dataDir, "data dir"}, {listen, "listen"}} {
+		if e := validateNoControl(v.val, v.name); e != nil {
+			return e
+		}
+	}
+	if dataDir == "" {
+		dataDir = DefaultDataDir
+	}
+	if listen == "" {
+		listen = DefaultListen
+	}
+	if _, e := exec.LookPath("systemctl"); e != nil {
+		return errors.New("systemctl not found; is systemd installed?")
+	}
+	if e := ensureAccount(); e != nil {
 		return e
 	}
-	if e := os.MkdirAll(dataDir, 0o700); e != nil {
+	if e := mkdirData(dataDir, 0o700); e != nil {
 		return e
 	}
 	_ = os.Chmod(dataDir, 0o700)
-	if e := os.Chown(dataDir, 0, 0); e != nil {
+	_ = os.Chown(dataDir, 0, 0)
+	if e := chownData(dataDir); e != nil {
 		return e
 	}
-	if e := chownService(dataDir); e != nil {
+	unit := Unit(dataDir, listen)
+	priorUnit, hadUnit := []byte(nil), false
+	if b, e := os.ReadFile(UnitPath); e == nil {
+		hadUnit = true
+		priorUnit = b
+		if !managedUnit(UnitPath) {
+			return fmt.Errorf("refusing to reinstall webfleet.service: %s is not a webfleet-managed unit", UnitPath)
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	if _, e := exec.LookPath("systemctl"); e != nil {
-		return errors.New("systemctl not found")
+	// Snapshot the prior enablement/active states so rollback can reproduce them.
+	priorEnabled, priorActive := "", ""
+	if hadUnit {
+		priorEnabled, _ = unitStateWord("is-enabled")
+		priorActive, _ = unitStateWord("is-active")
 	}
 	// Preserve any existing binary so activation failure can roll back cleanly.
 	hadBinary := false
@@ -123,34 +328,73 @@ func Install(exe, dataDir, listen string) error {
 		}
 	}
 	installOK := false
-	defer func() {
-		// Partial failure must not leave a state that looks successfully
-		// installed: restore the previous binary and remove the unit.
-		if !installOK {
-			_ = exec.Command("systemctl", "disable", "webfleet.service").Run()
-			_ = os.Remove(UnitPath)
-			if hadBinary {
-				_ = copyFile(BinaryPath+".preinstall", BinaryPath, 0o755)
-			} else {
-				_ = os.Remove(BinaryPath)
+	restore := func() string {
+		var errs []string
+		if hadUnit {
+			if e := os.WriteFile(UnitPath, priorUnit, 0o644); e != nil {
+				errs = append(errs, fmt.Sprintf("restore unit: %v", e))
 			}
-			_ = os.Remove(BinaryPath + ".preinstall")
+		} else {
+			_ = systemctlSuccess("stop", "webfleet.service")
+			_ = systemctlSuccess("disable", "webfleet.service")
+			_ = os.Remove(UnitPath)
+		}
+		_ = systemctlSuccess("daemon-reload")
+		if hadUnit && priorEnabled == "enabled" {
+			_ = systemctlSuccess("enable", "webfleet.service")
+		}
+		if hadUnit && (priorActive == "active" || priorActive == "activating") {
+			_ = systemctlSuccess("start", "webfleet.service")
+		}
+		if hadBinary {
+			_ = copyFile(BinaryPath+".preinstall", BinaryPath, 0o755)
+		} else {
+			_ = os.Remove(BinaryPath)
+		}
+		_ = os.Remove(BinaryPath + ".preinstall")
+		if len(errs) == 0 {
+			return ""
+		}
+		return "; rollback incomplete: " + strings.Join(errs, "; ")
+	}
+	defer func() {
+		if !installOK {
+			_ = restore()
 		}
 	}()
 	if e := copyFile(exe, BinaryPath, 0o755); e != nil {
 		return e
 	}
-	if e := os.WriteFile(UnitPath, []byte(Unit(dataDir, listen)), 0o644); e != nil {
+	if e := os.WriteFile(UnitPath, []byte(unit), 0o644); e != nil {
 		return e
 	}
-	for _, a := range [][]string{{"daemon-reload"}, {"enable", "--now", "webfleet.service"}} {
-		if out, e := exec.Command("systemctl", a...).CombinedOutput(); e != nil {
-			return fmt.Errorf("systemctl %s: %s: %w (installation rolled back)", strings.Join(a, " "), strings.TrimSpace(string(out)), e)
+	changed := !hadUnit || string(priorUnit) != unit
+	steps := [][]string{{"daemon-reload"}}
+	if changed {
+		steps = append(steps, []string{"enable", "webfleet.service"}, []string{"restart", "webfleet.service"})
+	} else {
+		if priorEnabled != "enabled" {
+			steps = append(steps, []string{"enable", "webfleet.service"})
+		}
+		if priorActive != "active" {
+			steps = append(steps, []string{"start", "webfleet.service"})
+		}
+	}
+	for _, a := range steps {
+		if out, code, err := systemctl(a...); err != nil || code != 0 {
+			return fmt.Errorf("systemctl %s: %s: %w (installation rolled back)", strings.Join(a, " "), bounded(strings.TrimSpace(out)), errorIfNil(err, code, a))
 		}
 	}
 	installOK = true
 	_ = os.Remove(BinaryPath + ".preinstall")
 	return nil
+}
+
+func errorIfNil(err error, code int, args []string) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("exited %d", code)
 }
 
 // ensureServiceAccount creates the webfleet group and user idempotently so a
@@ -194,18 +438,155 @@ func lookupServiceIDs() (int, int, error) {
 	uid, _ := strconv.Atoi(u.Uid)
 	return uid, gid, nil
 }
+
+// Start starts the service.
+func Start() error {
+	return lifecycle("start")
+}
+
+// Stop stops the service.
+func Stop() error {
+	return lifecycle("stop")
+}
+
+// Restart restarts the service.
+func Restart() error {
+	return lifecycle("restart")
+}
+
+// Enable enables the service at boot.
+func Enable() error {
+	return lifecycle("enable")
+}
+
+// Disable disables the service at boot (without stopping it).
+func Disable() error {
+	return lifecycle("disable")
+}
+
+func lifecycle(verb string) error {
+	if e := requireLinux(); e != nil {
+		return e
+	}
+	if e := requireRoot(verb); e != nil {
+		return e
+	}
+	if e := requireManaged(verb); e != nil {
+		return e
+	}
+	if err := systemctlSuccess(verb, "webfleet.service"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Uninstall stops and disables the service, removes the unit and reloads
+// systemd. The data directory and installed binary are deliberately preserved.
 func Uninstall() error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
-	if os.Geteuid() != 0 {
-		return errors.New("service uninstall requires root")
+	if e := requireRoot("uninstall"); e != nil {
+		return e
 	}
-	_ = exec.Command("systemctl", "disable", "--now", "webfleet.service").Run()
+	if e := requireManaged("uninstall"); e != nil {
+		return e
+	}
+	_, _, _ = systemctl("disable", "--now", "webfleet.service")
 	_ = os.Remove(UnitPath)
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = systemctlSuccess("daemon-reload")
 	return nil
 }
+
+// Status reports the resolved service state, pid, data/listen configuration and
+// a live health check. It is read-only and does not require root.
+func Status(out io.Writer) error {
+	if e := requireLinux(); e != nil {
+		return e
+	}
+	if !managedUnit(UnitPath) {
+		if _, e := os.Stat(UnitPath); errors.Is(e, os.ErrNotExist) {
+			return fmt.Errorf("webfleet.service is not installed (run `webfleet service install`)")
+		}
+		return fmt.Errorf("webfleet.service unit at %s is not webfleet-managed", UnitPath)
+	}
+	body, _ := os.ReadFile(UnitPath)
+	enabled, _ := unitStateWord("is-enabled")
+	active, _ := unitStateWord("is-active")
+	pid, _, _ := systemctl("show", "-p", "MainPID", "--value", "webfleet.service")
+	dataDir := unitEnv(string(body), "WEBFLEET_DATA_DIR")
+	listen := unitEnv(string(body), "WEBFLEET_LISTEN")
+	if dataDir == "" {
+		dataDir = DefaultDataDir
+	}
+	if listen == "" {
+		listen = DefaultListen
+	}
+	fmt.Fprintf(out, "unit:    webfleet.service\n")
+	fmt.Fprintf(out, "file:    %s\n", UnitPath)
+	fmt.Fprintf(out, "enabled: %s\n", strings.TrimSpace(enabled))
+	fmt.Fprintf(out, "active:  %s\n", strings.TrimSpace(active))
+	fmt.Fprintf(out, "pid:     %s\n", strings.TrimSpace(pid))
+	fmt.Fprintf(out, "user:    %s\n", ServiceUser)
+	fmt.Fprintf(out, "data:    %s\n", dataDir)
+	fmt.Fprintf(out, "listen:  %s\n", listen)
+	if strings.TrimSpace(active) != "active" {
+		fmt.Fprintln(out, "health:  not running")
+		return fmt.Errorf("webfleet.service is %q; expected active", strings.TrimSpace(active))
+	}
+	if err := healthCheck("http://" + listen + "/healthz"); err != nil {
+		fmt.Fprintf(out, "health:  unreachable (%v)\n", err)
+		return fmt.Errorf("service is active but its health check failed: %v", err)
+	}
+	fmt.Fprintln(out, "health:  ok")
+	return nil
+}
+
+func healthCheck(url string) error {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("healthz returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Logs streams the service journal. follow=false prints the current journal;
+// follow=true tails live output.
+func Logs(follow bool, out io.Writer) error {
+	if e := requireLinux(); e != nil {
+		return e
+	}
+	if e := requireManaged("view logs for"); e != nil {
+		return e
+	}
+	args := []string{"--unit", "webfleet.service"}
+	if follow {
+		args = append(args, "-f")
+		code, err := defaultRunner.Stream("journalctl", args...)
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			return fmt.Errorf("journalctl exited with status %d", code)
+		}
+		return nil
+	}
+	o, code, err := defaultRunner.Run("journalctl", args...)
+	if err != nil {
+		return fmt.Errorf("cannot run journalctl: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("journalctl exited %d: %s", code, bounded(strings.TrimSpace(o)))
+	}
+	fmt.Fprint(out, o)
+	return nil
+}
+
 func Verify(path, want string) error {
 	b, e := os.ReadFile(path)
 	if e != nil {
@@ -218,11 +599,12 @@ func Verify(path, want string) error {
 	}
 	return nil
 }
+
 func Update(artifact, want string) error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
-	if os.Geteuid() != 0 {
+	if !isRoot() {
 		return errors.New("update requires root")
 	}
 	if e := Verify(artifact, want); e != nil {
@@ -236,17 +618,18 @@ func Update(artifact, want string) error {
 	if e := copyFile(artifact, BinaryPath, 0o755); e != nil {
 		return e
 	}
-	if out, e := exec.Command("systemctl", "restart", "webfleet.service").CombinedOutput(); e != nil {
+	if out, code, err := systemctl("restart", "webfleet.service"); err != nil || code != 0 {
 		_ = Rollback()
-		return fmt.Errorf("restart after update: %s: %w", strings.TrimSpace(string(out)), e)
+		return fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
 	}
 	return nil
 }
+
 func Rollback() error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
-	if os.Geteuid() != 0 {
+	if !isRoot() {
 		return errors.New("rollback requires root")
 	}
 	if _, e := os.Stat(BinaryPath + ".rollback"); e != nil {
@@ -261,6 +644,6 @@ func Rollback() error {
 		_ = os.Rename(cur, BinaryPath)
 		return e
 	}
-	return exec.Command("systemctl", "restart", "webfleet.service").Run()
+	return systemctlSuccess("restart", "webfleet.service")
 }
 func Executable() string { p, _ := os.Executable(); p, _ = filepath.Abs(p); return p }

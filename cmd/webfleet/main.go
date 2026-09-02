@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -31,7 +33,9 @@ func main() {
 		log.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	log.Info("webfleet version", "version", version)
+	if len(os.Args) < 2 || os.Args[1] != "service" {
+		log.Info("webfleet version", "version", version)
+	}
 	if len(os.Args) >= 3 && os.Args[1] == "backup" {
 		provider := store.Provider(cfg.DatabaseURL)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -57,43 +61,7 @@ func main() {
 		return
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "service" {
-		if len(os.Args) < 3 {
-			log.Error("usage: webfleet service install|uninstall|update|rollback")
-			os.Exit(2)
-		}
-		switch os.Args[2] {
-		case "install":
-			// The installed unit runs under the webfleet service account with
-			// the canonical system data directory, independent of the CLI
-			// runtime default (./data).
-			if err := service.Install(service.Executable(), service.DefaultDataDir, cfg.Listen); err != nil {
-				log.Error("service install failed", "error", err)
-				os.Exit(1)
-			}
-		case "uninstall":
-			if err := service.Uninstall(); err != nil {
-				log.Error("service uninstall failed", "error", err)
-				os.Exit(1)
-			}
-		case "update":
-			if len(os.Args) != 5 {
-				log.Error("usage: webfleet service update ARTIFACT SHA256")
-				os.Exit(2)
-			}
-			if err := service.Update(os.Args[3], os.Args[4]); err != nil {
-				log.Error("service update failed", "error", err)
-				os.Exit(1)
-			}
-		case "rollback":
-			if err := service.Rollback(); err != nil {
-				log.Error("service rollback failed", "error", err)
-				os.Exit(1)
-			}
-		default:
-			log.Error("unknown service command")
-			os.Exit(2)
-		}
-		return
+		os.Exit(runService(os.Args[2:], cfg.Listen))
 	}
 	if len(os.Args) >= 3 && os.Args[1] == "restore" {
 		provider := store.Provider(cfg.DatabaseURL)
@@ -177,4 +145,126 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("shutdown failed", "error", err)
 	}
+}
+
+// runService dispatches `webfleet service <command>` with the same CLI shape,
+// exit-code model and diagnostics as the sibling projects (Cortex, Warden,
+// Trestle, Watchpost), while operating the Web Fleet systemd **system** unit.
+// Exit codes: 0 success, 1 operational failure, 2 usage error.
+func runService(args []string, defaultListen string) int {
+	cmd := "status"
+	rest := args
+	for i, a := range args {
+		if a != "" && !strings.HasPrefix(a, "-") {
+			cmd = a
+			rest = append(append([]string{}, args[:i]...), args[i+1:]...)
+			break
+		}
+	}
+	follow := false
+	data := ""
+	listen := ""
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--follow":
+			follow = true
+		case "--data":
+			if i+1 < len(rest) {
+				i++
+				data = rest[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "webfleet service "+cmd+": --data requires a path")
+				return 2
+			}
+		case "--listen":
+			if i+1 < len(rest) {
+				i++
+				listen = rest[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "webfleet service "+cmd+": --listen requires an address")
+				return 2
+			}
+		default:
+			if strings.HasPrefix(rest[i], "-") {
+				fmt.Fprintf(os.Stderr, "webfleet service %s: unknown flag %s\n", cmd, rest[i])
+				return 2
+			}
+		}
+	}
+	switch cmd {
+	case "install":
+		if data == "" {
+			data = service.DefaultDataDir
+		}
+		if listen == "" {
+			listen = defaultListen
+		}
+		if err := service.Install(service.Executable(), data, listen); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service install:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service installed and active.")
+		return 0
+	case "uninstall":
+		if err := service.Uninstall(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service uninstall:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service uninstalled. Data in "+service.DefaultDataDir+" was preserved.")
+		return 0
+	case "start", "stop", "restart", "enable", "disable":
+		if err := lifecycleErr(cmd); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service "+cmd+":", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "webfleet.service "+cmd+"ed.")
+		return 0
+	case "status":
+		if err := service.Status(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service status:", err)
+			return 1
+		}
+		return 0
+	case "logs":
+		if err := service.Logs(follow, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service logs:", err)
+			return 1
+		}
+		return 0
+	case "update":
+		if len(rest) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: webfleet service update ARTIFACT SHA256")
+			return 2
+		}
+		if err := service.Update(rest[0], rest[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service update:", err)
+			return 1
+		}
+		return 0
+	case "rollback":
+		if err := service.Rollback(); err != nil {
+			fmt.Fprintln(os.Stderr, "webfleet service rollback:", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "webfleet: unknown service command %q\n\nUsage: webfleet service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]\n", cmd)
+		return 2
+	}
+}
+
+func lifecycleErr(verb string) error {
+	switch verb {
+	case "start":
+		return service.Start()
+	case "stop":
+		return service.Stop()
+	case "restart":
+		return service.Restart()
+	case "enable":
+		return service.Enable()
+	case "disable":
+		return service.Disable()
+	}
+	return errors.New("unknown lifecycle verb")
 }

@@ -111,7 +111,24 @@ jobs:
           sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = webfleet || exit 1
           systemctl is-active webfleet.service
           wait_healthz
-          # install is idempotent
+          # install is idempotent (byte-identical + enabled + active -> no-op)
+          sudo /tmp/wf service install
+          wait_healthz
+          # start/stop/restart/status/enable/disable family
+          sudo /tmp/wf service status | grep -E 'active: *active' | grep -E 'enabled: *enabled'
+          /tmp/wf service status | grep -E 'health:  ok'   # status is read-only, no sudo
+          sudo /tmp/wf service stop
+          sudo /tmp/wf service stop   # repeated stop is safe
+          sudo /tmp/wf service start
+          wait_healthz
+          sudo /tmp/wf service restart
+          wait_healthz
+          sudo /tmp/wf service disable
+          sudo /tmp/wf service disable   # repeated disable is safe
+          test "$(systemctl is-enabled webfleet.service)" = disabled
+          sudo /tmp/wf service enable
+          test "$(systemctl is-enabled webfleet.service)" = enabled
+          # idempotent reinstall while enabled+active
           sudo /tmp/wf service install
           wait_healthz
           # update with a verified artifact
@@ -122,7 +139,8 @@ jobs:
           # rollback restores the previous executable
           sudo /tmp/wf service rollback
           wait_healthz
-          # uninstall removes the unit; data is preserved
+          # stop -> uninstall removes the unit; data is preserved
+          sudo /tmp/wf service stop
           sudo /tmp/wf service uninstall
           test ! -f /etc/systemd/system/webfleet.service
           sudo test -d "$DATA"
@@ -146,7 +164,7 @@ jobs:
           cat > /tmp/fakebin/systemctl <<'EOF'
           #!/bin/sh
           case "$*" in
-            *"enable --now"*) echo "simulated activation failure" >&2; exit 1 ;;
+            *"restart webfleet.service"*) echo "simulated activation failure" >&2; exit 1 ;;
             *) exit 0 ;;
           esac
           EOF
