@@ -14,7 +14,7 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != "127.0.0.1:8090" || c.CheckInterval != 45*time.Second || c.CheckConcurrency != 12 || c.AuditSandbox != "strict" {
+	if c.Listen != "127.0.0.1:7336" || c.CheckInterval != 45*time.Second || c.CheckConcurrency != 12 || c.AuditSandbox != "strict" {
 		t.Fatalf("unexpected config: %+v", c)
 	}
 }

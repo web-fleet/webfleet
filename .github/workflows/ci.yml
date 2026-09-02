@@ -96,13 +96,13 @@ jobs:
           # immediate curl).
           wait_healthz() {
             for _ in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:8090/healthz | grep -q '"ok":true'; then
+              if curl -fsS http://127.0.0.1:7336/healthz | grep -q '"ok":true'; then
                 return 0
               fi
               sleep 0.5
             done
             echo "healthz never became ready" >&2
-            curl -v http://127.0.0.1:8090/healthz 2>&1 | tail -3 || true
+            curl -v http://127.0.0.1:7336/healthz 2>&1 | tail -3 || true
             return 1
           }
           sudo /tmp/wf service install
@@ -111,6 +111,12 @@ jobs:
           sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = webfleet || exit 1
           systemctl is-active webfleet.service
           wait_healthz
+          # The default install records the explicit --host/--port pair
+          # (127.0.0.1:7336) in ExecStart with the explicit listen-mode marker,
+          # so the runtime listener survives restart/reboot.
+          grep -q 'ExecStart=/usr/local/bin/webfleet "--host" "127.0.0.1" "--port" "7336"' /etc/systemd/system/webfleet.service
+          grep -q '# webfleet-listen-mode: explicit' /etc/systemd/system/webfleet.service
+          /tmp/wf service status | grep -E 'listen: *127.0.0.1:7336'
           # install is idempotent (byte-identical + enabled + active -> no-op)
           sudo /tmp/wf service install
           wait_healthz
@@ -199,6 +205,27 @@ jobs:
           sudo /tmp/wf service enable
           sudo /tmp/wf service start
           wait_healthz
+          # --- explicit --host/--port install ---
+          # An explicit listener is recorded in ExecStart and governs the
+          # runtime bind (status + healthz use it); a reinstall preserves the
+          # explicit mode.
+          sudo /tmp/wf service install --host 127.0.0.1 --port 7337
+          grep -q 'ExecStart=/usr/local/bin/webfleet "--host" "127.0.0.1" "--port" "7337"' /etc/systemd/system/webfleet.service
+          grep -q '# webfleet-listen-mode: explicit' /etc/systemd/system/webfleet.service
+          /tmp/wf service status | grep -E 'listen: *127.0.0.1:7337'
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:7337/healthz | grep -q '"ok":true' && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1:7337/healthz | grep -q '"ok":true'
+          # --- legacy --listen install (bootstrap mode preserved) ---
+          sudo /tmp/wf service install --listen 127.0.0.1:8091
+          grep -q 'Environment=WEBFLEET_LISTEN="127.0.0.1:8091"' /etc/systemd/system/webfleet.service
+          grep -q '# webfleet-listen-mode: bootstrap' /etc/systemd/system/webfleet.service
+          /tmp/wf service status | grep -E 'listen: *127.0.0.1:8091'
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true' && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true'
+          # restore the canonical default (explicit 127.0.0.1:7336)
+          sudo /tmp/wf service install
+          sudo /tmp/wf service start
+          wait_healthz
           # update with a verified artifact
           CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
           SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
@@ -231,7 +258,7 @@ jobs:
           # binding, so poll healthz.
           wait_healthz() {
             for _ in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:8090/healthz | grep -q '"ok":true'; then
+              if curl -fsS http://127.0.0.1:7336/healthz | grep -q '"ok":true'; then
                 return 0
               fi
               sleep 0.5
@@ -303,7 +330,7 @@ jobs:
           grep -q "installation rolled back" /tmp/install-fail3.log || { echo "forward failure not reported" >&2; cat /tmp/install-fail3.log >&2; exit 1; }
           grep -q "rollback incomplete" /tmp/install-fail3.log || { echo "rollback failure not reported" >&2; cat /tmp/install-fail3.log >&2; exit 1; }
           # The prior unit (canonical listen) must be restored on disk.
-          grep -q "127.0.0.1:8090" /etc/systemd/system/webfleet.service || { echo "prior unit not restored after rollback failure" >&2; exit 1; }
+          grep -q "127.0.0.1:7336" /etc/systemd/system/webfleet.service || { echo "prior unit not restored after rollback failure" >&2; exit 1; }
           # Re-sync the real systemd manager (the fake could not reload it).
           sudo systemctl daemon-reload
           sudo systemctl enable webfleet.service

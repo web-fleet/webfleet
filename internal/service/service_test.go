@@ -4,9 +4,12 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2248,4 +2251,213 @@ func TestDataDirParentPathnameSymlinkSwapRefused(t *testing.T) {
 		t.Fatalf("systemctl mutated despite the parent-pathname refusal: %v", r.log)
 	}
 	tr.assert(t)
+}
+
+// oldStyleUnit renders a managed unit exactly as the pre-listen-mode format
+// wrote it (no listen-mode marker), so the read path can prove old units
+// default to bootstrap.
+func oldStyleUnit(dataDir, listen string) string {
+	meta := "# webfleet-data: " + dataDir + "\n# webfleet-listen: " + listen + "\n"
+	content := meta + unitBody(dataDir, listen)
+	sum := sha256.Sum256([]byte(content))
+	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
+	return header + content
+}
+
+func TestUnitListenModeMarkers(t *testing.T) {
+	explicit := UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7336")
+	if !strings.Contains(explicit, "# webfleet-listen-mode: explicit") {
+		t.Fatalf("host/port unit missing explicit mode marker:\n%s", explicit)
+	}
+	if _, err := readManagedUnit(explicit); err != nil {
+		t.Fatalf("explicit unit should validate: %v", err)
+	}
+	legacy := Unit("/var/lib/webfleet", "127.0.0.1:8090")
+	if !strings.Contains(legacy, "# webfleet-listen-mode: bootstrap") {
+		t.Fatalf("legacy unit missing bootstrap mode marker:\n%s", legacy)
+	}
+	if _, err := readManagedUnit(legacy); err != nil {
+		t.Fatalf("legacy unit should validate: %v", err)
+	}
+	// A hostile mode value is rejected.
+	bad := strings.Replace(legacy, "# webfleet-listen-mode: bootstrap", "# webfleet-listen-mode: attacker", 1)
+	if _, err := readManagedUnit(bad); err == nil {
+		t.Fatal("invalid listen-mode accepted")
+	}
+}
+
+func TestOldUnitWithoutMarkerDefaultsToBootstrap(t *testing.T) {
+	old := oldStyleUnit("/var/lib/webfleet", "127.0.0.1:8090")
+	meta, err := readManagedUnit(old)
+	if err != nil {
+		t.Fatalf("old-style unit should validate: %v", err)
+	}
+	if meta.listenMode != modeBootstrap {
+		t.Fatalf("old unit listen-mode = %q, want bootstrap", meta.listenMode)
+	}
+}
+
+func TestUnitExplicitRecordsHostPortInExecStart(t *testing.T) {
+	u := UnitExplicit("/var/lib/webfleet", "127.0.0.1", "7336")
+	if !strings.Contains(u, `"--host" "127.0.0.1" "--port" "7336"`) {
+		t.Fatalf("explicit unit must record --host/--port in ExecStart:\n%s", u)
+	}
+	if strings.Contains(u, "WEBFLEET_LISTEN") {
+		t.Fatalf("explicit unit must not set WEBFLEET_LISTEN env:\n%s", u)
+	}
+	if !strings.Contains(u, "WEBFLEET_DATA_DIR") {
+		t.Fatalf("explicit unit must retain WEBFLEET_DATA_DIR env:\n%s", u)
+	}
+	if !strings.Contains(u, "# webfleet-listen: 127.0.0.1:7336") {
+		t.Fatalf("explicit unit must record the canonical joined listener:\n%s", u)
+	}
+	// IPv6 hosts are bracketed in the metadata and ExecStart.
+	u6 := UnitExplicit("/var/lib/webfleet", "::1", "7336")
+	if !strings.Contains(u6, "# webfleet-listen: [::1]:7336") {
+		t.Fatalf("explicit IPv6 unit must bracket the host:\n%s", u6)
+	}
+	if !strings.Contains(u6, `"--host" "::1"`) {
+		t.Fatalf("explicit IPv6 unit must record --host ::1:\n%s", u6)
+	}
+}
+
+func TestInstallExplicitWritesExplicitUnit(t *testing.T) {
+	r := setupService(t)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7336"); e != nil {
+		t.Fatal(e)
+	}
+	b, _ := os.ReadFile(UnitPath)
+	if !strings.Contains(string(b), "# webfleet-listen-mode: explicit") {
+		t.Fatalf("installed unit must be explicit mode:\n%s", b)
+	}
+	if !strings.Contains(string(b), `"--host" "127.0.0.1" "--port" "7336"`) {
+		t.Fatalf("installed unit must record --host/--port:\n%s", b)
+	}
+	// Reinstall with a different port must update the unit and restart.
+	setState(r, "enabled", "active")
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl disable webfleet.service"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7402"); e != nil {
+		t.Fatal(e)
+	}
+	b2, _ := os.ReadFile(UnitPath)
+	if !strings.Contains(string(b2), `"--port" "7402"`) {
+		t.Fatalf("reinstalled unit must record 7402:\n%s", b2)
+	}
+	if !strings.Contains(string(b2), "# webfleet-listen-mode: explicit") {
+		t.Fatalf("reinstalled unit must remain explicit mode:\n%s", b2)
+	}
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatalf("changed listener must restart the service; calls: %v", r.log)
+	}
+}
+
+func TestInstallBootstrapWritesBootstrapUnit(t *testing.T) {
+	r := setupService(t)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	b, _ := os.ReadFile(UnitPath)
+	if !strings.Contains(string(b), "# webfleet-listen-mode: bootstrap") {
+		t.Fatalf("legacy install must be bootstrap mode:\n%s", b)
+	}
+	if !strings.Contains(string(b), `WEBFLEET_LISTEN="127.0.0.1:8090"`) {
+		t.Fatalf("legacy install must record the WEBFLEET_LISTEN env:\n%s", b)
+	}
+	if strings.Contains(string(b), "--host") {
+		t.Fatalf("legacy install must not record --host/--port:\n%s", b)
+	}
+}
+
+// TestReinstallExplicitPreservesExactPriorState proves the explicit install
+// path shares the same transactional state-preservation and rollback contract
+// as the legacy path: a changed reinstall restores the exact prior unit on a
+// forward failure.
+func TestReinstallExplicitPreservesExactPriorState(t *testing.T) {
+	r := setupService(t)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7336"); e != nil {
+		t.Fatal(e)
+	}
+	priorUnit, _ := os.ReadFile(UnitPath)
+	setState(r, "enabled", "active")
+	r.seq["systemctl daemon-reload"] = []fakeResult{{}, {}, {}}
+	r.seq["systemctl enable webfleet.service"] = []fakeResult{{}, {out: "failed to enable", code: 3}, {}}
+	r.seq["systemctl disable webfleet.service"] = []fakeResult{{}, {}, {}}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	if e := InstallExplicit(exe, "/var/lib/webfleet", "127.0.0.1", "7402"); e == nil {
+		t.Fatal("failed explicit reinstall returned nil")
+	}
+	got, _ := os.ReadFile(UnitPath)
+	if string(got) != string(priorUnit) {
+		t.Fatalf("failed explicit reinstall did not restore the prior unit:\n--- got\n%s\n--- want\n%s", got, priorUnit)
+	}
+}
+
+func TestStatusUsesExplicitUnitListener(t *testing.T) {
+	r := setupService(t)
+	r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "enabled", code: 0}
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: "active", code: 0}
+	r.script["systemctl show -p MainPID --value webfleet.service"] = fakeResult{out: "1234", code: 0}
+	// Health check against the explicit unit's recorded listener.
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer h.Close()
+	host, port := splitHostPort(t, strings.TrimPrefix(h.URL, "http://"))
+	os.WriteFile(UnitPath, []byte(UnitExplicit("/var/lib/webfleet", host, port)), 0o644)
+	var buf bytes.Buffer
+	if e := Status(&buf); e != nil {
+		t.Fatal(e)
+	}
+	for _, want := range []string{"listen:  " + host + ":" + port, "health:  ok"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestStatusUsesBootstrapUnitListener(t *testing.T) {
+	r := setupService(t)
+	r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "enabled", code: 0}
+	r.script["systemctl is-active webfleet.service"] = fakeResult{out: "active", code: 0}
+	r.script["systemctl show -p MainPID --value webfleet.service"] = fakeResult{out: "1234", code: 0}
+	// Health check against the legacy unit's recorded WEBFLEET_LISTEN address.
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer h.Close()
+	listen := strings.TrimPrefix(h.URL, "http://")
+	os.WriteFile(UnitPath, []byte(Unit("/var/lib/webfleet", listen)), 0o644)
+	var buf bytes.Buffer
+	if e := Status(&buf); e != nil {
+		t.Fatal(e)
+	}
+	for _, want := range []string{"listen:  " + listen, "health:  ok"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func splitHostPort(t *testing.T, addr string) (string, string) {
+	t.Helper()
+	h, p, e := net.SplitHostPort(addr)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return h, p
 }

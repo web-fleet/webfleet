@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -20,19 +21,34 @@ func withStub(t *testing.T, stub func(serviceCommand) (string, error)) func(serv
 	return old
 }
 
+// unsetListenerEnv removes every listener-related variable so tests observe the
+// CLI/default precedence rather than a developer's shell.
+func unsetListenerEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"WEBFLEET_HOST", "WEBFLEET_PORT", "WEBFLEET_LISTEN"} {
+		os.Unsetenv(k)
+	}
+}
+
 func TestRunServiceInstallParsesFlags(t *testing.T) {
+	unsetListenerEnv(t)
 	cases := []struct {
 		name       string
 		args       []string
 		wantData   string
+		wantHost   string
+		wantPort   string
 		wantListen string
 	}{
-		{"defaults", []string{"install"}, service.DefaultDataDir, "127.0.0.1:8090"},
-		{"data", []string{"install", "--data", "/srv/webfleet"}, "/srv/webfleet", "127.0.0.1:8090"},
-		{"data-with-spaces", []string{"install", "--data", "/srv/web fleet"}, "/srv/web fleet", "127.0.0.1:8090"},
-		{"data-equals", []string{"install", "--data=/srv/webfleet"}, "/srv/webfleet", "127.0.0.1:8090"},
-		{"listen", []string{"install", "--listen", "127.0.0.1:9000"}, service.DefaultDataDir, "127.0.0.1:9000"},
-		{"both", []string{"install", "--data", "/srv/webfleet", "--listen", "127.0.0.1:9000"}, "/srv/webfleet", "127.0.0.1:9000"},
+		{"defaults", []string{"install"}, service.DefaultDataDir, "127.0.0.1", "7336", ""},
+		{"data", []string{"install", "--data", "/srv/webfleet"}, "/srv/webfleet", "127.0.0.1", "7336", ""},
+		{"data-with-spaces", []string{"install", "--data", "/srv/web fleet"}, "/srv/web fleet", "127.0.0.1", "7336", ""},
+		{"data-equals", []string{"install", "--data=/srv/webfleet"}, "/srv/webfleet", "127.0.0.1", "7336", ""},
+		{"host-port", []string{"install", "--host", "0.0.0.0", "--port", "9000"}, service.DefaultDataDir, "0.0.0.0", "9000", ""},
+		{"host-only", []string{"install", "--host", "0.0.0.0"}, service.DefaultDataDir, "0.0.0.0", "7336", ""},
+		{"port-only", []string{"install", "--port", "9000"}, service.DefaultDataDir, "127.0.0.1", "9000", ""},
+		{"listen", []string{"install", "--listen", "127.0.0.1:9000"}, service.DefaultDataDir, "", "", "127.0.0.1:9000"},
+		{"both-data-listen", []string{"install", "--data", "/srv/webfleet", "--listen", "127.0.0.1:9000"}, "/srv/webfleet", "", "", "127.0.0.1:9000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,31 +58,41 @@ func TestRunServiceInstallParsesFlags(t *testing.T) {
 				return "ok", nil
 			})
 			var out, errOut bytes.Buffer
-			if code := runServiceIO(&out, &errOut, tc.args, "127.0.0.1:8090"); code != 0 {
+			if code := runServiceIO(&out, &errOut, tc.args); code != 0 {
 				t.Fatalf("exit %d, stderr: %s", code, errOut.String())
 			}
-			if got.verb != "install" || got.data != tc.wantData || got.listen != tc.wantListen {
-				t.Fatalf("parsed = %+v, want data=%q listen=%q", got, tc.wantData, tc.wantListen)
+			if got.verb != "install" || got.data != tc.wantData || got.host != tc.wantHost || got.port != tc.wantPort || got.listen != tc.wantListen {
+				t.Fatalf("parsed = %+v, want data=%q host=%q port=%q listen=%q", got, tc.wantData, tc.wantHost, tc.wantPort, tc.wantListen)
 			}
 		})
 	}
 }
 
 func TestRunServiceInstallUsageErrors(t *testing.T) {
+	unsetListenerEnv(t)
 	cases := []struct {
 		name string
 		args []string
 	}{
 		{"missing-data-value", []string{"install", "--data"}},
 		{"missing-listen-value", []string{"install", "--listen"}},
+		{"missing-host-value", []string{"install", "--host"}},
+		{"missing-port-value", []string{"install", "--port"}},
 		{"unknown-flag", []string{"install", "--bogus", "x"}},
 		{"unexpected-positional", []string{"install", "/srv/webfleet"}},
+		{"listen-plus-host", []string{"install", "--listen", "127.0.0.1:9000", "--host", "0.0.0.0"}},
+		{"listen-plus-port", []string{"install", "--listen", "127.0.0.1:9000", "--port", "9000"}},
+		{"invalid-port", []string{"install", "--port", "abc"}},
+		{"zero-port", []string{"install", "--port", "0"}},
+		{"negative-port", []string{"install", "--port", "-5"}},
+		{"oversized-port", []string{"install", "--port", "65536"}},
+		{"empty-port", []string{"install", "--port", ""}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withStub(t, func(serviceCommand) (string, error) { return "ok", nil })
 			var out, errOut bytes.Buffer
-			if code := runServiceIO(&out, &errOut, tc.args, "127.0.0.1:8090"); code != 2 {
+			if code := runServiceIO(&out, &errOut, tc.args); code != 2 {
 				t.Fatalf("exit %d, want 2; stdout=%q stderr=%q", code, out.String(), errOut.String())
 			}
 			if errOut.Len() == 0 {
@@ -76,7 +102,123 @@ func TestRunServiceInstallUsageErrors(t *testing.T) {
 	}
 }
 
+func TestRunServiceInstallEnvOverrides(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_HOST", "0.0.0.0")
+	t.Setenv("WEBFLEET_PORT", "9000")
+	var got serviceCommand
+	withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install"}); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
+	}
+	if got.host != "0.0.0.0" || got.port != "9000" || got.listen != "" {
+		t.Fatalf("env override parsed = %+v, want host=0.0.0.0 port=9000", got)
+	}
+}
+
+func TestRunServiceInstallCLIOverridesEnv(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_HOST", "0.0.0.0")
+	t.Setenv("WEBFLEET_PORT", "9000")
+	var got serviceCommand
+	withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install", "--host", "127.0.0.1", "--port", "7402"}); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
+	}
+	if got.host != "127.0.0.1" || got.port != "7402" {
+		t.Fatalf("cli must override env: %+v", got)
+	}
+}
+
+func TestRunServiceInstallHonorsLegacyListenEnv(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_LISTEN", "127.0.0.1:9000")
+	var got serviceCommand
+	withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install"}); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
+	}
+	if got.listen != "127.0.0.1:9000" || got.host != "" || got.port != "" {
+		t.Fatalf("legacy env install parsed = %+v, want listen=127.0.0.1:9000", got)
+	}
+}
+
+func TestRunServiceInstallHostPortOverridesLegacyEnv(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_LISTEN", "127.0.0.1:8080")
+	var got serviceCommand
+	withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install", "--host", "0.0.0.0", "--port", "9000"}); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
+	}
+	if got.host != "0.0.0.0" || got.port != "9000" || got.listen != "" {
+		t.Fatalf("explicit --host/--port must override WEBFLEET_LISTEN: %+v", got)
+	}
+}
+
+func TestRunServiceInstallEnvConflictFails(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_LISTEN", "127.0.0.1:8080")
+	t.Setenv("WEBFLEET_HOST", "0.0.0.0")
+	withStub(t, func(serviceCommand) (string, error) { return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install"}); code != 2 {
+		t.Fatalf("WEBFLEET_LISTEN + WEBFLEET_HOST conflict exit %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "WEBFLEET_LISTEN") {
+		t.Fatalf("conflict diagnostic missing: %q", errOut.String())
+	}
+	os.Unsetenv("WEBFLEET_HOST")
+	t.Setenv("WEBFLEET_PORT", "9000")
+	out.Reset()
+	errOut.Reset()
+	if code := runServiceIO(&out, &errOut, []string{"install"}); code != 2 {
+		t.Fatalf("WEBFLEET_LISTEN + WEBFLEET_PORT conflict exit %d, want 2", code)
+	}
+}
+
+func TestRunServiceInstallMalformedEnvFails(t *testing.T) {
+	unsetListenerEnv(t)
+	t.Setenv("WEBFLEET_HOST", "127.0.0.1")
+	t.Setenv("WEBFLEET_PORT", "abc")
+	withStub(t, func(serviceCommand) (string, error) { return "ok", nil })
+	var out, errOut bytes.Buffer
+	if code := runServiceIO(&out, &errOut, []string{"install"}); code != 2 {
+		t.Fatalf("malformed WEBFLEET_PORT exit %d, want 2; stderr=%q", code, errOut.String())
+	}
+}
+
+func TestRunServiceNonInstallIgnoresMalformedListenerEnv(t *testing.T) {
+	// Malformed listener env in the invoking shell must not break any non-install
+	// service verb: only install resolves/validates the listener environment.
+	t.Setenv("WEBFLEET_HOST", "not a host")
+	t.Setenv("WEBFLEET_PORT", "not-a-port")
+	t.Setenv("WEBFLEET_LISTEN", "not-a-listener")
+	for _, verb := range []string{"start", "stop", "restart", "status", "enable", "disable", "logs", "update", "rollback", "uninstall"} {
+		t.Run(verb, func(t *testing.T) {
+			args := []string{verb}
+			if verb == "update" {
+				args = []string{"update", "/tmp/art", "abc"}
+			}
+			var got serviceCommand
+			withStub(t, func(c serviceCommand) (string, error) { got = c; return "ok", nil })
+			var out, errOut bytes.Buffer
+			if code := runServiceIO(&out, &errOut, args); code != 0 {
+				t.Fatalf("%s exit %d, want 0; stderr=%q", verb, code, errOut.String())
+			}
+			if got.verb != verb {
+				t.Fatalf("verb = %q, want %q", got.verb, verb)
+			}
+		})
+	}
+}
+
 func TestRunServiceLogs(t *testing.T) {
+	unsetListenerEnv(t)
 	for _, follow := range []bool{false, true} {
 		args := []string{"logs"}
 		if follow {
@@ -88,7 +230,7 @@ func TestRunServiceLogs(t *testing.T) {
 			return "journal", nil
 		})
 		var out, errOut bytes.Buffer
-		if code := runServiceIO(&out, &errOut, args, "127.0.0.1:8090"); code != 0 {
+		if code := runServiceIO(&out, &errOut, args); code != 0 {
 			t.Fatalf("exit %d, stderr: %s", code, errOut.String())
 		}
 		if got.verb != "logs" || got.follow != follow {
@@ -103,19 +245,20 @@ func TestRunServiceLogs(t *testing.T) {
 		return "", nil
 	})
 	var out, errOut bytes.Buffer
-	if code := runServiceIO(&out, &errOut, []string{"logs", "--follow", "extra"}, "127.0.0.1:8090"); code != 2 {
+	if code := runServiceIO(&out, &errOut, []string{"logs", "--follow", "extra"}); code != 2 {
 		t.Fatalf("logs with positional exit %d, want 2", code)
 	}
 }
 
 func TestRunServiceUpdate(t *testing.T) {
+	unsetListenerEnv(t)
 	var got serviceCommand
 	withStub(t, func(c serviceCommand) (string, error) {
 		got = c
 		return serviceSuccessMessage(c), nil
 	})
 	var out, errOut bytes.Buffer
-	if code := runServiceIO(&out, &errOut, []string{"update", "/tmp/art", "abc123"}, "127.0.0.1:8090"); code != 0 {
+	if code := runServiceIO(&out, &errOut, []string{"update", "/tmp/art", "abc123"}); code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
 	}
 	if got.verb != "update" || got.artifact != "/tmp/art" || got.sha != "abc123" {
@@ -132,7 +275,7 @@ func TestRunServiceUpdate(t *testing.T) {
 	} {
 		withStub(t, func(serviceCommand) (string, error) { return "", nil })
 		var b1, b2 bytes.Buffer
-		if code := runServiceIO(&b1, &b2, bad, "127.0.0.1:8090"); code != 2 {
+		if code := runServiceIO(&b1, &b2, bad); code != 2 {
 			t.Fatalf("update %v exit %d, want 2", bad, code)
 		}
 	}
@@ -164,13 +307,14 @@ func TestServiceSuccessMessagesAreStateNeutral(t *testing.T) {
 }
 
 func TestRunServiceNoArgsDefaultsToStatus(t *testing.T) {
+	unsetListenerEnv(t)
 	var got serviceCommand
 	withStub(t, func(c serviceCommand) (string, error) {
 		got = c
 		return "status-body", nil
 	})
 	var out, errOut bytes.Buffer
-	if code := runServiceIO(&out, &errOut, nil, "127.0.0.1:8090"); code != 0 {
+	if code := runServiceIO(&out, &errOut, nil); code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errOut.String())
 	}
 	if got.verb != "status" {
@@ -179,6 +323,7 @@ func TestRunServiceNoArgsDefaultsToStatus(t *testing.T) {
 }
 
 func TestRunServiceSimpleVerbs(t *testing.T) {
+	unsetListenerEnv(t)
 	for _, verb := range []string{"start", "stop", "restart", "enable", "disable", "rollback", "uninstall"} {
 		var got serviceCommand
 		withStub(t, func(c serviceCommand) (string, error) {
@@ -186,7 +331,7 @@ func TestRunServiceSimpleVerbs(t *testing.T) {
 			return "ok", nil
 		})
 		var out, errOut bytes.Buffer
-		if code := runServiceIO(&out, &errOut, []string{verb}, "127.0.0.1:8090"); code != 0 {
+		if code := runServiceIO(&out, &errOut, []string{verb}); code != 0 {
 			t.Fatalf("%s exit %d, stderr: %s", verb, code, errOut.String())
 		}
 		if got.verb != verb {
@@ -195,16 +340,17 @@ func TestRunServiceSimpleVerbs(t *testing.T) {
 		// Positionals and flags are refused.
 		withStub(t, func(serviceCommand) (string, error) { return "", nil })
 		var b1, b2 bytes.Buffer
-		if code := runServiceIO(&b1, &b2, []string{verb, "extra"}, "127.0.0.1:8090"); code != 2 {
+		if code := runServiceIO(&b1, &b2, []string{verb, "extra"}); code != 2 {
 			t.Fatalf("%s with positional exit %d, want 2", verb, code)
 		}
 	}
 }
 
 func TestRunServiceOperationalFailure(t *testing.T) {
+	unsetListenerEnv(t)
 	withStub(t, func(serviceCommand) (string, error) { return "", errors.New("boom") })
 	var out, errOut bytes.Buffer
-	if code := runServiceIO(&out, &errOut, []string{"start"}, "127.0.0.1:8090"); code != 1 {
+	if code := runServiceIO(&out, &errOut, []string{"start"}); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if !strings.Contains(errOut.String(), "boom") {
@@ -213,8 +359,9 @@ func TestRunServiceOperationalFailure(t *testing.T) {
 }
 
 func TestRunServiceUnknownCommand(t *testing.T) {
+	unsetListenerEnv(t)
 	var out, errOut bytes.Buffer
-	if code := runServiceIO(&out, &errOut, []string{"frobnicate"}, "127.0.0.1:8090"); code != 2 {
+	if code := runServiceIO(&out, &errOut, []string{"frobnicate"}); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
 	if !strings.Contains(errOut.String(), "frobnicate") {
@@ -223,6 +370,7 @@ func TestRunServiceUnknownCommand(t *testing.T) {
 }
 
 func TestRunServiceOutputWriters(t *testing.T) {
+	unsetListenerEnv(t)
 	// runService (the os.Stdout/os.Stderr wrapper) still compiles and routes to
 	// the injected writers through runServiceIO; verify the wiring here.
 	var got serviceCommand
@@ -231,7 +379,7 @@ func TestRunServiceOutputWriters(t *testing.T) {
 		return "success-line", nil
 	})
 	var out, errOut bytes.Buffer
-	code := runServiceIO(&out, &errOut, []string{"install", "--listen", "127.0.0.1:9001"}, "127.0.0.1:8090")
+	code := runServiceIO(&out, &errOut, []string{"install", "--listen", "127.0.0.1:9001"})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}

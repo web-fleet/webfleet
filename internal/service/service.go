@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,7 +29,18 @@ var BinaryPath = "/usr/local/bin/webfleet"
 const DefaultDataDir = "/var/lib/webfleet"
 
 // DefaultListen is the canonical loopback listen address embedded in the unit.
-const DefaultListen = "127.0.0.1:8090"
+const DefaultListen = "127.0.0.1:7336"
+
+// listenMode records how a unit's recorded listener is meant to be applied.
+// Explicit units record the canonical --host/--port pair in ExecStart, so the
+// installed process genuinely binds that listener across restart/reboot.
+// Bootstrap units record a legacy WEBFLEET_LISTEN environment / --listen flag,
+// whose address the foreground binds; old units predating the marker default
+// to bootstrap so they keep behaving exactly as before.
+const (
+	modeExplicit  = "explicit"
+	modeBootstrap = "bootstrap"
+)
 
 // ServiceAccount is the dedicated unprivileged account the unit runs as. It is
 // created idempotently by Install so a clean machine needs no hidden manual
@@ -172,8 +184,9 @@ func fileSHA256(path string) (string, error) {
 
 // unitMeta carries the metadata recorded in the managed-unit header.
 type unitMeta struct {
-	data   string
-	listen string
+	data       string
+	listen     string
+	listenMode string
 }
 
 // readManagedUnit validates a managed unit's integrity header and parses its
@@ -203,19 +216,37 @@ func readManagedUnit(content string) (unitMeta, error) {
 	if hex.EncodeToString(sum[:]) != sm[1] {
 		return unitMeta{}, errModified
 	}
-	meta := unitMeta{}
-	dataSeen, listenSeen := 0, 0
+	// Old units predating the listen-mode marker default to bootstrap: their
+	// recorded listener is only a bootstrap value, matching the legacy
+	// behaviour.
+	meta := unitMeta{listenMode: modeBootstrap}
+	dataSeen, listenSeen, modeSeen := 0, 0, 0
 	for _, ln := range lines[2:] {
 		switch {
 		case strings.HasPrefix(ln, "# webfleet-data: "):
 			dataSeen++
+			if dataSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
 			meta.data = strings.TrimSpace(strings.TrimPrefix(ln, "# webfleet-data: "))
 		case strings.HasPrefix(ln, "# webfleet-listen: "):
 			listenSeen++
+			if listenSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
 			meta.listen = strings.TrimSpace(strings.TrimPrefix(ln, "# webfleet-listen: "))
+		case strings.HasPrefix(ln, "# webfleet-listen-mode: "):
+			modeSeen++
+			if modeSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
+			meta.listenMode = strings.TrimSpace(strings.TrimPrefix(ln, "# webfleet-listen-mode: "))
 		}
 	}
 	if dataSeen != 1 || listenSeen != 1 || meta.data == "" || meta.listen == "" {
+		return unitMeta{}, errMalformed
+	}
+	if meta.listenMode != modeExplicit && meta.listenMode != modeBootstrap {
 		return unitMeta{}, errMalformed
 	}
 	for _, v := range []struct{ val, name string }{{meta.listen, "listen"}, {meta.data, "data-dir"}} {
@@ -416,7 +447,9 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return os.Rename(tmp, dst)
 }
 
-// unitBody renders the systemd directives (no managed marker).
+// unitBody renders the systemd directives (no managed marker) for a legacy
+// bootstrap unit: the recorded WEBFLEET_LISTEN environment is what the
+// foreground binds.
 func unitBody(dataDir, listen string) string {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
@@ -449,24 +482,123 @@ WantedBy=multi-user.target
 `
 }
 
-// buildUnit returns the full managed unit content: the marker, the versioned
-// integrity header (SHA-256 of the metadata + body), the recorded metadata and
-// the systemd body.
+// unitBodyExplicit renders the systemd directives (no managed marker) for a
+// new explicit unit: the canonical --host/--port pair is recorded in ExecStart
+// so the installed process genuinely binds that listener across
+// restart/reboot, and no WEBFLEET_LISTEN environment is set (the flags are the
+// runtime authority; the foreground resolves CLI > env > default).
+func unitBodyExplicit(dataDir, host, port string) string {
+	if dataDir == "" {
+		dataDir = DefaultDataDir
+	}
+	var b strings.Builder
+	b.WriteString("[Unit]\n")
+	b.WriteString("Description=Web Fleet website monitoring\n")
+	b.WriteString("After=network-online.target\n")
+	b.WriteString("Wants=network-online.target\n\n")
+	b.WriteString("[Service]\n")
+	b.WriteString("Type=simple\n")
+	b.WriteString("User=" + ServiceUser + "\n")
+	b.WriteString("Group=" + ServiceGroup + "\n")
+	b.WriteString("Environment=WEBFLEET_DATA_DIR=" + systemdQuote(dataDir) + "\n")
+	b.WriteString("ExecStart=" + BinaryPath)
+	b.WriteString(" " + systemdQuote("--host") + " " + systemdQuote(strings.TrimSpace(host)))
+	b.WriteString(" " + systemdQuote("--port") + " " + systemdQuote(strings.TrimSpace(port)))
+	b.WriteString("\n")
+	b.WriteString("Restart=on-failure\n")
+	b.WriteString("RestartSec=3\n")
+	b.WriteString("NoNewPrivileges=true\n")
+	b.WriteString("PrivateTmp=true\n")
+	b.WriteString("ProtectSystem=strict\n")
+	b.WriteString("ProtectHome=true\n")
+	b.WriteString("ReadWritePaths=" + systemdQuote(dataDir) + "\n\n")
+	b.WriteString("[Install]\n")
+	b.WriteString("WantedBy=multi-user.target\n")
+	return b.String()
+}
+
+// buildUnit returns the full managed unit content for a legacy bootstrap
+// install: the marker, the versioned integrity header (SHA-256 of the metadata
+// + body), the recorded metadata (including the listen mode) and the systemd
+// body.
 func buildUnit(dataDir, listen string) string {
-	meta := "# webfleet-data: " + dataDir + "\n# webfleet-listen: " + listen + "\n"
+	meta := "# webfleet-data: " + dataDir + "\n# webfleet-listen: " + listen + "\n# webfleet-listen-mode: " + modeBootstrap + "\n"
 	content := meta + unitBody(dataDir, listen)
 	sum := sha256.Sum256([]byte(content))
 	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
 	return header + content
 }
 
+// buildUnitExplicit returns the full managed unit content for a new explicit
+// --host/--port install, recording the canonical joined listener and the
+// explicit listen-mode marker.
+func buildUnitExplicit(dataDir, host, port string) string {
+	listen := net.JoinHostPort(strings.TrimSpace(host), strings.TrimSpace(port))
+	meta := "# webfleet-data: " + dataDir + "\n# webfleet-listen: " + listen + "\n# webfleet-listen-mode: " + modeExplicit + "\n"
+	content := meta + unitBodyExplicit(dataDir, host, port)
+	sum := sha256.Sum256([]byte(content))
+	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
+	return header + content
+}
+
 // Unit returns the full managed unit content for the given data dir and listen
-// address.
+// address (legacy bootstrap form).
 func Unit(dataDir, listen string) string {
 	return buildUnit(dataDir, listen)
 }
 
-// Install installs (or idempotently reinstalls) the webfleet systemd unit: it
+// UnitExplicit returns the full managed unit content for the given data dir and
+// canonical host/port pair (explicit form recording --host/--port in ExecStart).
+func UnitExplicit(dataDir, host, port string) string {
+	return buildUnitExplicit(dataDir, host, port)
+}
+
+// installOptions carries the values recorded in the managed unit. The legacy
+// single-address listen form is preserved for compatibility (bootstrap mode);
+// otherwise the canonical host/port pair is written to ExecStart (explicit
+// mode) so the recorded listener is the runtime listener.
+type installOptions struct {
+	dataDir    string
+	listen     string
+	host       string
+	port       string
+	listenMode string
+}
+
+// listener returns the canonical listen address recorded in the unit metadata:
+// the legacy listen address when set, otherwise the trimmed host/port pair
+// joined safely (so IPv6 hosts are bracketed).
+func (o installOptions) listener() string {
+	if o.listen != "" {
+		return o.listen
+	}
+	return net.JoinHostPort(strings.TrimSpace(o.host), strings.TrimSpace(o.port))
+}
+
+// unit returns the full managed unit content for the install options.
+func (o installOptions) unit() string {
+	if o.listenMode == modeExplicit {
+		return buildUnitExplicit(o.dataDir, strings.TrimSpace(o.host), strings.TrimSpace(o.port))
+	}
+	return buildUnit(o.dataDir, o.listener())
+}
+
+// Install installs (or idempotently reinstalls) the webfleet systemd unit in
+// the legacy bootstrap form: the recorded listen address is set as the
+// WEBFLEET_LISTEN environment the foreground binds.
+func Install(exe, dataDir, listen string) error {
+	return install(exe, dataDir, installOptions{dataDir: dataDir, listen: listen, listenMode: modeBootstrap})
+}
+
+// InstallExplicit installs (or idempotently reinstalls) the webfleet systemd
+// unit in the explicit form: the canonical host/port pair is recorded as
+// --host/--port in ExecStart so the installed process genuinely binds that
+// listener across restart/reboot.
+func InstallExplicit(exe, dataDir, host, port string) error {
+	return install(exe, dataDir, installOptions{dataDir: dataDir, host: host, port: port, listenMode: modeExplicit})
+}
+
+// install installs (or idempotently reinstalls) the webfleet systemd unit: it
 // creates the service account and data directory, copies the current binary,
 // writes the managed unit, daemon-reloads and restores the operational state.
 //
@@ -487,14 +619,14 @@ func Unit(dataDir, listen string) string {
 // and the returned error combines the original failure with EVERY rollback
 // failure (including neutralization stop/disable) rather than claiming
 // "installation rolled back" blindly.
-func Install(exe, dataDir, listen string) (retErr error) {
+func install(exe, dataDir string, opts installOptions) (retErr error) {
 	if e := requireLinux(); e != nil {
 		return e
 	}
 	if !isRoot() {
 		return errors.New("service install requires root")
 	}
-	for _, v := range []struct{ val, name string }{{dataDir, "data dir"}, {listen, "listen"}} {
+	for _, v := range []struct{ val, name string }{{dataDir, "data dir"}, {opts.listener(), "listen"}} {
 		if e := validateNoControl(v.val, v.name); e != nil {
 			return e
 		}
@@ -502,8 +634,17 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
 	}
-	if listen == "" {
-		listen = DefaultListen
+	opts.dataDir = dataDir
+	if opts.listenMode == modeExplicit {
+		if strings.TrimSpace(opts.host) == "" && strings.TrimSpace(opts.port) == "" {
+			host, port, err := net.SplitHostPort(DefaultListen)
+			if err != nil {
+				return fmt.Errorf("default listener %q is malformed: %w", DefaultListen, err)
+			}
+			opts.host, opts.port = host, port
+		}
+	} else if opts.listen == "" {
+		opts.listen = DefaultListen
 	}
 	if e := validateReadWritePath(dataDir); e != nil {
 		return e
@@ -514,7 +655,7 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found; is systemd installed?")
 	}
-	unit := Unit(dataDir, listen)
+	unit := opts.unit()
 	priorUnit, hadUnit := []byte(nil), false
 	if b, e := os.ReadFile(UnitPath); e == nil {
 		hadUnit = true
@@ -848,6 +989,16 @@ func Uninstall() error {
 	return systemctlSuccess("daemon-reload")
 }
 
+// effectiveListen returns the listener the installed process genuinely binds.
+// Explicit units record the canonical --host/--port pair in ExecStart, which is
+// the runtime listener. Legacy bootstrap units record the WEBFLEET_LISTEN
+// address the unit sets as the runtime environment, which is what the
+// foreground binds (Web Fleet has no config file to consult, so the recorded
+// bootstrap address is the durable source).
+func effectiveListen(meta unitMeta) string {
+	return meta.listen
+}
+
 // Status reports the resolved service state, pid, data/listen configuration and
 // a live health check. It is read-only and does not require root.
 func Status(out io.Writer) error {
@@ -869,7 +1020,7 @@ func Status(out io.Writer) error {
 	active, _ := unitStateWord("is-active")
 	pid, _, _ := systemctl("show", "-p", "MainPID", "--value", "webfleet.service")
 	dataDir := meta.data
-	listen := meta.listen
+	listen := effectiveListen(meta)
 	if dataDir == "" {
 		dataDir = DefaultDataDir
 	}
@@ -1033,7 +1184,7 @@ func verifyActiveAndHealthy() error {
 	listen := DefaultListen
 	if b, e := os.ReadFile(UnitPath); e == nil {
 		if meta, ve := readManagedUnit(string(b)); ve == nil && meta.listen != "" {
-			listen = meta.listen
+			listen = effectiveListen(meta)
 		}
 	}
 	deadline := time.Now().Add(healthWindow)

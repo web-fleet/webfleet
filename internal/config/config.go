@@ -28,7 +28,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	c := Config{DataDir: "./data", Listen: "127.0.0.1:8090", CheckInterval: time.Minute, CrawlInterval: 6 * time.Hour, CheckConcurrency: 8, AuditSandbox: "strict"}
+	c := Config{DataDir: "./data", Listen: "127.0.0.1:7336", CheckInterval: time.Minute, CrawlInterval: 6 * time.Hour, CheckConcurrency: 8, AuditSandbox: "strict"}
 	if v := os.Getenv("WEBFLEET_DATABASE_URL"); v != "" {
 		c.DatabaseURL = v
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/tlshealth"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,7 +34,7 @@ func main() {
 	// Service-management commands must remain usable even when the application
 	// configuration is unhealthy, so dispatch before any runtime config load.
 	if len(os.Args) >= 2 && os.Args[1] == "service" {
-		os.Exit(runService(os.Args[2:], service.DefaultListen))
+		os.Exit(runService(os.Args[2:]))
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -84,6 +85,40 @@ func main() {
 		log.Info("restore complete", "provider", provider, "source", os.Args[2])
 		return
 	}
+	// Foreground server: strip the mode word (serve/worker/analytics-ingest) so
+	// `webfleet serve --host ...` and the recorded unit form `webfleet --host
+	// ... --port ...` both parse identically, then resolve the shared
+	// --host/--port listener flags.
+	args := os.Args[1:]
+	mode := "integrated"
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve", "worker", "analytics-ingest":
+			mode = args[0]
+			args = args[1:]
+		}
+	}
+	fs := flag.NewFlagSet("webfleet", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	host := fs.String("host", "", "HTTP bind host (default 127.0.0.1; WEBFLEET_HOST overrides, CLI wins)")
+	port := fs.String("port", "", "HTTP bind port, 1-65535 (default 7336; WEBFLEET_PORT overrides, CLI wins)")
+	if err := fs.Parse(args); err != nil {
+		log.Error("arguments", "error", err)
+		os.Exit(2)
+	}
+	addr, err := resolveListener(*host, *port, "", flagProvided(fs, "host"), flagProvided(fs, "port"), false)
+	if err != nil {
+		log.Error("listener", "error", err)
+		os.Exit(2)
+	}
+	// An explicitly selected --host/--port (CLI or WEBFLEET_HOST/WEBFLEET_PORT)
+	// overrides the listener loaded by config.Load (WEBFLEET_LISTEN or the
+	// default) in memory, so the advertised override genuinely controls the
+	// runtime bind. A bare invocation or the legacy WEBFLEET_LISTEN keeps the
+	// loaded listener; no durable file is written or rewritten.
+	if listenerOverrideSelected(fs) {
+		cfg.Listen = addr
+	}
 	var st *store.Store
 	if cfg.DatabaseURL != "" {
 		st, err = store.OpenPostgres(context.Background(), cfg.DatabaseURL)
@@ -95,10 +130,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	mode := "integrated"
-	if len(os.Args) >= 2 && map[string]bool{"serve": true, "worker": true, "analytics-ingest": true}[os.Args[1]] {
-		mode = os.Args[1]
-	}
 	mon := monitor.New(st)
 	tlsSvc := tlshealth.New(st)
 	dnsSvc := dnsobs.New(st)
@@ -139,7 +170,7 @@ func main() {
 		log.Info("shutdown requested")
 	case err := <-errc:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server failed", "error", err)
+			log.Error("server failed", "error", fmt.Errorf("%v (listener: %s)", err, cfg.Listen))
 			os.Exit(1)
 		}
 	}
@@ -150,11 +181,30 @@ func main() {
 	}
 }
 
+// listenerOverrideSelected reports whether the user explicitly selected the
+// new host/port listener form (CLI flags or WEBFLEET_HOST/WEBFLEET_PORT
+// environment). The legacy WEBFLEET_LISTEN and bare invocations keep the
+// listener loaded by config.Load.
+func listenerOverrideSelected(fs *flag.FlagSet) bool {
+	if flagProvided(fs, "host") || flagProvided(fs, "port") {
+		return true
+	}
+	if _, ok := os.LookupEnv("WEBFLEET_HOST"); ok {
+		return true
+	}
+	if _, ok := os.LookupEnv("WEBFLEET_PORT"); ok {
+		return true
+	}
+	return false
+}
+
 // serviceCommand is the fully parsed `webfleet service <verb>` invocation.
 type serviceCommand struct {
 	verb     string
 	data     string
 	listen   string
+	host     string
+	port     string
 	follow   bool
 	artifact string
 	sha      string
@@ -197,8 +247,17 @@ func serviceSuccessMessage(c serviceCommand) string {
 var execServiceCommand = func(c serviceCommand) (string, error) {
 	switch c.verb {
 	case "install":
-		if err := service.Install(service.Executable(), c.data, c.listen); err != nil {
-			return "", err
+		// A legacy --listen bootstrap records the single address; the explicit
+		// --host/--port form records the canonical pair in ExecStart so the
+		// runtime listener survives restart/reboot.
+		if c.listen != "" {
+			if err := service.Install(service.Executable(), c.data, c.listen); err != nil {
+				return "", err
+			}
+		} else {
+			if err := service.InstallExplicit(service.Executable(), c.data, c.host, c.port); err != nil {
+				return "", err
+			}
 		}
 	case "uninstall":
 		if err := service.Uninstall(); err != nil {
@@ -252,7 +311,7 @@ var execServiceCommand = func(c serviceCommand) (string, error) {
 // command-local flags, preserving `--flag value` pairs that the previous
 // separator-based parser could not (it stripped flag values into positionals).
 // Exit-code model: 0 success, 1 operational failure, 2 usage error.
-func parseServiceCommand(args []string, defaultListen string) (serviceCommand, error) {
+func parseServiceCommand(args []string) (serviceCommand, error) {
 	if len(args) == 0 {
 		args = []string{"status"}
 	}
@@ -264,7 +323,9 @@ func parseServiceCommand(args []string, defaultListen string) (serviceCommand, e
 		fs := flag.NewFlagSet("install", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		data := fs.String("data", "", "data directory")
-		listen := fs.String("listen", "", "listen address")
+		listen := fs.String("listen", "", "listen address (legacy; alternative to --host/--port, honors WEBFLEET_LISTEN)")
+		host := fs.String("host", "", "HTTP bind host (default 127.0.0.1; WEBFLEET_HOST overrides, CLI wins)")
+		port := fs.String("port", "", "HTTP bind port, 1-65535 (default 7336; WEBFLEET_PORT overrides, CLI wins)")
 		if err := fs.Parse(rest); err != nil {
 			return cmd, fmt.Errorf("install: %v", err)
 		}
@@ -272,12 +333,23 @@ func parseServiceCommand(args []string, defaultListen string) (serviceCommand, e
 			return cmd, fmt.Errorf("install takes no positional arguments: %s", strings.Join(fs.Args(), " "))
 		}
 		cmd.data = *data
-		cmd.listen = *listen
 		if cmd.data == "" {
 			cmd.data = service.DefaultDataDir
 		}
-		if cmd.listen == "" {
-			cmd.listen = defaultListen
+		// Only install resolves and validates the listener environment
+		// (WEBFLEET_HOST/WEBFLEET_PORT/WEBFLEET_LISTEN), so malformed listener
+		// env in the invoking shell never breaks the other service verbs.
+		addr, legacy, err := resolveServiceInstall(*host, *port, *listen, flagProvided(fs, "host"), flagProvided(fs, "port"), flagProvided(fs, "listen"))
+		if err != nil {
+			return cmd, fmt.Errorf("install: %v", err)
+		}
+		if legacy {
+			cmd.listen = addr
+			return cmd, nil
+		}
+		cmd.host, cmd.port, err = net.SplitHostPort(addr)
+		if err != nil {
+			return cmd, fmt.Errorf("install: cannot split resolved listener %q: %v", addr, err)
 		}
 		return cmd, nil
 	case "logs":
@@ -319,11 +391,31 @@ func parseServiceCommand(args []string, defaultListen string) (serviceCommand, e
 	}
 }
 
+// resolveServiceInstall resolves the listener recorded by `webfleet service
+// install` and reports whether the recorded form is the legacy bootstrap
+// single address (--listen / WEBFLEET_LISTEN) or the explicit --host/--port
+// pair. Precedence and conflict rules are identical to the foreground:
+// CLI > env > default, --listen conflicts with --host/--port, and env-only
+// WEBFLEET_LISTEN + WEBFLEET_HOST/WEBFLEET_PORT conflicts fail clearly.
+func resolveServiceInstall(hostFlag, portFlag, listenFlag string, hostSet, portSet, listenSet bool) (string, bool, error) {
+	addr, err := resolveListener(hostFlag, portFlag, listenFlag, hostSet, portSet, listenSet)
+	if err != nil {
+		return "", false, err
+	}
+	legacy := listenSet
+	if !legacy {
+		if _, hasListen := os.LookupEnv("WEBFLEET_LISTEN"); hasListen && !hostSet && !portSet {
+			legacy = true
+		}
+	}
+	return addr, legacy, nil
+}
+
 // runServiceIO runs a parsed `webfleet service` command against the lifecycle
 // seam and writes diagnostics to the supplied writers. It is the testable core
 // of runService.
-func runServiceIO(out, errOut io.Writer, args []string, defaultListen string) int {
-	cmd, err := parseServiceCommand(args, defaultListen)
+func runServiceIO(out, errOut io.Writer, args []string) int {
+	cmd, err := parseServiceCommand(args)
 	if err != nil {
 		fmt.Fprintf(errOut, "webfleet service: %v\n", err)
 		return 2
@@ -342,6 +434,6 @@ func runServiceIO(out, errOut io.Writer, args []string, defaultListen string) in
 // runService dispatches `webfleet service <command>` with the same CLI shape,
 // exit-code model and diagnostics as the sibling projects (Cortex, Warden,
 // Trestle, Watchpost), while operating the Web Fleet systemd **system** unit.
-func runService(args []string, defaultListen string) int {
-	return runServiceIO(os.Stdout, os.Stderr, args, defaultListen)
+func runService(args []string) int {
+	return runServiceIO(os.Stdout, os.Stderr, args)
 }
