@@ -99,4 +99,5 @@ check "wrong signer workflow rejected" "$(run "$REPO" "$VERSION" "$VERSION" "$AS
 check "missing attestation fails verifier" "$(run "$REPO" "$VERSION" "$VERSION" "$ASSETS" "$COMMIT" "$WORKFLOW" "windows_arm64")" 1
 check "bad attestation fails verifier" "$(run "$REPO" "$VERSION" "$VERSION" "$ASSETS" "$COMMIT" "$WORKFLOW" "" "bad")" 1
 
+rm -rf "$DIST"
 [ "$fail" -eq 0 ] && echo "verify-gh-release contract tests: PASS" || { echo "verify-gh-release contract tests: FAIL" >&2; exit 1; }
