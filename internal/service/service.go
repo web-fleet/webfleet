@@ -471,7 +471,9 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 // unitBody renders the systemd directives (no managed marker) for a legacy
 // bootstrap unit: the recorded WEBFLEET_LISTEN environment is what the
-// foreground binds.
+// foreground binds. StartLimitIntervalSec=0 disables systemd's start rate
+// limiting so install/update/rollback restarts in quick succession never trip
+// the default 5-starts-per-10s limit.
 func unitBody(dataDir, listen string) string {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
@@ -483,6 +485,7 @@ func unitBody(dataDir, listen string) string {
 Description=Web Fleet website monitoring
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -508,7 +511,9 @@ WantedBy=multi-user.target
 // new explicit unit: the canonical --host/--port pair is recorded in ExecStart
 // so the installed process genuinely binds that listener across
 // restart/reboot, and no WEBFLEET_LISTEN environment is set (the flags are the
-// runtime authority; the foreground resolves CLI > env > default).
+// runtime authority; the foreground resolves CLI > env > default). As in the
+// bootstrap body, StartLimitIntervalSec=0 disables the start rate limit for
+// legitimate install/update/rollback restarts.
 func unitBodyExplicit(dataDir, host, port string) string {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
@@ -517,7 +522,8 @@ func unitBodyExplicit(dataDir, host, port string) string {
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=Web Fleet website monitoring\n")
 	b.WriteString("After=network-online.target\n")
-	b.WriteString("Wants=network-online.target\n\n")
+	b.WriteString("Wants=network-online.target\n")
+	b.WriteString("StartLimitIntervalSec=0\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
 	b.WriteString("User=" + ServiceUser + "\n")

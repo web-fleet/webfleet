@@ -152,7 +152,7 @@ func installManagedUnit(t *testing.T) {
 func TestUnitHardeningAndManagedMarker(t *testing.T) {
 	setupService(t)
 	u := Unit("/var/lib/webfleet", "127.0.0.1:8090")
-	for _, x := range []string{"# Managed by webfleet. Do not edit manually.", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadWritePaths=\"/var/lib/webfleet\"", "User=" + ServiceUser, "Group=" + ServiceGroup, "WantedBy=multi-user.target"} {
+	for _, x := range []string{"# Managed by webfleet. Do not edit manually.", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadWritePaths=\"/var/lib/webfleet\"", "User=" + ServiceUser, "Group=" + ServiceGroup, "WantedBy=multi-user.target", "StartLimitIntervalSec=0"} {
 		if !strings.Contains(u, x) {
 			t.Fatal("missing " + x)
 		}
@@ -2310,6 +2310,9 @@ func TestUnitExplicitRecordsHostPortInExecStart(t *testing.T) {
 	}
 	if !strings.Contains(u, "# webfleet-listen: 127.0.0.1:7336") {
 		t.Fatalf("explicit unit must record the canonical joined listener:\n%s", u)
+	}
+	if !strings.Contains(u, "StartLimitIntervalSec=0") {
+		t.Fatalf("explicit unit must disable the start rate limit:\n%s", u)
 	}
 	// IPv6 hosts are bracketed in the metadata and ExecStart.
 	u6 := UnitExplicit("/var/lib/webfleet", "::1", "7336")
