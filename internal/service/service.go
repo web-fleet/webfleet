@@ -731,10 +731,16 @@ func Update(artifact, want string) error {
 		return fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
 	}
 	if e := verifyActiveAndHealthy(); e != nil {
-		restoreAfterFailedUpdate()
+		rbErr := restoreAfterFailedUpdate()
+		if rbErr != nil {
+			return fmt.Errorf("update: new binary failed to become healthy (%v); recovery also failed: %v", e, rbErr)
+		}
 		return fmt.Errorf("update: new binary failed to become healthy: %w", e)
 	}
-	_ = os.Remove(BinaryPath + ".prior-active")
+	// Successful active update: retain the rollback binary and the prior-active
+	// marker so a later manual `service rollback` can still restore the previous
+	// version and its operational state. The metadata is consumed only by a
+	// subsequent successful rollback.
 	return nil
 }
 
@@ -762,19 +768,31 @@ func verifyActiveAndHealthy() error {
 	return fmt.Errorf("service did not become active and healthy within %s", healthWindow)
 }
 
-// restoreAfterFailedUpdate stops the failed/new service, restores the old
-// binary and re-activates it (best-effort, matching the originally active state).
-func restoreAfterFailedUpdate() {
+// restoreAfterFailedUpdate verifiably restores the previous version and its
+// operational state after a failed update. It returns an error if any step of
+// the recovery (stop, binary restore, restart, health) fails, so a failed
+// update never silently claims a rollback happened.
+func restoreAfterFailedUpdate() error {
 	priorActive := "active"
 	if b, e := os.ReadFile(BinaryPath + ".prior-active"); e == nil {
 		priorActive = strings.TrimSpace(string(b))
 	}
-	_ = systemctlSuccess("stop", "webfleet.service")
-	_ = copyFile(BinaryPath+".rollback", BinaryPath, 0o755)
-	_ = os.Remove(BinaryPath + ".prior-active")
-	if priorActive == "active" {
-		_ = systemctlSuccess("restart", "webfleet.service")
+	if e := systemctlSuccess("stop", "webfleet.service"); e != nil {
+		return fmt.Errorf("recovery: stop failed service: %w", e)
 	}
+	if e := copyFile(BinaryPath+".rollback", BinaryPath, 0o755); e != nil {
+		return fmt.Errorf("recovery: restore old binary: %w", e)
+	}
+	if priorActive == "active" {
+		if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
+			return fmt.Errorf("recovery: restart old service: %w", e)
+		}
+		if e := verifyActiveAndHealthy(); e != nil {
+			return fmt.Errorf("recovery: restored service not healthy: %w", e)
+		}
+	}
+	_ = os.Remove(BinaryPath + ".prior-active")
+	return nil
 }
 
 func Rollback() error {
@@ -810,13 +828,20 @@ func Rollback() error {
 		_ = os.Rename(cur, BinaryPath)
 		return e
 	}
-	_ = os.Remove(BinaryPath + ".prior-active")
 	if !wasActive {
+		// Stopped state preserved: consume rollback metadata only after success.
+		_ = os.Remove(BinaryPath + ".prior-active")
+		_ = os.Remove(BinaryPath + ".rollback")
 		return nil
 	}
 	if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
 		return e
 	}
-	return verifyActiveAndHealthy()
+	if e := verifyActiveAndHealthy(); e != nil {
+		return e
+	}
+	_ = os.Remove(BinaryPath + ".prior-active")
+	_ = os.Remove(BinaryPath + ".rollback")
+	return nil
 }
 func Executable() string { p, _ := os.Executable(); p, _ = filepath.Abs(p); return p }

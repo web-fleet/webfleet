@@ -18,6 +18,8 @@ import (
 type fakeRunner struct {
 	script map[string]fakeResult // key "verb args..." -> result
 	log    []string
+	calls  map[string]int // per-key call count for sequence scripting
+	seq    map[string][]fakeResult
 }
 type fakeResult struct {
 	out  string
@@ -28,6 +30,15 @@ type fakeResult struct {
 func (f *fakeRunner) Run(name string, args ...string) (string, int, error) {
 	key := name + " " + strings.Join(args, " ")
 	f.log = append(f.log, key)
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	n := f.calls[key]
+	f.calls[key] = n + 1
+	if seq, ok := f.seq[key]; ok && n < len(seq) {
+		r := seq[n]
+		return r.out, r.code, r.err
+	}
 	if r, ok := f.script[key]; ok {
 		return r.out, r.code, r.err
 	}
@@ -59,7 +70,7 @@ func setupService(t *testing.T) *fakeRunner {
 	ensureAccount = func() error { return nil }
 	chownData = func(string) error { return nil }
 	mkdirData = func(string, os.FileMode) error { return nil }
-	r := &fakeRunner{script: map[string]fakeResult{}}
+	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
 	defaultRunner = r
 	t.Cleanup(func() {
 		UnitPath, BinaryPath = oldUnit, oldBin
@@ -536,12 +547,15 @@ func TestRollbackRestoresRunningState(t *testing.T) {
 		t.Fatal(e)
 	}
 	r.log = nil
-	os.WriteFile(BinaryPath+".prior-active", []byte("active"), 0o600)
 	if e := Rollback(); e != nil {
 		t.Fatal(e)
 	}
 	if !contains(r.log, "systemctl restart webfleet.service") {
 		t.Fatal("rollback of an active service did not restart it")
+	}
+	// After a successful rollback the metadata is consumed.
+	if _, e := os.Stat(BinaryPath + ".rollback"); !os.IsNotExist(e) {
+		t.Fatal("rollback metadata not consumed after successful rollback")
 	}
 	// Enable/disable state is never touched by update or rollback.
 	for _, call := range r.log {
@@ -620,4 +634,122 @@ func TestRollbackFailClosedWithoutMarker(t *testing.T) {
 		t.Fatal("rollback defaulted to active without a prior-state marker")
 	}
 	_ = r
+}
+
+// TestEndToEndActiveUpdateThenRollback proves a successful update of an active
+// service retains rollback metadata and a later manual Rollback restores the
+// old binary and the active state - with NO test-side metadata fabrication.
+func TestEndToEndActiveUpdateThenRollback(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	// Metadata must survive a successful active update.
+	if _, e := os.Stat(BinaryPath + ".rollback"); e != nil {
+		t.Fatal("rollback binary missing after successful update")
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); e != nil {
+		t.Fatal("prior-active marker missing after successful update")
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if bytes.Equal(now, oldBin) {
+		t.Fatal("update did not replace the binary")
+	}
+	// Manual rollback restores the old binary and the active state.
+	r.log = nil
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	back, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("rollback did not restore the old binary")
+	}
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatal("rollback of an active service did not restart it")
+	}
+}
+
+// TestEndToEndStoppedUpdateThenRollback proves a successful update of a stopped
+// service retains metadata and a later Rollback restores the old binary while
+// leaving the service stopped.
+func TestEndToEndStoppedUpdateThenRollback(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	setState(r, "enabled", "inactive")
+	prepareUpdate(r, "inactive", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); e != nil {
+		t.Fatal("prior-active marker missing after stopped update")
+	}
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	back, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("rollback did not restore the old binary")
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart webfleet.service") || strings.Contains(call, "start webfleet.service") {
+			t.Fatalf("rollback of a stopped service started it: %s", call)
+		}
+	}
+}
+
+// TestFailedUpdateRecoverySurfacesFailures proves recovery is verified and a
+// failed restoration step is surfaced rather than silently claimed.
+func TestFailedUpdateRecoverySurfacesFailures(t *testing.T) {
+	// Recovery restart failure after an unhealthy new version is surfaced.
+	{
+		r := setupService(t)
+		installManagedUnit(t)
+		setState(r, "enabled", "active")
+		prepareUpdate(r, "active", false) // health fails -> recovery path
+		healthWindow = 1 * time.Second
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+		r.script["systemctl restart webfleet.service"] = fakeResult{}
+		r.script["systemctl stop webfleet.service"] = fakeResult{}
+		// Recovery restart (the 2nd restart call) fails.
+		r.seq["systemctl restart webfleet.service"] = []fakeResult{{}, {out: "restore failed", code: 1}}
+		uerr := Update(exe, fakeSHA(exe))
+		if uerr == nil {
+			t.Fatal("update succeeded despite a failed recovery restart")
+		}
+		if !strings.Contains(uerr.Error(), "recovery") {
+			t.Fatalf("recovery restart failure not surfaced: %v", uerr)
+		}
+	}
+	// Recovery stop failure is surfaced.
+	{
+		r := setupService(t)
+		installManagedUnit(t)
+		setState(r, "enabled", "active")
+		prepareUpdate(r, "active", false)
+		healthWindow = 1 * time.Second
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+		r.script["systemctl restart webfleet.service"] = fakeResult{}
+		r.script["systemctl stop webfleet.service"] = fakeResult{out: "cannot stop", code: 1}
+		uerr := Update(exe, fakeSHA(exe))
+		if uerr == nil {
+			t.Fatal("update succeeded despite a failed recovery stop")
+		}
+		if !strings.Contains(uerr.Error(), "recovery") {
+			t.Fatalf("recovery stop failure not surfaced: %v", uerr)
+		}
+	}
 }
