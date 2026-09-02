@@ -339,7 +339,12 @@ func (s *Service) Fleet(orgID int64, days int) (FleetSummary, error) {
 		days = 1
 	}
 	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
-	r, e := sqlite.Query(s.st.DB, `SELECT COALESCE(SUM(d.pageviews),0) pageviews,COALESCE(SUM(d.visitors),0) visitors,(SELECT COUNT(*) FROM analytics_properties ap JOIN sites s ON s.id=ap.site_id WHERE ap.enabled=1 AND s.organization_id=?) sites FROM analytics_daily d WHERE d.property_id IN (SELECT ap.id FROM analytics_properties ap JOIN sites s ON s.id=ap.site_id WHERE s.organization_id=?) AND d.day>=?`, orgID, orgID, since)
+	// Headline fleet totals are derived from the event table over the requested
+	// window with the same weekly-bucket pseudonym as the site Summary, so a
+	// multi-day fleet visitor total is a true unique-visitor estimate. Because
+	// visitor_key is instance-wide (IP-derived), the same anonymous identity
+	// observed on two different properties counts once as one fleet visitor.
+	r, e := sqlite.Query(s.st.DB, `SELECT (SELECT COUNT(*) FROM analytics_events ev JOIN analytics_properties ap ON ap.id=ev.property_id JOIN sites s ON s.id=ap.site_id WHERE s.organization_id=? AND ev.kind='pageview' AND ev.occurred_at>=?) pageviews,(SELECT COUNT(DISTINCT ev.visitor_key) FROM analytics_events ev JOIN analytics_properties ap ON ap.id=ev.property_id JOIN sites s ON s.id=ap.site_id WHERE s.organization_id=? AND ev.kind='pageview' AND ev.occurred_at>=?) visitors,(SELECT COUNT(*) FROM analytics_properties ap JOIN sites s ON s.id=ap.site_id WHERE ap.enabled=1 AND s.organization_id=?) sites`, orgID, since, orgID, since, orgID)
 	if e != nil {
 		return FleetSummary{}, e
 	}

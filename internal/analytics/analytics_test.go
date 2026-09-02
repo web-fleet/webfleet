@@ -402,3 +402,93 @@ func TestVisitorIdentityIsPeriodStableAcrossDays(t *testing.T) {
 		}
 	}
 }
+
+// TestRollingSevenDayWindowSpansWeeklyBoundary proves the documented
+// approximation: a rolling last-7-days report that crosses the weekly privacy
+// boundary counts the same normalized IP twice (two weekly pseudonyms). The UI
+// explicitly documents this behavior rather than presenting exact 7-day
+// unique visitors.
+func TestRollingSevenDayWindowSpansWeeklyBoundary(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	sqlite.Exec(st.DB, `INSERT INTO sites(organization_id,name,primary_url,created_at,updated_at) VALUES(1,'x','https://example.com',?,?)`, store.Now(), store.Now())
+	s := New(st)
+	p, _ := s.Enable(1)
+	saltRows, _ := sqlite.Query(st.DB, `SELECT value FROM app_settings WHERE key='analytics_visitor_salt'`)
+	salt := saltRows[0]["value"].Text
+	key := func(bucket, ip string) string {
+		mac := hmac.New(sha256.New, []byte(salt))
+		mac.Write([]byte(bucket + "|" + ip))
+		return hex.EncodeToString(mac.Sum(nil)[:12])
+	}
+	// The boundary between the previous and current weekly buckets, within the
+	// rolling last-7-days window.
+	b := weeklyBucket(time.Now().UTC())
+	boundary := weeklyEpoch.Add(time.Duration(mustBucketIndex(b)) * 7 * 24 * time.Hour)
+	before := boundary.Add(-time.Hour)
+	after := boundary.Add(time.Hour)
+	if weeklyBucket(before) == weeklyBucket(after) {
+		t.Fatalf("test dates did not straddle the weekly boundary")
+	}
+	for _, ev := range []struct{ ip, path, at, key string }{
+		{"203.0.113.10", "/a", before.Format(time.RFC3339), key(weeklyBucket(before), "203.0.113.10")},
+		{"203.0.113.10", "/b", after.Format(time.RFC3339), key(weeklyBucket(after), "203.0.113.10")},
+	} {
+		_ = sqlite.Exec(st.DB, `INSERT INTO analytics_events(property_id,kind,path,visitor_key,occurred_at) VALUES(?,'pageview',?,?,?)`, p.ID, ev.path, ev.key, ev.at)
+	}
+	sum, e := s.Summary(1, 7)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Documented approximation: two weekly pseudonyms for the same IP inside a
+	// rolling 7-day window that crosses the boundary.
+	if sum.Visitors != 2 {
+		t.Fatalf("rolling 7-day visitors=%d want 2 (same IP straddling the weekly boundary, documented approximation)", sum.Visitors)
+	}
+}
+
+// TestFleetMultiDayVisitorSemanticsMatchesSummary proves Fleet(days>1) uses the
+// same weekly-pseudonym unique-visitor semantics as the site Summary, and that
+// one instance-wide identity across two properties counts once as one fleet
+// visitor.
+func TestFleetMultiDayVisitorSemanticsMatchesSummary(t *testing.T) {
+	st, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	sqlite.Exec(st.DB, `INSERT INTO sites(organization_id,name,primary_url,created_at,updated_at) VALUES(1,'x','https://example.com',?,?)`, store.Now(), store.Now())
+	sqlite.Exec(st.DB, `INSERT INTO sites(organization_id,name,primary_url,created_at,updated_at) VALUES(1,'y','https://other.example.com',?,?)`, store.Now(), store.Now())
+	s := New(st)
+	p1, _ := s.Enable(1)
+	p2, _ := s.Enable(2)
+	saltRows, _ := sqlite.Query(st.DB, `SELECT value FROM app_settings WHERE key='analytics_visitor_salt'`)
+	salt := saltRows[0]["value"].Text
+	b := weeklyBucket(time.Now().UTC())
+	mac := hmac.New(sha256.New, []byte(salt))
+	mac.Write([]byte(b + "|203.0.113.10"))
+	vk := hex.EncodeToString(mac.Sum(nil)[:12])
+	now := store.Now()
+	// Same identity (same IP) on two different properties, two days apart.
+	day2 := time.Now().UTC().AddDate(0, 0, -1).Format(time.RFC3339)
+	_ = sqlite.Exec(st.DB, `INSERT INTO analytics_events(property_id,kind,path,visitor_key,occurred_at) VALUES(?,'pageview','/',?,?)`, p1.ID, vk, now)
+	_ = sqlite.Exec(st.DB, `INSERT INTO analytics_events(property_id,kind,path,visitor_key,occurred_at) VALUES(?,'pageview','/',?,?)`, p2.ID, vk, day2)
+	f, e := s.Fleet(1, 7)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// One anonymous identity across both properties in a 7-day window = 1 fleet
+	// visitor (instance-wide pseudonym), not 2 (no daily-sum overcount).
+	if f.Visitors != 1 {
+		t.Fatalf("fleet visitors=%d want 1 (same instance-wide identity on two properties over 7 days)", f.Visitors)
+	}
+	if f.Pageviews != 2 {
+		t.Fatalf("fleet pageviews=%d want 2", f.Pageviews)
+	}
+	if f.SitesWithAnalytics != 2 {
+		t.Fatalf("fleet sites=%d want 2", f.SitesWithAnalytics)
+	}
+}

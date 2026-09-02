@@ -1045,6 +1045,10 @@ func TestA11yAnalyticsEnableInstallAndDisable(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('tracker-dialog').open === false`) {
 		t.Fatal("tracking modal did not close")
 	}
+	// Country section states the offline GeoIP seam truthfully.
+	if !a11yPoll(t, ctx, `document.body.textContent.includes('Visitor country data is unavailable until a local GeoIP database is configured.')`) {
+		t.Fatal("country-unavailable note missing when no GeoIP dataset is configured")
+	}
 	// Permanent Tracking code button reopens it later.
 	if !a11yPoll(t, ctx, `!!document.getElementById('show-tracker')`) {
 		t.Fatal("Tracking code button missing after enabling")
