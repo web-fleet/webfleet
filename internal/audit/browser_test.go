@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -175,23 +176,31 @@ func TestBrowserCannotReachLoopbackDirectly(t *testing.T) {
 // TestBrowserTimeoutKillsProcess proves a hung target cannot hold an audit
 // beyond the configured timeout, and that cancellation is not silently
 // accepted as a successful audit.
-// fakeHangingBrowser returns an executable that never exits on its own, so the
-// timeout-kill path is exercised deterministically. Real Chromium with
+// fakeHangingBrowser returns a small compiled executable that never exits, so
+// the timeout-kill path is exercised deterministically. Real Chromium with
 // --dump-dom can exit 0 with an error DOM before the timeout on a loaded -race
-// runner, which made the previous real-browser version flaky; the real browser
-// path remains covered by TestBrowserTrafficFlowsThroughGuardedProxy.
+// runner, which made the real-browser version flaky; the real browser path
+// remains covered by TestBrowserTrafficFlowsThroughGuardedProxy.
 func fakeHangingBrowser(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "browser")
-	if e := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 1000\n"), 0o755); e != nil {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	bin := filepath.Join(dir, "browser")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if e := os.WriteFile(src, []byte("package main\nfunc main() { for {} }\n"), 0o644); e != nil {
 		t.Fatal(e)
+	}
+	if out, e := exec.Command("go", "build", "-o", bin, src).CombinedOutput(); e != nil {
+		t.Fatalf("build fake browser: %v: %s", e, out)
 	}
 	return bin
 }
 
 func TestBrowserTimeoutKillsProcess(t *testing.T) {
-	// The fixture browser accepts the connection and never responds, so a real
-	// browser would hang without the timeout; here the fake browser hangs
+	// The fixture accepts the connection and never responds, so a real browser
+	// would hang without the timeout; here the fake browser hangs
 	// unconditionally, guaranteeing the timeout path fires.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
