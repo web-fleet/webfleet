@@ -222,8 +222,16 @@ jobs:
           /tmp/wf service status | grep -E 'listen: *127.0.0.1:8091'
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true' && break; sleep 0.5; done
           curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true'
-          # restore the canonical default (explicit 127.0.0.1:7336)
+          # a bare reinstall preserves the existing bootstrap listener
           sudo /tmp/wf service install
+          /tmp/wf service status | grep -E 'listen: *127.0.0.1:8091'
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true' && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1:8091/healthz | grep -q '"ok":true'
+          # restore the canonical explicit default (127.0.0.1:7336) for the update section
+          sudo /tmp/wf service install --host 127.0.0.1 --port 7336
+          grep -q 'ExecStart=/usr/local/bin/webfleet "--host" "127.0.0.1" "--port" "7336"' /etc/systemd/system/webfleet.service
+          grep -q '# webfleet-listen-mode: explicit' /etc/systemd/system/webfleet.service
+          /tmp/wf service status | grep -E 'listen: *127.0.0.1:7336'
           sudo /tmp/wf service start
           wait_healthz
           # update with a verified artifact
