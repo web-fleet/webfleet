@@ -36,6 +36,7 @@ type Service struct {
 	validLim      *limiter
 	badLim        *limiter
 	nowFn         func() time.Time
+	gdb           *geo.DB
 }
 
 // Options configures the analytics service. AllowNoOrigin enables a deliberate
@@ -161,7 +162,10 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 	}
 	// Country is resolved at ingestion time from the source IP and stored as a
 	// coarse code (e.g. AU). The IP itself is discarded immediately.
-	country := geo.LookupCountry(ip)
+	country := ""
+	if s.gdb != nil {
+		country = s.gdb.Lookup(ip)
+	}
 	if e := sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,country,occurred_at) VALUES(?,?,?,?,?,?,?,?,?)`, pid, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, country, store.Now()); e != nil {
 		return e
 	}
@@ -397,6 +401,9 @@ const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if
 
 // Disable stops the property from accepting/recording new tracker events.
 // Historical analytics and the property configuration are preserved.
+// SetGeo installs the loaded local country database (nil = unavailable).
+func (s *Service) SetGeo(db *geo.DB) { s.gdb = db }
+
 func (s *Service) Disable(siteID int64) error {
 	p, e := s.Property(siteID)
 	if e != nil || p == nil {
@@ -463,11 +470,13 @@ func (s *Service) Pages(siteID int64, days, page, pageSize int) (PageViews, erro
 }
 
 type Countries struct {
-	Available bool  `json:"available"`
-	Page      int   `json:"page"`
-	PageSize  int   `json:"page_size"`
-	Total     int64 `json:"total"`
-	Pages     int   `json:"pages"`
+	Available bool   `json:"available"`
+	Updated   string `json:"updated"`
+	Ranges    int    `json:"ranges"`
+	Page      int    `json:"page"`
+	PageSize  int    `json:"page_size"`
+	Total     int64  `json:"total"`
+	Pages     int    `json:"pages"`
 	Rows      []struct {
 		Country  string `json:"country"`
 		Visitors int64  `json:"visitors"`
@@ -496,7 +505,7 @@ func (s *Service) Countries(siteID int64, days, page, pageSize int) (Countries, 
 	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT country) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND country<>''`, p.ID, since); qe == nil && len(r) > 0 {
 		total = r[0]["n"].Int64
 	}
-	out := Countries{Available: geo.Available(), Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
+	out := Countries{Available: s.gdb != nil, Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
 		Country  string `json:"country"`
 		Visitors int64  `json:"visitors"`
 	}{}}

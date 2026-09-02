@@ -24,6 +24,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/deployments"
 	"github.com/web-fleet/webfleet/internal/dnsobs"
 	"github.com/web-fleet/webfleet/internal/fleet"
+	"github.com/web-fleet/webfleet/internal/geo"
 	"github.com/web-fleet/webfleet/internal/incidents"
 	"github.com/web-fleet/webfleet/internal/maintenance"
 	"github.com/web-fleet/webfleet/internal/monitor"
@@ -112,6 +113,7 @@ var apiRouteDefs = []routeDef{
 	{"GET", "/api/sites/{id}/analytics/pages", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsPages }, []string{"analytics:read"}},
 	{"GET", "/api/sites/{id}/analytics/countries", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsCountries }, []string{"analytics:read"}},
 	{"POST", "/api/sites/{id}/analytics/disable", "analytics.manage", true, func(s *Server) handler { return s.handleDisableAnalytics }, []string{"sites:write"}},
+	{"POST", "/api/analytics/geo/update", "analytics.manage", true, func(s *Server) handler { return s.handleGeoUpdate }, []string{"sites:write"}},
 	{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsGoals }, []string{"analytics:read"}},
 	{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true, func(s *Server) handler { return s.handleCreateAnalyticsGoal }, []string{"sites:write"}},
 	{"GET", "/api/maintenance", "maintenance.read", false, func(s *Server) handler { return s.handleMaintenance }, nil},
@@ -163,6 +165,7 @@ type Server struct {
 	dns           *dnsobs.Service
 	deployments   *deployments.Service
 	crawler       *crawler.Service
+	geo           *geo.Manager
 	log           *slog.Logger
 	http          *http.Server
 	mux           *http.ServeMux
@@ -173,16 +176,36 @@ type Server struct {
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide}), tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
+	a := analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide})
+	s := &Server{cfg: cfg, store: st, analytics: a, tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), geo: geo.NewManager(cfg.DataDir, cfg.GeoIPURL), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
 	s.oidc = oidc.New(st, s.auth)
 	s.notifications = notifications.New(st)
+	// Local country database: load any already-installed copy (no network); when
+	// auto-update is enabled, install one in the background so country analytics
+	// work out of the box.
+	if s.geo.LoadExisting() {
+		a.SetGeo(s.geo.DB())
+	}
+	if cfg.GeoIPAutoUpdate && s.geo.DB() == nil {
+		go func() {
+			if err := s.geo.Install(context.Background(), false); err == nil {
+				a.SetGeo(s.geo.DB())
+			} else {
+				log.Warn("geoip auto-install failed", "error", err)
+			}
+		}()
+	}
 	s.routes()
 	s.http = &http.Server{Addr: cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
 
 func NewAnalyticsIngest(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, analytics: analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide}), log: log, mux: http.NewServeMux()}
+	a := analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide})
+	s := &Server{cfg: cfg, store: st, analytics: a, geo: geo.NewManager(cfg.DataDir, cfg.GeoIPURL), log: log, mux: http.NewServeMux()}
+	if s.geo.LoadExisting() {
+		a.SetGeo(s.geo.DB())
+	}
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "mode": "analytics-ingest"})
 	})
@@ -513,7 +536,30 @@ func (s *Server) handleAnalyticsCountries(w http.ResponseWriter, r *http.Request
 		writeError(w, 500, "analytics countries unavailable")
 		return
 	}
+	out.Available = s.geo != nil && s.geo.DB() != nil
+	out.Updated = ""
+	out.Ranges = 0
+	if s.geo != nil && s.geo.DB() != nil {
+		out.Updated = s.geo.LastUpdated()
+		out.Ranges = s.geo.DB().Ranges()
+	}
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) handleGeoUpdate(w http.ResponseWriter, r *http.Request, _ principal) {
+	// Local country database install/refresh (DB-IP Lite, CC BY 4.0). Downloads
+	// are validated before an atomic swap; a failed update keeps the previous
+	// database. Runs in the background so the request does not block.
+	if s.geo == nil {
+		writeError(w, 500, "GeoIP not configured")
+		return
+	}
+	go func() {
+		if err := s.geo.Install(context.WithoutCancel(r.Context()), true); err == nil {
+			s.analytics.SetGeo(s.geo.DB())
+		}
+	}()
+	writeJSON(w, 202, map[string]any{"status": "installing"})
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, p principal) {

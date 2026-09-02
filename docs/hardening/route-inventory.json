@@ -714,6 +714,17 @@
       "tokenScopes": [
         "sites:write"
       ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/analytics/geo/update",
+      "action": "analytics.manage",
+      "csrf": true,
+      "siteScoped": false,
+      "minRole": "operator",
+      "tokenScopes": [
+        "sites:write"
+      ]
     }
   ]
 }

@@ -1045,9 +1045,9 @@ func TestA11yAnalyticsEnableInstallAndDisable(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.getElementById('tracker-dialog').open === false`) {
 		t.Fatal("tracking modal did not close")
 	}
-	// Country section states the offline GeoIP seam truthfully.
-	if !a11yPoll(t, ctx, `document.body.textContent.includes('Visitor country data is unavailable until a local GeoIP database is configured.')`) {
-		t.Fatal("country-unavailable note missing when no GeoIP dataset is configured")
+	// Country section offers the actionable install path when no database is loaded.
+	if !a11yPoll(t, ctx, `document.body.textContent.includes('Country database not installed.') && !!document.getElementById('geo-install')`) {
+		t.Fatal("actionable country-database install state missing")
 	}
 	// Permanent Tracking code button reopens it later.
 	if !a11yPoll(t, ctx, `!!document.getElementById('show-tracker')`) {
@@ -1071,5 +1071,48 @@ func TestA11yAnalyticsEnableInstallAndDisable(t *testing.T) {
 	}
 	if !a11yPoll(t, ctx, `!!document.getElementById('enable-analytics') && document.getElementById('tracker-dialog').open === false`) {
 		t.Fatal("analytics did not return to the disabled empty state")
+	}
+}
+
+// TestA11yCrawlEvidenceAndGrammar proves the site inventory renders real crawl
+// failure/broken-link evidence (not just counts): one failed page uses singular
+// grammar with its URL and reason, and a broken link exposes source, target and
+// result - the diagnostics the product contract requires.
+func TestA11yCrawlEvidenceAndGrammar(t *testing.T) {
+	ctx := a11yContext(t)
+	dir := t.TempDir()
+	st, e := store.Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	scfg, _ := config.Load()
+	scfg.DataDir = dir
+	srv := httptest.NewServer(New(scfg, st, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer srv.Close()
+	a11ySetup(t, ctx, srv)
+	siteID := a11yAddSite(t, srv)
+	now := store.Now()
+	if _, e := st.DB.Exec(`INSERT INTO crawl_runs(site_id,status,pages_crawled,pages_failed,internal_links,external_links,broken_internal,broken_external,new_broken,robots_found,sitemap_found,pages_discovered,page_limit,limit_reached,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, siteID, "complete", 2, 1, 2, 0, 1, 0, 1, 0, 0, 2, 500, 0, now, now); e != nil {
+		t.Fatal(e)
+	}
+	var runID int64
+	_ = st.DB.QueryRow(`SELECT id FROM crawl_runs WHERE site_id=? ORDER BY id DESC LIMIT 1`, siteID).Scan(&runID)
+	_, _ = st.DB.Exec(`INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,origin,ok) VALUES(?,?,'/',200,0,'','page','internal',1)`, runID, siteID)
+	_, _ = st.DB.Exec(`INSERT INTO crawl_pages(run_id,site_id,url,status_code,depth,error,kind,origin,ok) VALUES(?,?,'/broken-page',500,1,'HTTP 500','page','internal',0)`, runID, siteID)
+	_, _ = st.DB.Exec(`INSERT INTO crawl_links(run_id,site_id,from_url,to_url,kind,status_code,broken,error) VALUES(?,?,'/','/old-page','internal',404,1,'')`, runID, siteID)
+
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`location.hash="#/sites/%d"`, siteID), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.body.textContent.includes('1 page failed')`) {
+		t.Fatal("singular '1 page failed' not rendered")
+	}
+	if !a11yPoll(t, ctx, `document.querySelector('details[open]') !== null || (document.body.textContent.includes('/broken-page') && document.body.textContent.includes('HTTP 500'))`) {
+		t.Fatal("failed-page URL/reason evidence missing")
+	}
+	// Broken link table exposes source, target and result.
+	if !a11yPoll(t, ctx, `document.body.textContent.includes('/old-page') && document.body.textContent.includes('/') && document.body.textContent.includes('HTTP 404')`) {
+		t.Fatal("broken-link source/target/result evidence missing")
 	}
 }

@@ -13,16 +13,18 @@ import (
 )
 
 type Config struct {
-	DataDir          string
-	DatabaseURL      string
-	Listen           string
-	CheckInterval    time.Duration
-	CrawlInterval    time.Duration
-	CheckConcurrency int
-	AuditSandbox     string
-	TrustedProxies   []netip.Prefix
-	PublicURL        string
+	DataDir             string
+	DatabaseURL         string
+	Listen              string
+	CheckInterval       time.Duration
+	CrawlInterval       time.Duration
+	CheckConcurrency    int
+	AuditSandbox        string
+	TrustedProxies      []netip.Prefix
+	PublicURL           string
 	AnalyticsServerSide bool
+	GeoIPURL            string
+	GeoIPAutoUpdate     bool
 }
 
 func Load() (Config, error) {
@@ -78,6 +80,17 @@ func Load() (Config, error) {
 	}
 	if v := os.Getenv("WEBFLEET_ANALYTICS_SERVER_SIDE"); v == "1" || strings.EqualFold(v, "true") {
 		c.AnalyticsServerSide = true
+	}
+	if v := os.Getenv("WEBFLEET_GEOIP_URL"); v != "" {
+		c.GeoIPURL = v
+	} else {
+		// DB-IP Lite country dataset (CC BY 4.0, no registration required).
+		c.GeoIPURL = "https://download.db-ip.com/free/dbip-country-lite.csv.gz"
+	}
+	if v := os.Getenv("WEBFLEET_GEOIP_AUTO_UPDATE"); v == "0" || strings.EqualFold(v, "false") {
+		c.GeoIPAutoUpdate = false
+	} else {
+		c.GeoIPAutoUpdate = true
 	}
 	abs, err := filepath.Abs(c.DataDir)
 	if err == nil {
