@@ -27,6 +27,7 @@ type Result struct {
 	URL             string   `json:"url"`
 	Error           string   `json:"error"`
 	CreatedAt       string   `json:"created_at"`
+	StartedAt       string   `json:"started_at"`
 }
 type Runner interface {
 	Run(context.Context, string) (Result, error)
@@ -49,9 +50,31 @@ type Service struct {
 	st     *store.Store
 	runner Runner
 	sem    chan struct{}
+	mu     sync.Mutex
+	infl   map[int64]bool
 }
 
 func New(st *store.Store) *Service { return NewWithOptions(st, Options{}) }
+
+// Claim synchronously reserves a site for an audit; Release clears it, so a
+// second Run audit cannot start a concurrent audit of the same site.
+func (s *Service) Claim(siteID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.infl == nil {
+		s.infl = map[int64]bool{}
+	}
+	if s.infl[siteID] {
+		return false
+	}
+	s.infl[siteID] = true
+	return true
+}
+func (s *Service) Release(siteID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.infl, siteID)
+}
 func NewWithOptions(st *store.Store, o Options) *Service {
 	g := netguard.New()
 	if o.Resolver != nil {
@@ -78,21 +101,25 @@ func (s *Service) Run(ctx context.Context, siteID int64) (Result, error) {
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
 	}
+	now := store.Now()
+	// A running row is persisted up front so a reload during the audit still
+	// shows "Audit in progress".
+	rr, pe := sqlite.Query(s.st.DB, `INSERT INTO audit_runs(site_id,status,started_at,created_at) VALUES(?,'running',?,?) RETURNING id`, siteID, now, now)
+	if pe != nil {
+		return Result{}, pe
+	}
 	res, e := s.runner.Run(ctx, rows[0]["primary_url"].Text)
+	res.ID = rr[0]["id"].Int64
 	res.SiteID = siteID
-	res.CreatedAt = store.Now()
+	res.CreatedAt = now
 	if e != nil {
 		res.Status = "failed"
 		res.Error = e.Error()
 	}
 	fj, _ := json.Marshal(res.Findings)
-	rr, pe := sqlite.Query(s.st.DB, `INSERT INTO audit_runs(site_id,status,performance_score,accessibility_score,best_practices_score,discoverability_score,findings_json,duration_ms,audited_url,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, siteID, res.Status, res.Performance, res.Accessibility, res.BestPractices, res.Discoverability, string(fj), res.DurationMS, res.URL, res.Error, res.CreatedAt)
-	if pe != nil {
-		return Result{}, pe
-	}
-	res.ID = rr[0]["id"].Int64
+	_ = sqlite.Exec(s.st.DB, `UPDATE audit_runs SET status=?,performance_score=?,accessibility_score=?,best_practices_score=?,discoverability_score=?,findings_json=?,duration_ms=?,audited_url=?,error=? WHERE id=?`, res.Status, res.Performance, res.Accessibility, res.BestPractices, res.Discoverability, string(fj), res.DurationMS, res.URL, res.Error, res.ID)
 	h, _ := s.HistoryEnabled(siteID)
-	if !h {
+	if !h && res.Status != "running" {
 		_ = sqlite.Exec(s.st.DB, `DELETE FROM audit_runs WHERE site_id=? AND id<>?`, siteID, res.ID)
 	}
 	return res, e
@@ -114,7 +141,7 @@ func (s *Service) History(id int64) ([]Result, error) {
 	}
 	out := []Result{}
 	for _, x := range r {
-		v := Result{ID: x["id"].Int64, SiteID: id, Status: x["status"].Text, Performance: int(x["performance_score"].Int64), Accessibility: int(x["accessibility_score"].Int64), BestPractices: int(x["best_practices_score"].Int64), Discoverability: int(x["discoverability_score"].Int64), DurationMS: x["duration_ms"].Int64, URL: x["audited_url"].Text, Error: x["error"].Text, CreatedAt: x["created_at"].Text}
+		v := Result{ID: x["id"].Int64, SiteID: id, Status: x["status"].Text, Performance: int(x["performance_score"].Int64), Accessibility: int(x["accessibility_score"].Int64), BestPractices: int(x["best_practices_score"].Int64), Discoverability: int(x["discoverability_score"].Int64), DurationMS: x["duration_ms"].Int64, URL: x["audited_url"].Text, Error: x["error"].Text, CreatedAt: x["created_at"].Text, StartedAt: x["started_at"].Text}
 		_ = json.Unmarshal([]byte(x["findings_json"].Text), &v.Findings)
 		out = append(out, v)
 	}
@@ -157,6 +184,7 @@ func (s *Service) ResolveBatch(orgID int64, f BatchFilter) ([]int64, error) {
 	}
 	return ids, nil
 }
+
 // filterOwned restricts a batch to sites that belong to the acting
 // organization so an operator cannot audit another organization's sites by
 // guessing ids.

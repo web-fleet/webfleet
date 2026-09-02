@@ -1,15 +1,18 @@
 package analytics
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/web-fleet/webfleet/internal/geo"
 	"github.com/web-fleet/webfleet/internal/sqlite"
 	"github.com/web-fleet/webfleet/internal/store"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -139,13 +142,22 @@ func (s *Service) Ingest(ev Event, origin, ip, ua string) error {
 		return errors.New("analytics rate limited")
 	}
 	day := time.Now().UTC().Format("2006-01-02")
-	h := sha256.Sum256([]byte(day + "|" + s.salt + "|" + ip + "|" + ua))
-	visitor := hex.EncodeToString(h[:12])
+	// Anonymous visitor identity: HMAC-SHA256 keyed by the per-instance secret
+	// over (day, normalized source IP). The day component rotates the key so the
+	// identifier is never a permanent cross-period tracking identity; the raw IP
+	// is never persisted. The user agent is deliberately not part of the
+	// identity so a changed browser/UA does not fragment a visitor.
+	mac := hmac.New(sha256.New, []byte(s.salt))
+	mac.Write([]byte(day + "|" + normalizedIP(ip)))
+	visitor := hex.EncodeToString(mac.Sum(nil)[:12])
 	class := clientClass(ua)
 	if class == "bot" {
 		return nil
 	}
-	if e := sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, pid, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, store.Now()); e != nil {
+	// Country is resolved at ingestion time from the source IP and stored as a
+	// coarse code (e.g. AU). The IP itself is discarded immediately.
+	country := geo.LookupCountry(ip)
+	if e := sqlite.Exec(s.st.DB, `INSERT INTO analytics_events(property_id,kind,path,referrer,visitor_key,user_agent_class,payload_json,country,occurred_at) VALUES(?,?,?,?,?,?,?,?,?)`, pid, ev.Kind, ev.Path, ev.Referrer, visitor, class, ev.Payload, country, store.Now()); e != nil {
 		return e
 	}
 	if ev.Kind == "pageview" {
@@ -215,6 +227,19 @@ func (l *limiter) Allow(key string) bool {
 	b.count++
 	return true
 }
+
+// normalizedIP canonicalizes a source IP string so the same address always
+// produces the same anonymous visitor identifier regardless of notation.
+func normalizedIP(ip string) string {
+	if a, e := netip.ParseAddr(ip); e == nil {
+		return a.String()
+	}
+	if ap, e := netip.ParseAddrPort(ip); e == nil {
+		return ap.Addr().String()
+	}
+	return strings.TrimSpace(ip)
+}
+
 func RemoteIP(remote string) string {
 	if h, _, e := net.SplitHostPort(remote); e == nil {
 		return h
@@ -340,3 +365,120 @@ func (s *Service) Goals(siteID int64) ([]map[string]any, error) {
 }
 
 const Tracker = `(()=>{const s=document.currentScript,k=s&&s.dataset.webfleet;if(!k)return;const u=s.src.replace(/\/wf\.js.*/,"/api/analytics/event"),send=(kind,payload={})=>{const e={key:k,kind,path:location.pathname,referrer:document.referrer,payload:JSON.stringify(payload)};try{navigator.sendBeacon(u,new Blob([JSON.stringify(e)],{type:"text/plain;charset=UTF-8"}))}catch(_){}};window.webfleet={track:send};send("pageview");})();`
+
+// Disable stops the property from accepting/recording new tracker events.
+// Historical analytics and the property configuration are preserved.
+func (s *Service) Disable(siteID int64) error {
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return errors.New("analytics not enabled for this site")
+	}
+	return sqlite.Exec(s.st.DB, `UPDATE analytics_properties SET enabled=0 WHERE id=?`, p.ID)
+}
+
+// TrackerSnippet returns the installation snippet for a property. The script
+// is served by Web Fleet itself (origin) and carries the property key via the
+// data-webfleet attribute, matching the /wf.js tracker contract.
+func (s *Service) TrackerSnippet(origin, key string) string {
+	return `<script defer src="` + strings.TrimRight(origin, "/") + `/wf.js" data-webfleet="` + key + `"></script>`
+}
+
+type PageViews struct {
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+	Total    int64 `json:"total"`
+	Pages    int   `json:"pages"`
+	Rows     []struct {
+		Path      string `json:"path"`
+		Pageviews int64  `json:"pageviews"`
+	} `json:"rows"`
+}
+
+// Pages returns page-view totals by normalized pathname (the tracker already
+// sends location.pathname, so query strings do not fragment counts), descending,
+// with server-side pagination over the same interval as the headline summary.
+func (s *Service) Pages(siteID int64, days, page, pageSize int) (PageViews, error) {
+	if days < 1 {
+		days = 7
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 50 {
+		pageSize = 10
+	}
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return PageViews{}, e
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	var total int64
+	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT path) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=?`, p.ID, since); qe == nil && len(r) > 0 {
+		total = r[0]["n"].Int64
+	}
+	out := PageViews{Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
+		Path      string `json:"path"`
+		Pageviews int64  `json:"pageviews"`
+	}{}}
+	rows, qe := sqlite.Query(s.st.DB, `SELECT path,COUNT(*) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND path<>'' GROUP BY path ORDER BY n DESC,path LIMIT ? OFFSET ?`, p.ID, since, pageSize, (page-1)*pageSize)
+	if qe != nil {
+		return out, qe
+	}
+	for _, r := range rows {
+		out.Rows = append(out.Rows, struct {
+			Path      string `json:"path"`
+			Pageviews int64  `json:"pageviews"`
+		}{r["path"].Text, r["n"].Int64})
+	}
+	return out, nil
+}
+
+type Countries struct {
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+	Total    int64 `json:"total"`
+	Pages    int   `json:"pages"`
+	Rows     []struct {
+		Country  string `json:"country"`
+		Visitors int64  `json:"visitors"`
+	} `json:"rows"`
+}
+
+// Countries returns unique anonymous visitors by country (resolved at
+// ingestion time from the source IP; the raw IP is never persisted), descending,
+// paginated server-side over the same interval as the headline summary.
+func (s *Service) Countries(siteID int64, days, page, pageSize int) (Countries, error) {
+	if days < 1 {
+		days = 7
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 50 {
+		pageSize = 10
+	}
+	p, e := s.Property(siteID)
+	if e != nil || p == nil {
+		return Countries{}, e
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	var total int64
+	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT country) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND country<>''`, p.ID, since); qe == nil && len(r) > 0 {
+		total = r[0]["n"].Int64
+	}
+	out := Countries{Page: page, PageSize: pageSize, Total: total, Pages: int((total + int64(pageSize) - 1) / int64(pageSize)), Rows: []struct {
+		Country  string `json:"country"`
+		Visitors int64  `json:"visitors"`
+	}{}}
+	rows, qe := sqlite.Query(s.st.DB, `SELECT country,COUNT(DISTINCT visitor_key) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND country<>'' GROUP BY country ORDER BY n DESC,country LIMIT ? OFFSET ?`, p.ID, since, pageSize, (page-1)*pageSize)
+	if qe != nil {
+		return out, qe
+	}
+	for _, r := range rows {
+		out.Rows = append(out.Rows, struct {
+			Country  string `json:"country"`
+			Visitors int64  `json:"visitors"`
+		}{r["country"].Text, r["n"].Int64})
+	}
+	return out, nil
+}

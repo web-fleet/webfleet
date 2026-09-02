@@ -109,6 +109,9 @@ var apiRouteDefs = []routeDef{
 	{"GET", "/api/sites/{id}/analytics", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsProperty }, []string{"analytics:read"}},
 	{"POST", "/api/sites/{id}/analytics", "analytics.manage", true, func(s *Server) handler { return s.handleEnableAnalytics }, []string{"sites:write"}},
 	{"GET", "/api/sites/{id}/analytics/summary", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsSummary }, []string{"analytics:read"}},
+	{"GET", "/api/sites/{id}/analytics/pages", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsPages }, []string{"analytics:read"}},
+	{"GET", "/api/sites/{id}/analytics/countries", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsCountries }, []string{"analytics:read"}},
+	{"POST", "/api/sites/{id}/analytics/disable", "analytics.manage", true, func(s *Server) handler { return s.handleDisableAnalytics }, []string{"sites:write"}},
 	{"GET", "/api/sites/{id}/analytics/goals", "analytics.read", false, func(s *Server) handler { return s.handleAnalyticsGoals }, []string{"analytics:read"}},
 	{"POST", "/api/sites/{id}/analytics/goals", "analytics.manage", true, func(s *Server) handler { return s.handleCreateAnalyticsGoal }, []string{"sites:write"}},
 	{"GET", "/api/maintenance", "maintenance.read", false, func(s *Server) handler { return s.handleMaintenance }, nil},
@@ -430,7 +433,15 @@ func (s *Server) handleAnalyticsProperty(w http.ResponseWriter, r *http.Request,
 		writeError(w, 500, "analytics unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"property": prop})
+	out := map[string]any{"property": prop}
+	if prop != nil && prop.Enabled {
+		origin := s.cfg.PublicURL
+		if origin == "" {
+			origin = "https://" + r.Host
+		}
+		out["snippet"] = s.analytics.TrackerSnippet(origin, prop.PublicKey)
+	}
+	writeJSON(w, 200, out)
 }
 func (s *Server) handleEnableAnalytics(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)
@@ -445,7 +456,64 @@ func (s *Server) handleEnableAnalytics(w http.ResponseWriter, r *http.Request, p
 		writeError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 201, prop)
+	origin := s.cfg.PublicURL
+	if origin == "" {
+		origin = "https://" + r.Host
+	}
+	writeJSON(w, 201, map[string]any{"property": prop, "snippet": s.analytics.TrackerSnippet(origin, prop.PublicKey)})
+}
+
+func (s *Server) handleDisableAnalytics(w http.ResponseWriter, r *http.Request, p principal) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	if err := s.analytics.Disable(id); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAnalyticsPages(w http.ResponseWriter, r *http.Request, p principal) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	ps, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	out, err := s.analytics.Pages(id, days, page, ps)
+	if err != nil {
+		writeError(w, 500, "analytics pages unavailable")
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
+func (s *Server) handleAnalyticsCountries(w http.ResponseWriter, r *http.Request, p principal) {
+	id, ok := pathSiteID(w, r)
+	if !ok {
+		return
+	}
+	if _, ok = s.site(w, p, id); !ok {
+		return
+	}
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	ps, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	out, err := s.analytics.Countries(id, days, page, ps)
+	if err != nil {
+		writeError(w, 500, "analytics countries unavailable")
+		return
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, p principal) {
@@ -472,12 +540,15 @@ func (s *Server) handleRunAudit(w http.ResponseWriter, r *http.Request, p princi
 	if _, ok = s.site(w, p, id); !ok {
 		return
 	}
-	out, err := s.audit.Run(r.Context(), id)
-	if err != nil {
-		writeJSON(w, 200, out)
+	if !s.audit.Claim(id) {
+		writeError(w, 409, "an audit is already running for this site")
 		return
 	}
-	writeJSON(w, 200, out)
+	go func() {
+		defer s.audit.Release(id)
+		_, _ = s.audit.Run(context.WithoutCancel(r.Context()), id)
+	}()
+	writeJSON(w, 202, map[string]any{"status": "running"})
 }
 func (s *Server) handleAuditHistorySetting(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)

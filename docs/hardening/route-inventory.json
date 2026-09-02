@@ -681,6 +681,39 @@
       "tokenScopes": [
         "sites:write"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sites/{id}/analytics/pages",
+      "action": "analytics.read",
+      "csrf": false,
+      "siteScoped": true,
+      "minRole": "viewer",
+      "tokenScopes": [
+        "analytics:read"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sites/{id}/analytics/countries",
+      "action": "analytics.read",
+      "csrf": false,
+      "siteScoped": true,
+      "minRole": "viewer",
+      "tokenScopes": [
+        "analytics:read"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sites/{id}/analytics/disable",
+      "action": "analytics.manage",
+      "csrf": true,
+      "siteScoped": true,
+      "minRole": "operator",
+      "tokenScopes": [
+        "sites:write"
+      ]
     }
   ]
 }

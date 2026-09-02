@@ -1003,3 +1003,69 @@ func parseFloat(s string) float64 {
 	v, _ := strconv.ParseFloat(strings.TrimSuffix(s, "px"), 64)
 	return v
 }
+
+// TestA11yAnalyticsEnableInstallAndDisable drives the analytics lifecycle in
+// the browser: Enable tracker opens the install-code modal with the real
+// snippet, Copy/Close work, the permanent Tracking code button reopens it, and
+// Disable tracker returns to the empty state (history preserved server-side).
+func TestA11yAnalyticsEnableInstallAndDisable(t *testing.T) {
+	ctx := a11yContext(t)
+	srv := a11yServer(t)
+	a11ySetup(t, ctx, srv)
+	siteID := a11yAddSite(t, srv)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`location.hash="#/sites/%d"`, siteID), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `!!document.getElementById('enable-analytics')`) {
+		var view string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('view').textContent.slice(0,200)`, &view))
+		t.Fatalf("analytics empty state did not render: view=%q", view)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#enable-analytics`)); err != nil {
+		t.Fatal(err)
+	}
+	// Install modal opens with the real tracking snippet.
+	if !a11yPoll(t, ctx, `document.getElementById('tracker-dialog').open === true`) {
+		t.Fatal("tracking code modal did not open after enabling")
+	}
+	var snippet string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('tracker-snippet').textContent`, &snippet)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snippet, "/wf.js") || !strings.Contains(snippet, `data-webfleet="`) {
+		t.Fatalf("tracking snippet missing the tracker contract: %q", snippet)
+	}
+	// Copy + Close work.
+	if err := chromedp.Run(ctx, chromedp.Click(`#copy-tracker`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#close-tracker`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('tracker-dialog').open === false`) {
+		t.Fatal("tracking modal did not close")
+	}
+	// Permanent Tracking code button reopens it later.
+	if !a11yPoll(t, ctx, `!!document.getElementById('show-tracker')`) {
+		t.Fatal("Tracking code button missing after enabling")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#show-tracker`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `document.getElementById('tracker-dialog').open === true`) {
+		t.Fatal("Tracking code button did not reopen the modal")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#close-tracker`)); err != nil {
+		t.Fatal(err)
+	}
+	// Disable tracker (confirm auto-accepted) returns to the empty state.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.confirm=()=>true`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#disable-analytics`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a11yPoll(t, ctx, `!!document.getElementById('enable-analytics') && document.getElementById('tracker-dialog').open === false`) {
+		t.Fatal("analytics did not return to the disabled empty state")
+	}
+}

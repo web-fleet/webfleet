@@ -21,7 +21,7 @@ type Store struct {
 	path string
 }
 
-const schemaVersion = 30
+const schemaVersion = 31
 
 type migration struct {
 	version int
@@ -183,6 +183,9 @@ var migrations = []migration{
 		`ALTER TABLE crawl_pages ADD COLUMN asset_class TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE crawl_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'internal';`,
 		`ALTER TABLE crawl_pages ADD COLUMN ok INTEGER NOT NULL DEFAULT 1;`,
+	}},
+	{31, "audit progress + analytics country", []string{
+		`ALTER TABLE audit_runs ADD COLUMN started_at TEXT NOT NULL DEFAULT '';`,
 	}},
 }
 
