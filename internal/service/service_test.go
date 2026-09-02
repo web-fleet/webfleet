@@ -836,25 +836,110 @@ func TestUpdateResetFailedFailureEntersRecovery(t *testing.T) {
 	}
 }
 
-func TestRollbackResetFailedPrecedesRestartAndFails(t *testing.T) {
+func TestRollbackResetFailureLeavesStateIntactAndRetryable(t *testing.T) {
 	r := setupService(t)
 	installManagedUnit(t)
 	setState(r, "enabled", "active")
 	prepareUpdate(r, "active", true)
-	exe := filepath.Join(t.TempDir(), "wf2")
-	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	currentBin := []byte("#!/bin/sh\n# current v2\nexit 0\n")
+	rollbackBin := []byte("#!/bin/sh\n# rollback v1\nexit 0\n")
+	os.WriteFile(BinaryPath, currentBin, 0o755)
+	os.WriteFile(BinaryPath+".rollback", rollbackBin, 0o755)
+	os.WriteFile(BinaryPath+".prior-active", []byte("active"), 0o600)
+	// A pre-existing .failed sentinel proves reset failure does not replace it.
+	os.WriteFile(BinaryPath+".failed", []byte("stale"), 0o600)
 	r.script["systemctl restart webfleet.service"] = fakeResult{}
-	if e := Update(exe, fakeSHA(exe)); e != nil {
-		t.Fatal(e)
-	}
-	// A reset failure during rollback fails the rollback honestly.
+	// A reset failure must abort rollback BEFORE any binary mutation.
 	r.script["systemctl reset-failed webfleet.service"] = fakeResult{out: "reset failed", code: 1}
-	r.log = nil
 	if e := Rollback(); e == nil {
 		t.Fatal("rollback succeeded despite reset-failed failure")
 	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, currentBin) {
+		t.Fatal("current binary changed after reset failure")
+	}
+	if got := mustRead(t, BinaryPath+".rollback"); !bytes.Equal(got, rollbackBin) {
+		t.Fatal("rollback binary changed after reset failure")
+	}
+	if got := mustRead(t, BinaryPath+".prior-active"); !bytes.Equal(got, []byte("active")) {
+		t.Fatal("prior-state marker changed after reset failure")
+	}
+	if got := mustRead(t, BinaryPath+".failed"); !bytes.Equal(got, []byte("stale")) {
+		t.Fatal(".failed replacement created or overwritten after reset failure")
+	}
 	if contains(r.log, "systemctl restart webfleet.service") {
-		t.Fatalf("rollback restarted despite reset-failed failure: %v", r.log)
+		t.Fatalf("restart attempted after reset failure: %v", r.log)
+	}
+	// A retry with a successful reset can proceed to completion.
+	r.script["systemctl reset-failed webfleet.service"] = fakeResult{}
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatalf("retry rollback after reset failure failed: %v", e)
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, rollbackBin) {
+		t.Fatal("retry rollback did not install the rollback binary")
+	}
+	if _, e := os.Stat(BinaryPath + ".rollback"); !os.IsNotExist(e) {
+		t.Fatal("rollback metadata not consumed after successful retry")
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); !os.IsNotExist(e) {
+		t.Fatal("prior-state marker not consumed after successful retry")
+	}
+}
+
+func TestRollbackOrderingResetBeforeBinarySwap(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	rollbackBin := []byte("#!/bin/sh\n# rollback v1\nexit 0\n")
+	os.WriteFile(BinaryPath, []byte("#!/bin/sh\n# current v2\nexit 0\n"), 0o755)
+	os.WriteFile(BinaryPath+".rollback", rollbackBin, 0o755)
+	os.WriteFile(BinaryPath+".prior-active", []byte("active"), 0o600)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	// Active rollback order: reset-failed precedes the restart, which follows
+	// the binary swap; metadata is consumed only after health verification.
+	if len(r.log) < 2 || r.log[0] != "systemctl reset-failed webfleet.service" || r.log[1] != "systemctl restart webfleet.service" {
+		t.Fatalf("active rollback must reset-failed then restart: %v", r.log)
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, rollbackBin) {
+		t.Fatal("rollback binary not installed after successful rollback")
+	}
+	if _, e := os.Stat(BinaryPath + ".rollback"); !os.IsNotExist(e) {
+		t.Fatal(".rollback not consumed after successful rollback")
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); !os.IsNotExist(e) {
+		t.Fatal(".prior-active not consumed after successful rollback")
+	}
+}
+
+func TestRollbackStoppedStateNeverResets(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "inactive")
+	prepareUpdate(r, "inactive", true)
+	rollbackBin := []byte("#!/bin/sh\n# rollback v1\nexit 0\n")
+	os.WriteFile(BinaryPath, []byte("#!/bin/sh\n# current v2\nexit 0\n"), 0o755)
+	os.WriteFile(BinaryPath+".rollback", rollbackBin, 0o755)
+	os.WriteFile(BinaryPath+".prior-active", []byte("inactive"), 0o600)
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	if contains(r.log, "systemctl reset-failed webfleet.service") {
+		t.Fatalf("stopped rollback must not reset-failed: %v", r.log)
+	}
+	if contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatalf("stopped rollback must not restart: %v", r.log)
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, rollbackBin) {
+		t.Fatal("stopped rollback did not restore the rollback binary")
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); !os.IsNotExist(e) {
+		t.Fatal("prior-state marker not consumed after stopped rollback")
 	}
 }
 

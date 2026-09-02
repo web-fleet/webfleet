@@ -1360,6 +1360,16 @@ func Rollback() error {
 		return fmt.Errorf("rollback: invalid prior-state marker %q", priorActive)
 	}
 	wasActive := priorActive == "active"
+	// For an active prior state, clear any accumulated start-limit BEFORE any
+	// binary mutation. A reset failure must leave the current binary, the
+	// rollback binary, the prior-state marker and any existing .failed file
+	// byte-for-byte unchanged so the operator can retry rollback; a stopped
+	// prior needs no reset or restart.
+	if wasActive {
+		if e := resetFailed(); e != nil {
+			return e
+		}
+	}
 	cur := BinaryPath + ".failed"
 	_ = os.Remove(cur)
 	if e := os.Rename(BinaryPath, cur); e != nil {
@@ -1374,9 +1384,6 @@ func Rollback() error {
 		_ = os.Remove(BinaryPath + ".prior-active")
 		_ = os.Remove(BinaryPath + ".rollback")
 		return nil
-	}
-	if e := resetFailed(); e != nil {
-		return e
 	}
 	if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
 		return e
