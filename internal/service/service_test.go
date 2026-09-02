@@ -423,3 +423,104 @@ func fakeSHA(path string) string {
 	h, _ := fileSHA256(path)
 	return h
 }
+
+func TestUpdatePreservesActiveState(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	// Active service -> update restarts it.
+	setState(r, "enabled", "active")
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatal("active update did not restart")
+	}
+	// Stopped service -> update installs the binary and leaves it stopped.
+	r.log = nil
+	setState(r, "enabled", "inactive")
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart webfleet.service") || strings.Contains(call, "start webfleet.service") {
+			t.Fatalf("stopped update started the service: %s", call)
+		}
+	}
+}
+
+func TestUpdateFailedActivationRestoresOldBinaryAndActive(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{out: "activation failed", code: 1}
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("failed activation update returned nil")
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("failed activation did not restore the old binary")
+	}
+	// The restore path restarted the old service.
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatal("restored active service was not restarted")
+	}
+}
+
+func TestRollbackRestoresStoppedStateWithoutStarting(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	// Prior stopped service: update keeps it stopped (no start).
+	setState(r, "enabled", "inactive")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	// Rollback must restore the old binary without starting the service.
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	now, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("rollback did not restore the old binary")
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart webfleet.service") || strings.Contains(call, "start webfleet.service") {
+			t.Fatalf("rollback of a stopped service started it: %s", call)
+		}
+	}
+}
+
+func TestRollbackRestoresRunningState(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	// Prior active service: update restarts (active), rollback restarts too.
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	r.log = nil
+	if e := Rollback(); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatal("rollback of an active service did not restart it")
+	}
+	// Enable/disable state is never touched by update or rollback.
+	for _, call := range r.log {
+		if strings.HasPrefix(call, "systemctl enable ") || strings.HasPrefix(call, "systemctl disable ") {
+			t.Fatalf("update/rollback changed enablement: %s", call)
+		}
+	}
+}

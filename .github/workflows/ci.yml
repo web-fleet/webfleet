@@ -148,6 +148,14 @@ jobs:
           # rollback restores the previous executable
           sudo /tmp/wf service rollback
           wait_healthz
+          # a deliberately stopped service stays stopped across update and rollback
+          sudo /tmp/wf service stop
+          CGO_ENABLED=0 go build -o /tmp/wf4 ./cmd/webfleet
+          SHA4=$(sha256sum /tmp/wf4 | cut -d' ' -f1)
+          sudo /tmp/wf service update /tmp/wf4 "$SHA4"
+          test "$(systemctl is-active webfleet.service)" = inactive
+          sudo /tmp/wf service rollback
+          test "$(systemctl is-active webfleet.service)" = inactive
           # stop -> uninstall removes the unit; data is preserved
           sudo /tmp/wf service stop
           sudo /tmp/wf service uninstall

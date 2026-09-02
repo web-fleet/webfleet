@@ -694,16 +694,30 @@ func Update(artifact, want string) error {
 	if e := Verify(artifact, want); e != nil {
 		return e
 	}
+	// Snapshot the prior active state so the update preserves the operator's
+	// operational state: a deliberately stopped service stays stopped.
+	priorActive, _ := unitStateWord("is-active")
+	wasActive := priorActive == "active"
 	if _, e := os.Stat(BinaryPath); e == nil {
 		if e := copyFile(BinaryPath, BinaryPath+".rollback", 0o755); e != nil {
 			return e
 		}
+		_ = os.WriteFile(BinaryPath+".prior-active", []byte(priorActive), 0o600)
 	}
 	if e := copyFile(artifact, BinaryPath, 0o755); e != nil {
 		return e
 	}
+	if !wasActive {
+		// Preserve the stopped state: install the new binary, do not start it.
+		return nil
+	}
 	if out, code, err := systemctl("restart", "webfleet.service"); err != nil || code != 0 {
-		_ = Rollback()
+		// Restore the old binary and the prior active state on a failed activation.
+		_ = systemctlSuccess("stop", "webfleet.service")
+		if e := copyFile(BinaryPath+".rollback", BinaryPath, 0o755); e == nil {
+			_ = systemctlSuccess("restart", "webfleet.service")
+		}
+		_ = os.Remove(BinaryPath + ".prior-active")
 		return fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
 	}
 	return nil
@@ -722,6 +736,13 @@ func Rollback() error {
 	if _, e := os.Stat(BinaryPath + ".rollback"); e != nil {
 		return errors.New("no rollback binary available")
 	}
+	// Restore the operational state that existed before the update: read the
+	// persisted prior active state and only start the service if it was running.
+	priorActive := "active"
+	if b, e := os.ReadFile(BinaryPath + ".prior-active"); e == nil {
+		priorActive = strings.TrimSpace(string(b))
+	}
+	wasActive := priorActive == "active"
 	cur := BinaryPath + ".failed"
 	_ = os.Remove(cur)
 	if e := os.Rename(BinaryPath, cur); e != nil {
@@ -730,6 +751,11 @@ func Rollback() error {
 	if e := os.Rename(BinaryPath+".rollback", BinaryPath); e != nil {
 		_ = os.Rename(cur, BinaryPath)
 		return e
+	}
+	_ = os.Remove(BinaryPath + ".prior-active")
+	if !wasActive {
+		// Preserve the stopped state: restore the old binary without starting it.
+		return nil
 	}
 	return systemctlSuccess("restart", "webfleet.service")
 }
