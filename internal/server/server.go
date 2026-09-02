@@ -186,12 +186,14 @@ func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	if s.geo.LoadExisting() {
 		a.SetGeo(s.geo.DB())
 	}
-	if cfg.GeoIPAutoUpdate && s.geo.DB() == nil {
+	// Auto-update covers both missing and stale databases (DB-IP Lite is
+	// monthly); an existing fresh database is served without a network request.
+	if cfg.GeoIPAutoUpdate && s.geo.NeedsRefresh() {
 		go func() {
 			if err := s.geo.Install(context.Background(), false); err == nil {
 				a.SetGeo(s.geo.DB())
 			} else {
-				log.Warn("geoip auto-install failed", "error", err)
+				log.Warn("geoip auto-install/refresh failed", "error", err)
 			}
 		}()
 	}

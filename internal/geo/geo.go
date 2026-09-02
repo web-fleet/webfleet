@@ -10,12 +10,14 @@
 //
 // Supported file format: the DB-IP Lite country CSV
 //
-//	start_ip,end_ip,country_code,country_name
-//	1.0.0.0,1.0.0.255,AU,Australia
-//	2001:db8::,2001:db8::ffff:ffff,DE,Germany
+//	ip_start,ip_end,country
+//	1.0.0.0,1.0.0.255,AU
+//	2001:db8::,2001:db8::ffff:ffff,DE
 //
-// A network/CIDR variant (a single "network" column) is also accepted. Plain
-// and gzip-compressed (.csv.gz) files are supported.
+// A variant with a fourth "country_name" column and a network/CIDR variant
+// (a single "network" column) are also accepted. Plain and gzip-compressed
+// (.csv.gz) downloads are supported; downloaded payloads are decompressed
+// before being persisted as plain .csv so they reload after a restart.
 package geo
 
 import (
@@ -64,17 +66,34 @@ func LoadCSV(path string) (*DB, error) {
 	return ParseCSV(r)
 }
 
+// isGzip reports whether a payload carries gzip magic bytes.
+func isGzipBytes(b []byte) bool { return len(b) > 2 && b[0] == 0x1f && b[1] == 0x8b }
+
+// decompressPayload returns the plain CSV bytes for a downloaded payload,
+// transparently decompressing gzip. The plain bytes are what gets persisted.
+func decompressPayload(body []byte) ([]byte, error) {
+	if !isGzipBytes(body) {
+		return body, nil
+	}
+	gz, e := gzip.NewReader(bytes.NewReader(body))
+	if e != nil {
+		return nil, fmt.Errorf("geoip gzip: %w", e)
+	}
+	defer gz.Close()
+	plain, e := io.ReadAll(gz)
+	if e != nil {
+		return nil, fmt.Errorf("geoip gzip: %w", e)
+	}
+	return plain, nil
+}
+
 // parsePayload parses a downloaded payload, transparently decompressing gzip.
 func parsePayload(body []byte) (*DB, error) {
-	if len(body) > 2 && body[0] == 0x1f && body[1] == 0x8b {
-		gz, e := gzip.NewReader(bytes.NewReader(body))
-		if e != nil {
-			return nil, fmt.Errorf("geoip gzip: %w", e)
-		}
-		defer gz.Close()
-		return ParseCSV(gz)
+	plain, e := decompressPayload(body)
+	if e != nil {
+		return nil, e
 	}
-	return ParseCSV(bytes.NewReader(body))
+	return ParseCSV(bytes.NewReader(plain))
 }
 
 // ParseCSV builds a DB from a DB-IP Lite country CSV stream.
@@ -189,16 +208,24 @@ func lastAddr(p netip.Prefix) netip.Addr {
 // the new file is downloaded to a temp path, validated, then swapped over the
 // previous database; a failed download/validation keeps the previous database.
 type Manager struct {
-	mu      sync.Mutex
-	dataDir string
-	url     string
-	db      *DB
-	updated string
+	mu       sync.Mutex
+	dataDir  string
+	url      string
+	db       *DB
+	updated  string
+	interval time.Duration
+	now      func() time.Time
 }
+
+// refreshInterval is the stale-data policy: DB-IP Lite Country is updated
+// monthly, so a database younger than this is used without a network request
+// and an older one is refreshed in the background (keeping the previous
+// database active on failure).
+const refreshInterval = 30 * 24 * time.Hour
 
 // NewManager creates a manager storing the database under <dataDir>/geoip.
 func NewManager(dataDir, url string) *Manager {
-	return &Manager{dataDir: dataDir, url: url}
+	return &Manager{dataDir: dataDir, url: url, interval: refreshInterval, now: time.Now}
 }
 
 func (m *Manager) dir() string { return filepath.Join(m.dataDir, "geoip") }
@@ -212,6 +239,25 @@ func (m *Manager) DB() *DB {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db
+}
+
+// NeedsRefresh reports whether the installed database is absent or older than
+// the refresh interval, so automatic updates refresh stale databases rather
+// than only installing missing ones.
+func (m *Manager) NeedsRefresh() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.db == nil {
+		return true
+	}
+	if m.updated == "" {
+		return true
+	}
+	t, e := time.Parse(time.RFC3339, m.updated)
+	if e != nil {
+		return true
+	}
+	return m.now().UTC().Sub(t) >= m.interval
 }
 
 // LastUpdated returns the RFC3339 install time of the active database, or "".
@@ -273,9 +319,14 @@ func (m *Manager) fetch(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	// Validate the payload before swapping so a corrupted download never
-	// replaces a working database.
-	db, e := parsePayload(body)
+	// Decompress (if needed) and validate before swapping so a corrupted
+	// download never replaces a working database; the persisted file is always
+	// plain CSV named .csv so it reloads after a restart.
+	plain, e := decompressPayload(body)
+	if e != nil {
+		return e
+	}
+	db, e := ParseCSV(bytes.NewReader(plain))
 	if e != nil {
 		return fmt.Errorf("geoip payload invalid: %w", e)
 	}
@@ -283,10 +334,10 @@ func (m *Manager) fetch(ctx context.Context) error {
 		return e
 	}
 	tmp := m.dbPath() + ".tmp"
-	if e := os.WriteFile(tmp, body, 0o600); e != nil {
+	if e := os.WriteFile(tmp, plain, 0o600); e != nil {
 		return e
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := m.now().UTC().Format(time.RFC3339)
 	if e := os.Rename(tmp, m.dbPath()); e != nil {
 		_ = os.Remove(tmp)
 		return e
