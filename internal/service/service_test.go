@@ -250,6 +250,19 @@ func TestLifecycleStopDoesNotReset(t *testing.T) {
 	}
 }
 
+func TestLifecycleStartToleratesBenignResetNotLoaded(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	r.script["systemctl reset-failed webfleet.service"] = fakeResult{out: "Failed to reset failed state of unit webfleet.service: Unit webfleet.service not loaded.", code: 1}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := lifecycle("start"); e != nil {
+		t.Fatalf("start must tolerate the benign 'not loaded' reset no-op: %v", e)
+	}
+	if !ordered(r.log, []string{"systemctl reset-failed webfleet.service", "systemctl start webfleet.service"}) {
+		t.Fatalf("start must still reset-failed before activating: %v", r.log)
+	}
+}
+
 func TestLifecycleRefusesForeignUnit(t *testing.T) {
 	setupService(t)
 	// A unit at the path WITHOUT the managed marker must be refused.

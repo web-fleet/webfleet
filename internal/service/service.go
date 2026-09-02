@@ -134,16 +134,22 @@ func systemctlSuccess(args ...string) error {
 // explicit start/restart verbs), so the finite crash-loop policy in the unit
 // body catches spontaneous Restart=on-failure crash loops while
 // operator-controlled lifecycle transitions are never blocked by previously
-// accumulated starts.
+// accumulated starts. systemd reports "Unit ... not loaded" when a stopped unit
+// has no failed state to clear; that benign no-op (no accumulated limit) is
+// not a reset failure, so it is tolerated here while genuine failures still
+// surface to the caller.
 func resetFailed() error {
 	out, code, err := systemctl("reset-failed", "webfleet.service")
 	if err != nil {
 		return fmt.Errorf("cannot run systemctl reset-failed webfleet.service: %w", err)
 	}
-	if code != 0 {
-		return fmt.Errorf("systemctl reset-failed webfleet.service exited %d: %s", code, bounded(strings.TrimSpace(out)))
+	if code == 0 {
+		return nil
 	}
-	return nil
+	if strings.Contains(strings.ToLower(out), "not loaded") {
+		return nil
+	}
+	return fmt.Errorf("systemctl reset-failed webfleet.service exited %d: %s", code, bounded(strings.TrimSpace(out)))
 }
 
 // unitStateWord runs a state verb (is-enabled/is-active) and returns the
