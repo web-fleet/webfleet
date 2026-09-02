@@ -237,7 +237,7 @@ jobs:
           # update with a verified artifact
           CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
           SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
-          sudo /tmp/wf service update /tmp/wf2 "$SHA"
+          sudo /tmp/wf service update /tmp/wf2 "$SHA" || { echo "=== DIAG unit ==="; sudo cat /etc/systemd/system/webfleet.service; echo "=== DIAG status ==="; sudo systemctl status webfleet.service --no-pager -l; echo "=== DIAG journal ==="; sudo journalctl -u webfleet.service -n 60 --no-pager; echo "=== DIAG ss ==="; sudo ss -ltnp | grep -E '7336|7337|8091' || true; echo "=== DIAG ps ==="; ps -ef | grep -E 'webfleet|/tmp/wf' | grep -v grep; exit 1; }
           wait_healthz
           # rollback restores the previous executable
           sudo /tmp/wf service rollback
