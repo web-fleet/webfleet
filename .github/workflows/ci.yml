@@ -140,6 +140,62 @@ jobs:
           sudo /tmp/wf service enable
           sudo /tmp/wf service start
           wait_healthz
+          # --- reinstall state-preservation matrix (changed unit via a new data path) ---
+          # enabled+active preserved
+          sudo /tmp/wf service install --data /var/lib/webfleet-m2
+          test "$(systemctl is-enabled webfleet.service)" = enabled
+          test "$(systemctl is-active webfleet.service)" = active
+          wait_healthz
+          # enabled+inactive preserved
+          sudo /tmp/wf service stop
+          sudo /tmp/wf service install --data /var/lib/webfleet-m3
+          test "$(systemctl is-enabled webfleet.service)" = enabled
+          test "$(systemctl is-active webfleet.service)" = inactive
+          # disabled+active preserved
+          sudo /tmp/wf service start
+          wait_healthz
+          sudo /tmp/wf service disable
+          test "$(systemctl is-enabled webfleet.service)" = disabled
+          test "$(systemctl is-active webfleet.service)" = active
+          sudo /tmp/wf service install --data /var/lib/webfleet-m4
+          test "$(systemctl is-enabled webfleet.service)" = disabled
+          test "$(systemctl is-active webfleet.service)" = active
+          wait_healthz
+          # disabled+inactive preserved (genuine changed reinstall, not just a no-op)
+          sudo /tmp/wf service stop
+          sudo /tmp/wf service install --data /var/lib/webfleet-m5
+          test "$(systemctl is-enabled webfleet.service)" = disabled
+          test "$(systemctl is-active webfleet.service)" = inactive
+          # --- custom data path and dangerous-path adoption ---
+          # custom safe data path is created and assigned to the service account
+          sudo /tmp/wf service install --data /var/lib/webfleet-safe
+          sudo test -O /var/lib/webfleet-safe || exit 1
+          test "$(stat -c %U /var/lib/webfleet-safe)" = webfleet || exit 1
+          wait_healthz
+          # dangerous system roots and relative paths are refused without mutation
+          for bad in / /etc /usr /var /tmp; do
+            if sudo /tmp/wf service install --data "$bad" >/tmp/bad-install.log 2>&1; then
+              echo "install accepted dangerous data path $bad" >&2
+              exit 1
+            fi
+          done
+          if sudo /tmp/wf service install --data relative/data >/tmp/rel-install.log 2>&1; then
+            echo "install accepted a relative data path" >&2
+            exit 1
+          fi
+          test -f /etc/systemd/system/webfleet.service || { echo "dangerous-path refusal removed the unit" >&2; exit 1; }
+          # an existing root-owned directory is refused rather than adopted
+          sudo mkdir -p /var/lib/webfleet-foreign
+          if sudo /tmp/wf service install --data /var/lib/webfleet-foreign >/tmp/foreign-install.log 2>&1; then
+            echo "install adopted a root-owned existing directory" >&2
+            exit 1
+          fi
+          sudo rm -rf /var/lib/webfleet-foreign
+          # restore the canonical data dir and enabled+active for the update section
+          sudo /tmp/wf service install --data /var/lib/webfleet
+          sudo /tmp/wf service enable
+          sudo /tmp/wf service start
+          wait_healthz
           # update with a verified artifact
           CGO_ENABLED=0 go build -o /tmp/wf2 ./cmd/webfleet
           SHA=$(sha256sum /tmp/wf2 | cut -d' ' -f1)
@@ -156,17 +212,20 @@ jobs:
           test "$(systemctl is-active webfleet.service)" = inactive
           sudo /tmp/wf service rollback
           test "$(systemctl is-active webfleet.service)" = inactive
-          # stop -> uninstall removes the unit; data is preserved
+          # stop -> uninstall removes the unit; data is preserved; repeat is a no-op
           sudo /tmp/wf service stop
           sudo /tmp/wf service uninstall
+          test ! -f /etc/systemd/system/webfleet.service
+          sudo /tmp/wf service uninstall   # idempotent no-op
           test ! -f /etc/systemd/system/webfleet.service
           sudo test -d "$DATA"
       - name: Rehearse partial-failure rollback (deterministic activation failure)
         run: |
           set -euxo pipefail
           # Deterministic failure injection: a fake systemctl that fails the
-          # enable --now activation step. Install must roll back cleanly.
-          # First start runs migrations before binding, so poll healthz.
+          # activation step (fresh installs `start`, reinstalls `restart`).
+          # Install must roll back cleanly. First start runs migrations before
+          # binding, so poll healthz.
           wait_healthz() {
             for _ in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:8090/healthz | grep -q '"ok":true'; then
@@ -181,7 +240,7 @@ jobs:
           cat > /tmp/fakebin/systemctl <<'EOF'
           #!/bin/sh
           case "$*" in
-            *"restart webfleet.service"*) echo "simulated activation failure" >&2; exit 1 ;;
+            "start webfleet.service"|"restart webfleet.service") echo "simulated activation failure" >&2; exit 1 ;;
             *) exit 0 ;;
           esac
           EOF
@@ -216,3 +275,32 @@ jobs:
           sudo /tmp/wf service install
           wait_healthz
           sudo /tmp/wf service uninstall || true
+          # Third branch: rollback failure is reported, not silently claimed.
+          # A fake systemctl that fails daemon-reload forces BOTH the forward
+          # install (daemon-reload is the first step) and the rollback reload to
+          # fail, so the returned error must combine both failures.
+          sudo /tmp/wf service install
+          wait_healthz
+          mkdir -p /tmp/fakebin2
+          cat > /tmp/fakebin2/systemctl <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *daemon-reload*) echo "simulated daemon-reload failure" >&2; exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin2/systemctl
+          set +e
+          sudo env "PATH=/tmp/fakebin2:/usr/sbin:/usr/bin:/bin" /tmp/wf service install --listen 127.0.0.1:8091 > /tmp/install-fail3.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "install with failing daemon-reload succeeded unexpectedly" >&2; cat /tmp/install-fail3.log >&2; exit 1; }
+          grep -q "installation rolled back" /tmp/install-fail3.log || { echo "forward failure not reported" >&2; cat /tmp/install-fail3.log >&2; exit 1; }
+          grep -q "rollback incomplete" /tmp/install-fail3.log || { echo "rollback failure not reported" >&2; cat /tmp/install-fail3.log >&2; exit 1; }
+          # The prior unit (canonical listen) must be restored on disk.
+          grep -q "127.0.0.1:8090" /etc/systemd/system/webfleet.service || { echo "prior unit not restored after rollback failure" >&2; exit 1; }
+          # Re-sync the real systemd manager (the fake could not reload it).
+          sudo systemctl daemon-reload
+          sudo systemctl enable webfleet.service
+          sudo systemctl restart webfleet.service
+          wait_healthz

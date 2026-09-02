@@ -1,3 +1,5 @@
+//go:build linux
+
 package service
 
 import (
@@ -15,11 +17,14 @@ import (
 
 // fakeRunner records systemctl/journalctl invocations and returns scripted
 // outputs/exit codes so the lifecycle can be tested without a real manager.
+// strict makes any unconfigured invocation fail with a nonzero exit so an
+// unexpected lifecycle call can never be hidden by a permissive success default.
 type fakeRunner struct {
 	script map[string]fakeResult // key "verb args..." -> result
 	log    []string
 	calls  map[string]int // per-key call count for sequence scripting
 	seq    map[string][]fakeResult
+	strict bool
 }
 type fakeResult struct {
 	out  string
@@ -42,6 +47,9 @@ func (f *fakeRunner) Run(name string, args ...string) (string, int, error) {
 	if r, ok := f.script[key]; ok {
 		return r.out, r.code, r.err
 	}
+	if f.strict {
+		return "", 1, fmt.Errorf("unexpected command: %s", key)
+	}
 	return "", 0, nil
 }
 func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
@@ -50,17 +58,22 @@ func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
 	if r, ok := f.script[key]; ok {
 		return r.code, r.err
 	}
+	if f.strict {
+		return 1, fmt.Errorf("unexpected command: %s", key)
+	}
 	return 0, nil
 }
 
 // setupService points the unit/binary paths at temp files, simulates root and
-// the service account, and installs a fake runner. It returns the fake runner
-// and a cleanup.
+// the service account, and installs a strict fake runner. It returns the fake
+// runner and a cleanup.
 func setupService(t *testing.T) *fakeRunner {
 	t.Helper()
 	dir := t.TempDir()
 	oldUnit, oldBin := UnitPath, BinaryPath
 	oldRoot, oldAccount, oldChown := isRoot, ensureAccount, chownData
+	oldMkdir := mkdirData
+	oldUID, oldOwned := serviceUID, requireServiceOwned
 	oldRunner := defaultRunner
 	oldHealth := healthWindow
 	oldPriorRead := readPriorStateAtRecovery
@@ -71,12 +84,15 @@ func setupService(t *testing.T) *fakeRunner {
 	ensureAccount = func() error { return nil }
 	chownData = func(string) error { return nil }
 	mkdirData = func(string, os.FileMode) error { return nil }
-	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
+	serviceUID = func() (int, error) { return 4242, nil }
+	requireServiceOwned = func(string) error { return nil }
+	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}, strict: true}
 	defaultRunner = r
 	t.Cleanup(func() {
 		UnitPath, BinaryPath = oldUnit, oldBin
 		isRoot, ensureAccount, chownData = oldRoot, oldAccount, oldChown
-		mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+		mkdirData = oldMkdir
+		serviceUID, requireServiceOwned = oldUID, oldOwned
 		healthWindow = oldHealth
 		healthCheckFunc = func(url string) error { return healthCheckReal(url) }
 		readPriorStateAtRecovery = oldPriorRead
@@ -189,7 +205,7 @@ func TestInstallRequiresRootAndLinux(t *testing.T) {
 
 func TestReinstallRestoresPriorStateOnFailure(t *testing.T) {
 	r := setupService(t)
-	// First install succeeds: write unit, daemon-reload, enable, start.
+	// First install succeeds (fresh): write unit, daemon-reload, enable, start.
 	exe := filepath.Join(t.TempDir(), "wf")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	r.script["systemctl daemon-reload"] = fakeResult{}
@@ -202,16 +218,15 @@ func TestReinstallRestoresPriorStateOnFailure(t *testing.T) {
 	if !strings.Contains(string(priorUnit), "Managed by webfleet") {
 		t.Fatal("installed unit lacks the managed marker")
 	}
-	// Second install: prior enabled+active; force a failure on enable and prove
-	// the prior unit is restored.
-	r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "enabled", code: 0}
-	r.script["systemctl is-active webfleet.service"] = fakeResult{out: "active", code: 0}
-	// A changed unit (different listen) forces the enable step, which fails;
-	// rollback must then restore the prior unit.
-	r.script["systemctl daemon-reload"] = fakeResult{}
-	r.script["systemctl enable webfleet.service"] = fakeResult{out: "failed to enable", code: 3}
+	// Second install: prior enabled+active, changed unit (9090). The shared
+	// restore mapping runs disable -> enable -> restart; the enable fails, so
+	// rollback must restore the prior unit and re-apply the prior state.
+	setState(r, "enabled", "active")
+	r.seq["systemctl daemon-reload"] = []fakeResult{{}, {}, {}}
+	r.seq["systemctl enable webfleet.service"] = []fakeResult{{}, {out: "failed to enable", code: 3}, {}}
+	r.seq["systemctl disable webfleet.service"] = []fakeResult{{}, {}, {}}
 	r.script["systemctl restart webfleet.service"] = fakeResult{}
-	r.script["systemctl start webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
 	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
 		t.Fatal("failed reinstall returned nil")
 	}
@@ -253,6 +268,7 @@ func TestStatusReportsStates(t *testing.T) {
 func TestLogsConstruction(t *testing.T) {
 	r := setupService(t)
 	installManagedUnit(t)
+	r.script["journalctl --unit webfleet.service"] = fakeResult{out: "boot log lines\n", code: 0}
 	if e := Logs(false, io.Discard); e != nil {
 		t.Fatal(e)
 	}
@@ -260,6 +276,7 @@ func TestLogsConstruction(t *testing.T) {
 		t.Fatal("logs did not run journalctl --unit")
 	}
 	r.log = nil
+	r.script["journalctl --unit webfleet.service -f"] = fakeResult{code: 0}
 	if e := Logs(true, io.Discard); e != nil {
 		t.Fatal(e)
 	}
@@ -279,10 +296,14 @@ func TestUninstallPreservesDataAndIsIdempotent(t *testing.T) {
 	if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
 		t.Fatal("unit file not removed")
 	}
-	// Repeated uninstall: unit gone -> requireManaged refuses (no error mutation).
+	// Repeated uninstall is a genuine idempotent no-op: unit already absent, no
+	// systemctl mutation, no error.
 	r.log = nil
-	if e := Uninstall(); e == nil {
-		t.Fatal("uninstall of a missing unit should report not-installed")
+	if e := Uninstall(); e != nil {
+		t.Fatalf("uninstall of an already-absent unit should be a successful no-op: %v", e)
+	}
+	if len(r.log) != 0 {
+		t.Fatalf("idempotent uninstall issued systemctl calls: %v", r.log)
 	}
 }
 
@@ -349,10 +370,12 @@ func TestReinstallChangedBinaryRestarts(t *testing.T) {
 	r := setupService(t)
 	installManagedUnit(t)
 	setState(r, "enabled", "active")
-	// A different executable than the installed one -> restart must occur.
+	// A different executable than the installed one -> the shared restore
+	// mapping re-applies the prior enabled+active state (disable, enable, restart).
 	exe := filepath.Join(t.TempDir(), "wf2")
 	os.WriteFile(exe, []byte("#!/bin/sh\n# different binary\nexit 0\n"), 0o755)
 	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl disable webfleet.service"] = fakeResult{}
 	r.script["systemctl enable webfleet.service"] = fakeResult{}
 	r.script["systemctl restart webfleet.service"] = fakeResult{}
 	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
@@ -380,41 +403,89 @@ func TestReinstallSameBinaryIsNoOp(t *testing.T) {
 	}
 }
 
-func TestReinstallRestoresExactNegativeState(t *testing.T) {
-	r := setupService(t)
-	installManagedUnit(t)
-	// Prior state: disabled + stopped.
-	setState(r, "disabled", "inactive")
-	exe := filepath.Join(t.TempDir(), "wf2")
-	os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
-	// Changed unit (different listen) -> forward enable then restart fails.
-	r.script["systemctl daemon-reload"] = fakeResult{}
-	r.script["systemctl enable webfleet.service"] = fakeResult{}
-	r.script["systemctl restart webfleet.service"] = fakeResult{out: "activation failed", code: 1}
-	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
-		t.Fatal("failed reinstall returned nil")
+// TestReinstallFailureRollbackRestoresExactState proves that a failed changed
+// reinstall restores the exact prior enablement and active state for every
+// supported combination, via the shared restore mapping.
+func TestReinstallFailureRollbackRestoresExactState(t *testing.T) {
+	cases := []struct {
+		name            string
+		enabled, active string
+	}{
+		{"enabled-active", "enabled", "active"},
+		{"enabled-inactive", "enabled", "inactive"},
+		{"disabled-active", "disabled", "active"},
+		{"disabled-inactive", "disabled", "inactive"},
 	}
-	// Rollback must neutralize, restore binary+unit, and explicitly re-apply the
-	// negative states (disable + stop), not only the positive ones.
-	disableCalls, stopCalls := 0, 0
-	for _, call := range r.log {
-		if call == "systemctl disable webfleet.service" {
-			disableCalls++
-		}
-		if call == "systemctl stop webfleet.service" {
-			stopCalls++
-		}
-	}
-	if disableCalls < 2 {
-		t.Fatalf("negative enabled state not re-applied during rollback (disable calls=%d)", disableCalls)
-	}
-	if stopCalls < 1 {
-		t.Fatalf("negative active state not re-applied during rollback (stop calls=%d)", stopCalls)
-	}
-	// The prior unit must be restored.
-	b, _ := os.ReadFile(UnitPath)
-	if !strings.Contains(string(b), "127.0.0.1:8090") {
-		t.Fatal("prior unit not restored after failed reinstall")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := setupService(t)
+			installManagedUnit(t)
+			priorBin := mustRead(t, BinaryPath)
+			setState(r, tc.enabled, tc.active)
+			exe := filepath.Join(t.TempDir(), "wf2")
+			os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+			// Changed unit (different listen) -> reinstall path; a forward
+			// activation step fails (restart for active priors, stop for inactive
+			// priors), then rollback must restore everything.
+			r.script["systemctl daemon-reload"] = fakeResult{}
+			r.script["systemctl disable webfleet.service"] = fakeResult{}
+			r.script["systemctl enable webfleet.service"] = fakeResult{}
+			if tc.active == "active" {
+				r.seq["systemctl restart webfleet.service"] = []fakeResult{{out: "activation failed", code: 1}, {}}
+				r.script["systemctl stop webfleet.service"] = fakeResult{}
+			} else {
+				r.seq["systemctl stop webfleet.service"] = []fakeResult{{out: "activation failed", code: 1}, {}, {}}
+				r.script["systemctl restart webfleet.service"] = fakeResult{}
+			}
+			if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
+				t.Fatal("failed reinstall returned nil")
+			}
+			// The prior unit must be restored.
+			b, _ := os.ReadFile(UnitPath)
+			if !strings.Contains(string(b), "127.0.0.1:8090") {
+				t.Fatal("prior unit not restored after failed reinstall")
+			}
+			// The prior binary must be restored.
+			if got := mustRead(t, BinaryPath); !bytes.Equal(got, priorBin) {
+				t.Fatal("prior binary not restored after failed reinstall")
+			}
+			// The exact prior state must be re-applied by rollback, negative
+			// states included.
+			want := tc.enabled == "enabled"
+			for _, call := range r.log {
+				switch {
+				case call == "systemctl enable webfleet.service" && !want:
+					t.Fatal("rollback enabled a previously disabled service")
+				case call == "systemctl enable --runtime webfleet.service" && !want:
+					t.Fatal("rollback runtime-enabled a previously disabled service")
+				}
+			}
+			// For a disabled prior, rollback must re-issue a disable after the
+			// forward neutralization (>= 2 disable calls total).
+			if !want {
+				disables := 0
+				for _, call := range r.log {
+					if call == "systemctl disable webfleet.service" {
+						disables++
+					}
+				}
+				if disables < 2 {
+					t.Fatalf("negative enabled state not re-applied during rollback (disable calls=%d)", disables)
+				}
+			}
+			// For an inactive prior, rollback must issue a stop.
+			if tc.active == "inactive" {
+				stops := 0
+				for _, call := range r.log {
+					if call == "systemctl stop webfleet.service" {
+						stops++
+					}
+				}
+				if stops < 1 {
+					t.Fatal("negative active state not re-applied during rollback (no stop)")
+				}
+			}
+		})
 	}
 }
 
@@ -495,6 +566,7 @@ func TestUpdateFailedActivationRestoresOldBinaryAndActive(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "wf2")
 	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 	r.script["systemctl restart webfleet.service"] = fakeResult{out: "activation failed", code: 1}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
 	if e := Update(exe, fakeSHA(exe)); e == nil {
 		t.Fatal("failed activation update returned nil")
 	}
@@ -866,4 +938,301 @@ func TestRecoveryFailsClosedWithoutMarker(t *testing.T) {
 	}
 	run("missing", func() { os.Remove(BinaryPath + ".prior-active") })
 	run("invalid", func() { os.WriteFile(BinaryPath+".prior-active", []byte("bogus"), 0o600) })
+}
+
+// TestReinstallPreservesExactStateMatrix proves a successful changed reinstall
+// preserves the exact prior enablement and active state for every supported
+// combination instead of forcing enabled+active. Under the strict harness any
+// unscripted (i.e. unexpected) systemctl call would already have failed the
+// install, so the assertion below documents the expected restore mapping.
+func TestReinstallPreservesExactStateMatrix(t *testing.T) {
+	cases := []struct {
+		name            string
+		enabled, active string
+		wantSteps       []string
+	}{
+		{"enabled-active", "enabled", "active",
+			[]string{"systemctl disable webfleet.service", "systemctl enable webfleet.service", "systemctl restart webfleet.service"}},
+		{"enabled-inactive", "enabled", "inactive",
+			[]string{"systemctl disable webfleet.service", "systemctl enable webfleet.service", "systemctl stop webfleet.service"}},
+		{"disabled-active", "disabled", "active",
+			[]string{"systemctl disable webfleet.service", "systemctl restart webfleet.service"}},
+		{"disabled-inactive", "disabled", "inactive",
+			[]string{"systemctl disable webfleet.service", "systemctl stop webfleet.service"}},
+		{"enabled-runtime-active", "enabled-runtime", "active",
+			[]string{"systemctl disable webfleet.service", "systemctl enable --runtime webfleet.service", "systemctl restart webfleet.service"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := setupService(t)
+			installManagedUnit(t)
+			setState(r, tc.enabled, tc.active)
+			exe := filepath.Join(t.TempDir(), "wf2")
+			os.WriteFile(exe, []byte("#!/bin/sh\n# different binary\nexit 0\n"), 0o755)
+			r.script["systemctl daemon-reload"] = fakeResult{}
+			r.script["systemctl disable webfleet.service"] = fakeResult{}
+			r.script["systemctl enable webfleet.service"] = fakeResult{}
+			r.script["systemctl enable --runtime webfleet.service"] = fakeResult{}
+			r.script["systemctl restart webfleet.service"] = fakeResult{}
+			r.script["systemctl stop webfleet.service"] = fakeResult{}
+			if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
+				t.Fatal(e)
+			}
+			for _, want := range tc.wantSteps {
+				if !contains(r.log, want) {
+					t.Fatalf("reinstall did not preserve prior state; missing %q in %v", want, r.log)
+				}
+			}
+			// The service must never be started unconditionally by a reinstall.
+			for _, call := range r.log {
+				if strings.HasPrefix(call, "systemctl start ") {
+					t.Fatalf("reinstall started the service unconditionally: %s", call)
+				}
+			}
+		})
+	}
+}
+
+// TestReinstallRejectsUnsupportedPriorStates proves install refuses unsupported
+// systemd-special enablement/active words BEFORE any mutation, so it can never
+// overwrite a state it cannot recreate exactly.
+func TestReinstallRejectsUnsupportedPriorStates(t *testing.T) {
+	unsupported := map[string][]string{
+		"is-enabled": {"masked", "static", "linked", "generated", "transient", "not-found", "alias", "indirect", "unknown", ""},
+		"is-active":  {"failed", "reloading", "activating", "deactivating", "dead", "unknown", ""},
+	}
+	for verb, words := range unsupported {
+		for _, word := range words {
+			t.Run(verb+"="+word, func(t *testing.T) {
+				r := setupService(t)
+				installManagedUnit(t)
+				unitBefore, _ := os.ReadFile(UnitPath)
+				binBefore := mustRead(t, BinaryPath)
+				if verb == "is-enabled" {
+					r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: word, code: 3}
+					r.script["systemctl is-active webfleet.service"] = fakeResult{out: "inactive", code: 0}
+				} else {
+					r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "disabled", code: 0}
+					r.script["systemctl is-active webfleet.service"] = fakeResult{out: word, code: 3}
+				}
+				exe := filepath.Join(t.TempDir(), "wf2")
+				os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+				if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
+					t.Fatalf("install accepted unsupported prior state %s=%q", verb, word)
+				}
+				if got, _ := os.ReadFile(UnitPath); !bytes.Equal(got, unitBefore) {
+					t.Fatalf("unsupported state %s=%q still rewrote the unit", verb, word)
+				}
+				if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+					t.Fatalf("unsupported state %s=%q still rewrote the binary", verb, word)
+				}
+				for _, call := range r.log {
+					if strings.HasPrefix(call, "systemctl enable ") || strings.HasPrefix(call, "systemctl restart ") || strings.HasPrefix(call, "systemctl start ") {
+						t.Fatalf("unsupported state %s=%q still activated the service: %s", verb, word, call)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestInstallRefusesStateQueryFailure proves a query failure (as opposed to a
+// legitimate negative state) aborts install before mutation.
+func TestInstallRefusesStateQueryFailure(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	unitBefore, _ := os.ReadFile(UnitPath)
+	binBefore := mustRead(t, BinaryPath)
+	r.script["systemctl is-enabled webfleet.service"] = fakeResult{err: fmt.Errorf("cannot reach systemd")}
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); e == nil {
+		t.Fatal("install proceeded when the prior enablement state could not be queried")
+	}
+	if got, _ := os.ReadFile(UnitPath); !bytes.Equal(got, unitBefore) {
+		t.Fatal("state-query failure still rewrote the unit")
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+		t.Fatal("state-query failure still mutated the binary")
+	}
+}
+
+// TestInstallSurfacesRollbackFailure proves the returned install error combines
+// the original forward failure with a rollback failure instead of claiming
+// "installation rolled back" when the rollback itself failed.
+func TestInstallSurfacesRollbackFailure(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+	// Forward: daemon-reload, disable, enable -> the forward enable fails.
+	// Rollback: neutralization (stop, disable), restore, daemon-reload, then the
+	// restore enable also fails -> combined error.
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.seq["systemctl disable webfleet.service"] = []fakeResult{{}, {}, {}}
+	r.seq["systemctl enable webfleet.service"] = []fakeResult{
+		{out: "forward enable failed", code: 1},
+		{out: "restore enable failed", code: 1},
+	}
+	err := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090")
+	if err == nil {
+		t.Fatal("install with a failing forward activation returned nil")
+	}
+	if !strings.Contains(err.Error(), "forward enable failed") {
+		t.Fatalf("forward install failure missing: %v", err)
+	}
+	if !strings.Contains(err.Error(), "rollback incomplete") {
+		t.Fatalf("rollback failure not combined into the error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "restore enable failed") {
+		t.Fatalf("rollback failure detail missing: %v", err)
+	}
+}
+
+// TestInstallRefusesSystemRootDataDir proves dangerous system roots are refused
+// before any mutation.
+func TestInstallRefusesSystemRootDataDir(t *testing.T) {
+	for _, dir := range []string{"/", "/etc", "/usr", "/var", "/bin"} {
+		t.Run(dir, func(t *testing.T) {
+			r := setupService(t)
+			binBefore := mustRead(t, BinaryPath)
+			exe := filepath.Join(t.TempDir(), "wf")
+			os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+			if e := Install(exe, dir, "127.0.0.1:8090"); e == nil {
+				t.Fatalf("install accepted system root data dir %q", dir)
+			}
+			if len(r.log) != 0 {
+				t.Fatalf("install %q touched systemctl before refusing", dir)
+			}
+			if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+				t.Fatalf("install %q wrote a unit before refusing", dir)
+			}
+			if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+				t.Fatalf("install %q mutated the binary before refusing", dir)
+			}
+		})
+	}
+}
+
+// TestInstallRefusesRelativeDataDir proves install requires an absolute data
+// path.
+func TestInstallRefusesRelativeDataDir(t *testing.T) {
+	r := setupService(t)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := Install(exe, "relative/data", "127.0.0.1:8090"); e == nil {
+		t.Fatal("install accepted a relative data directory")
+	}
+	if len(r.log) != 0 {
+		t.Fatal("relative data dir install touched systemctl")
+	}
+}
+
+// TestInstallRefusesExistingForeignOwnedDir proves an existing directory not
+// owned by the service account is refused rather than silently adopted, before
+// any metadata mutation.
+func TestInstallRefusesExistingForeignOwnedDir(t *testing.T) {
+	r := setupService(t)
+	dir := filepath.Join(t.TempDir(), "existing")
+	if e := os.Mkdir(dir, 0o700); e != nil {
+		t.Fatal(e)
+	}
+	testUID := os.Getuid()
+	svcUID := testUID + 1
+	if svcUID == 0 {
+		svcUID = 9999
+	}
+	serviceUID = func() (int, error) { return svcUID, nil }
+	requireServiceOwned = requireServiceOwnedReal
+	binBefore := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := Install(exe, dir, "127.0.0.1:8090"); e == nil {
+		t.Fatal("install adopted a foreign-owned existing directory")
+	}
+	if len(r.log) != 0 {
+		t.Fatal("foreign-owned dir install touched systemctl")
+	}
+	if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+		t.Fatal("foreign-owned dir install wrote a unit before refusing")
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+		t.Fatal("foreign-owned dir install mutated the binary")
+	}
+}
+
+// TestInstallReusesServiceOwnedExistingDir proves an existing directory already
+// owned by the service account is validated and reused rather than re-adopted.
+func TestInstallReusesServiceOwnedExistingDir(t *testing.T) {
+	r := setupService(t)
+	dir := filepath.Join(t.TempDir(), "owned")
+	if e := os.Mkdir(dir, 0o700); e != nil {
+		t.Fatal(e)
+	}
+	serviceUID = func() (int, error) { return os.Getuid(), nil }
+	requireServiceOwned = requireServiceOwnedReal
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := Install(exe, dir, "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	b, _ := os.ReadFile(UnitPath)
+	if !strings.Contains(string(b), dir) {
+		t.Fatal("installed unit does not reference the reused data dir")
+	}
+}
+
+// TestTamperedManagedUnitRejected proves a hand edit to a managed unit (without
+// updating the integrity checksum) is refused for both lifecycle actions and
+// status.
+func TestTamperedManagedUnitRejected(t *testing.T) {
+	setupService(t)
+	u := Unit("/var/lib/webfleet", "127.0.0.1:8090")
+	tampered := strings.Replace(u, "127.0.0.1:8090", "127.0.0.1:9090", 1)
+	os.WriteFile(UnitPath, []byte(tampered), 0o644)
+	if e := lifecycle("start"); e == nil {
+		t.Fatal("tampered managed unit accepted for start")
+	}
+	if e := Status(io.Discard); e == nil {
+		t.Fatal("tampered managed unit accepted for status")
+	}
+}
+
+// TestManagedUnitHeaderMalformedRejected proves malformed integrity headers are
+// refused rather than treated as healthy.
+func TestManagedUnitHeaderMalformedRejected(t *testing.T) {
+	setupService(t)
+	cases := map[string]string{
+		"missing-version-header": unitMarker + "\n[Unit]\nDescription=Web Fleet website monitoring\n",
+		"duplicated-header":      unitMarker + "\n" + managedPrefix + "v1 sha256=" + strings.Repeat("0", 64) + "\n" + managedPrefix + "v1 sha256=" + strings.Repeat("0", 64) + "\n[Unit]\n",
+		"bad-checksum-length":    unitMarker + "\n" + managedPrefix + "v1 sha256=tooshort\n[Unit]\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			os.WriteFile(UnitPath, []byte(body), 0o644)
+			if e := lifecycle("start"); e == nil {
+				t.Fatalf("malformed managed unit (%s) accepted for start", name)
+			}
+			if e := Status(io.Discard); e == nil {
+				t.Fatalf("malformed managed unit (%s) accepted for status", name)
+			}
+		})
+	}
+}
+
+// TestStrictHarnessRejectsUnexpectedCalls documents that the fake harness is
+// fail-closed: an unconfigured systemctl invocation must fail, so a test can
+// never silently paper over a new lifecycle call.
+func TestStrictHarnessRejectsUnexpectedCalls(t *testing.T) {
+	r := setupService(t)
+	_, code, err := r.Run("systemctl", "bogus", "webfleet.service")
+	if err == nil || code == 0 {
+		t.Fatal("strict harness accepted an unexpected systemctl call")
+	}
 }

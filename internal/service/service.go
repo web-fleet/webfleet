@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -39,6 +40,16 @@ const ServiceGroup = "webfleet"
 // refuse to act on a unit that does not carry it, so the CLI can never modify
 // an unrelated system service that happens to share the unit name.
 const unitMarker = "# Managed by webfleet. Do not edit manually."
+
+// managedPrefix introduces the versioned integrity header followed by a SHA-256
+// of everything below it, so any hand edit is detected on read.
+const managedPrefix = "# webfleet-managed: "
+
+var (
+	errNotManaged = errors.New("not a managed unit")
+	errMalformed  = errors.New("malformed managed unit header")
+	errModified   = errors.New("managed unit body no longer matches its recorded checksum")
+)
 
 // Runner abstracts systemctl/journalctl so the CLI is testable without a real
 // systemd manager. Run returns captured combined output, the exit code (0 on
@@ -105,16 +116,15 @@ func systemctlSuccess(args ...string) error {
 	return nil
 }
 
-// unitStateWord runs a state verb (is-enabled/is-active), tolerating a nonzero
-// exit for legitimate negative answers and returning the trimmed word.
+// unitStateWord runs a state verb (is-enabled/is-active) and returns the
+// trimmed state word. A nonzero exit is a legitimate negative state answer
+// (disabled, inactive, masked, ...); only a launch failure is a query error.
 func unitStateWord(verb string) (string, error) {
 	out, code, err := systemctl(verb, "webfleet.service")
 	if err != nil {
 		return "", fmt.Errorf("cannot run systemctl %s: %w", verb, err)
 	}
-	if code == 0 {
-		return strings.TrimSpace(out), nil
-	}
+	_ = code
 	return strings.TrimSpace(out), nil
 }
 
@@ -160,21 +170,60 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
-// validateManagedUnit performs the structural ownership/integrity check: the
-// unit must carry the webfleet marker AND contain the required Web Fleet
-// directives, so a stale or malformed managed unit is classified rather than
-// treated as healthy.
-func validateManagedUnit(body []byte) error {
-	t := string(body)
-	if !strings.Contains(t, unitMarker) {
-		return errors.New("not a webfleet-managed unit")
+// unitMeta carries the metadata recorded in the managed-unit header.
+type unitMeta struct {
+	data   string
+	listen string
+}
+
+// readManagedUnit validates a managed unit's integrity header and parses its
+// recorded metadata. Any hand edit to the metadata or the unit body is detected
+// via the body checksum, so a foreign, malformed or modified unit is refused
+// rather than treated as healthy or overwritten.
+func readManagedUnit(content string) (unitMeta, error) {
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 || lines[0] != unitMarker {
+		return unitMeta{}, errNotManaged
 	}
-	for _, want := range []string{"[Unit]", "[Service]", "[Install]", "Description=Web Fleet", "ExecStart=" + BinaryPath, "User=" + ServiceUser, "Environment=WEBFLEET_DATA_DIR", "WantedBy=multi-user.target"} {
-		if !strings.Contains(t, want) {
-			return fmt.Errorf("malformed managed unit: missing %q", want)
+	count := 0
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, managedPrefix) {
+			count++
 		}
 	}
-	return nil
+	if count != 1 || !strings.HasPrefix(lines[1], managedPrefix) {
+		return unitMeta{}, errMalformed
+	}
+	sm := regexp.MustCompile(`^# webfleet-managed: v1 sha256=([0-9a-f]{64})$`).FindStringSubmatch(lines[1])
+	if sm == nil {
+		return unitMeta{}, errMalformed
+	}
+	contentBody := strings.Join(lines[2:], "\n")
+	sum := sha256.Sum256([]byte(contentBody))
+	if hex.EncodeToString(sum[:]) != sm[1] {
+		return unitMeta{}, errModified
+	}
+	meta := unitMeta{}
+	dataSeen, listenSeen := 0, 0
+	for _, ln := range lines[2:] {
+		switch {
+		case strings.HasPrefix(ln, "# webfleet-data: "):
+			dataSeen++
+			meta.data = strings.TrimSpace(strings.TrimPrefix(ln, "# webfleet-data: "))
+		case strings.HasPrefix(ln, "# webfleet-listen: "):
+			listenSeen++
+			meta.listen = strings.TrimSpace(strings.TrimPrefix(ln, "# webfleet-listen: "))
+		}
+	}
+	if dataSeen != 1 || listenSeen != 1 || meta.data == "" || meta.listen == "" {
+		return unitMeta{}, errMalformed
+	}
+	for _, v := range []struct{ val, name string }{{meta.listen, "listen"}, {meta.data, "data-dir"}} {
+		if err := validateNoControl(v.val, v.name); err != nil {
+			return unitMeta{}, errMalformed
+		}
+	}
+	return meta, nil
 }
 
 // managedUnit reports whether the unit file carries the webfleet managed marker.
@@ -187,7 +236,7 @@ func managedUnit(path string) bool {
 }
 
 // requireManaged refuses to operate on a unit that is not installed or not
-// owned by webfleet, so the CLI never touches an unrelated system service.
+// a webfleet-managed unit, so the CLI never touches an unrelated system service.
 func requireManaged(verb string) error {
 	b, e := os.ReadFile(UnitPath)
 	if errors.Is(e, os.ErrNotExist) {
@@ -196,7 +245,7 @@ func requireManaged(verb string) error {
 	if e != nil {
 		return fmt.Errorf("refusing to %s webfleet.service: %w", verb, e)
 	}
-	if ve := validateManagedUnit(b); ve != nil {
+	if _, ve := readManagedUnit(string(b)); ve != nil {
 		return fmt.Errorf("refusing to %s webfleet.service: %v", verb, ve)
 	}
 	return nil
@@ -213,6 +262,115 @@ var isRoot = func() bool { return os.Geteuid() == 0 }
 var ensureAccount = func() error { return ensureServiceAccount() }
 var chownData = func(path string) error { return chownService(path) }
 var mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+
+// serviceUID returns the numeric UID of the service account. It is a variable
+// so tests can simulate the account without a real system user.
+var serviceUID = func() (int, error) {
+	uid, _, e := lookupServiceIDs()
+	return uid, e
+}
+
+// requireServiceOwned validates that an existing data directory is already
+// owned by the service account, so the installer never silently adopts an
+// unrelated directory. It is a variable so tests can simulate ownership.
+var requireServiceOwned = func(path string) error { return requireServiceOwnedReal(path) }
+
+// systemDataRoots are filesystem and system-prefix directories the service
+// installer must never adopt as a data directory. Passing one of these as
+// `service install --data` is refused before any mutation.
+var systemDataRoots = map[string]bool{
+	"/": true, "/bin": true, "/boot": true, "/dev": true, "/etc": true,
+	"/home": true, "/lib": true, "/lib64": true, "/opt": true, "/proc": true,
+	"/root": true, "/run": true, "/sbin": true, "/srv": true, "/sys": true,
+	"/tmp": true, "/usr": true, "/var": true,
+}
+
+// validateReadWritePath validates a data directory for ReadWritePaths=: an
+// absolute plain path free of systemd specifiers and characters that cannot be
+// safely quoted in the unit.
+func validateReadWritePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("data directory %q must be an absolute path", path)
+	}
+	if err := validateNoControl(path, "data directory"); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "%") {
+		return fmt.Errorf("data directory %q must not contain systemd specifiers (%% )", path)
+	}
+	if strings.ContainsAny(path, `"\`) {
+		return fmt.Errorf("data directory %q cannot be safely quoted in ReadWritePaths", path)
+	}
+	if len(path) > 0 && strings.ContainsRune("-+!~", rune(path[0])) {
+		return fmt.Errorf("data directory %q starts with a ReadWritePaths special prefix; use a plain absolute path", path)
+	}
+	return nil
+}
+
+// validateDataDirPath rejects data-directory paths that are dangerous system
+// roots. It must run before any ownership or mode mutation.
+func validateDataDirPath(path string) error {
+	clean := filepath.Clean(path)
+	if systemDataRoots[clean] {
+		return fmt.Errorf("data directory %q is a system directory and cannot be adopted as a service data directory", path)
+	}
+	return nil
+}
+
+// prepareDataDir safely establishes the service data directory. A newly created
+// leaf directory is created and assigned to the service account. An existing
+// directory is only reused if it is a non-symlink directory already owned by the
+// service account with no group/world-write bits; an unrelated or root-owned
+// existing directory is refused rather than silently adopted. Parent directories
+// are never chmod/chown'd to make the leaf work.
+func prepareDataDir(path string) error {
+	info, e := os.Lstat(path)
+	if errors.Is(e, os.ErrNotExist) {
+		if e := mkdirData(path, 0o700); e != nil {
+			return e
+		}
+		_ = os.Chmod(path, 0o700)
+		if e := chownData(path); e != nil {
+			return e
+		}
+		return nil
+	}
+	if e != nil {
+		return fmt.Errorf("data directory %q: %w", path, e)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("data directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
+	}
+	if e := requireServiceOwned(path); e != nil {
+		return e
+	}
+	_ = os.Chmod(path, 0o700)
+	return nil
+}
+
+// requireServiceOwnedReal implements the real ownership check used by
+// prepareDataDir for existing directories.
+func requireServiceOwnedReal(path string) error {
+	info, e := os.Lstat(path)
+	if e != nil {
+		return e
+	}
+	uid, e := serviceUID()
+	if e != nil {
+		return e
+	}
+	owner := fileUID(info)
+	if owner != uid {
+		return fmt.Errorf("data directory %q already exists and is owned by UID %d; the webfleet service requires it to be owned by %s:%s with mode 0700. Move existing data under %s or re-home it; the installer will not adopt an existing directory", path, owner, ServiceUser, ServiceGroup, DefaultDataDir)
+	}
+	return nil
+}
 
 func requireRoot(verb string) error {
 	if !isRoot() {
@@ -279,30 +437,38 @@ WantedBy=multi-user.target
 `
 }
 
+// buildUnit returns the full managed unit content: the marker, the versioned
+// integrity header (SHA-256 of the metadata + body), the recorded metadata and
+// the systemd body.
+func buildUnit(dataDir, listen string) string {
+	meta := "# webfleet-data: " + dataDir + "\n# webfleet-listen: " + listen + "\n"
+	content := meta + unitBody(dataDir, listen)
+	sum := sha256.Sum256([]byte(content))
+	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
+	return header + content
+}
+
 // Unit returns the full managed unit content for the given data dir and listen
 // address.
 func Unit(dataDir, listen string) string {
-	return unitMarker + "\n" + unitBody(dataDir, listen)
-}
-
-// unitEnv reads an Environment=WEBFLEET_* value from a unit body.
-func unitEnv(body, key string) string {
-	prefix := "Environment=" + key + "="
-	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.Trim(strings.TrimPrefix(line, prefix), `"`)
-		}
-	}
-	return ""
+	return buildUnit(dataDir, listen)
 }
 
 // Install installs (or idempotently reinstalls) the webfleet systemd unit: it
 // creates the service account and data directory, copies the current binary,
-// writes the managed unit, daemon-reloads, enables and starts/restarts the
-// service. A partial failure restores the prior unit, enablement, active state
-// and binary. A byte-identical unit that is already enabled and active is a
-// no-op.
-func Install(exe, dataDir, listen string) error {
+// writes the managed unit, daemon-reloads and restores the operational state.
+//
+// For an existing managed unit the exact prior enablement and active state are
+// snapshotted, classified and re-applied on the forward path, so a reinstall
+// preserves disabled/stopped (and every supported combination) exactly instead
+// of forcing enabled+active. A fresh install establishes Web Fleet's normal
+// initial enabled/running state.
+//
+// Every state that cannot be recreated exactly is refused BEFORE any mutation,
+// and a partial failure restores the prior unit, enablement, active state and
+// binary; the returned error combines the original failure with any rollback
+// failure rather than claiming "installation rolled back" blindly.
+func Install(exe, dataDir, listen string) (retErr error) {
 	if e := requireLinux(); e != nil {
 		return e
 	}
@@ -320,18 +486,19 @@ func Install(exe, dataDir, listen string) error {
 	if listen == "" {
 		listen = DefaultListen
 	}
+	if e := validateReadWritePath(dataDir); e != nil {
+		return e
+	}
+	if e := validateDataDirPath(dataDir); e != nil {
+		return e
+	}
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found; is systemd installed?")
 	}
 	if e := ensureAccount(); e != nil {
 		return e
 	}
-	if e := mkdirData(dataDir, 0o700); e != nil {
-		return e
-	}
-	_ = os.Chmod(dataDir, 0o700)
-	_ = os.Chown(dataDir, 0, 0)
-	if e := chownData(dataDir); e != nil {
+	if e := prepareDataDir(dataDir); e != nil {
 		return e
 	}
 	unit := Unit(dataDir, listen)
@@ -339,21 +506,35 @@ func Install(exe, dataDir, listen string) error {
 	if b, e := os.ReadFile(UnitPath); e == nil {
 		hadUnit = true
 		priorUnit = b
-		if ve := validateManagedUnit(b); ve != nil {
+		if _, ve := readManagedUnit(string(b)); ve != nil {
 			return fmt.Errorf("refusing to reinstall webfleet.service: %v", ve)
 		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	// Snapshot the prior enablement/active states so rollback can reproduce the
-	// exact previous operational state, positive and negative alike.
+	// Snapshot and classify the exact prior enablement and active states BEFORE
+	// any mutation. Query failures are propagated and every state that cannot be
+	// recreated exactly by the shared restore mapping is refused up front, so
+	// install never mutates a state it cannot restore.
 	priorEnabled, priorActive := "", ""
 	if hadUnit {
-		priorEnabled, _ = unitStateWord("is-enabled")
-		priorActive, _ = unitStateWord("is-active")
+		var e error
+		if priorEnabled, e = unitStateWord("is-enabled"); e != nil {
+			return fmt.Errorf("refusing to reinstall webfleet.service: %w", e)
+		}
+		if !restorableEnabledWord(priorEnabled) {
+			return fmt.Errorf("refusing to reinstall webfleet.service: prior enablement state %q cannot be restored exactly; disable or unmask it first", priorEnabled)
+		}
+		if priorActive, e = unitStateWord("is-active"); e != nil {
+			return fmt.Errorf("refusing to reinstall webfleet.service: %w", e)
+		}
+		if !restorableActiveWord(priorActive) {
+			return fmt.Errorf("refusing to reinstall webfleet.service: prior active state %q cannot be restored exactly; stop or restart it first", priorActive)
+		}
+		if !restorablePriorState(priorEnabled, priorActive) {
+			return fmt.Errorf("refusing to reinstall webfleet.service: prior state %s+%s cannot be restored exactly; unmask it first", priorEnabled, priorActive)
+		}
 	}
-	// Detect a changed executable: reinstall of a newer binary must restart the
-	// service even when the unit text is unchanged.
 	incomingDigest, err := fileSHA256(exe)
 	if err != nil {
 		return fmt.Errorf("read incoming executable: %w", err)
@@ -364,9 +545,10 @@ func Install(exe, dataDir, listen string) error {
 		priorBinaryDigest = d
 	}
 	binaryChanged := !hadBinary || incomingDigest != priorBinaryDigest
-	// Genuine no-op: identical unit bytes, identical executable, already enabled
-	// and active - nothing to rewrite, reload or restart.
-	if hadUnit && string(priorUnit) == unit && !binaryChanged && priorEnabled == "enabled" && priorActive == "active" {
+	// Genuine no-op: the installed unit and executable already match the request,
+	// so the service is already running the requested version in its prior state;
+	// nothing is rewritten, reloaded, enabled or started.
+	if hadUnit && string(priorUnit) == unit && !binaryChanged {
 		return nil
 	}
 	// Preserve the prior binary so activation failure can roll back cleanly.
@@ -402,27 +584,17 @@ func Install(exe, dataDir, listen string) error {
 		if e := systemctlSuccess("daemon-reload"); e != nil {
 			errs = append(errs, fmt.Sprintf("reload systemd: %v", e))
 		}
-		// 4) Restore the exact prior enablement and active states, negative
-		// states included.
+		// 4) Restore the exact prior enablement and active states via the same
+		// mapping used by the successful reinstall path.
 		if hadUnit {
-			if priorEnabled == "enabled" {
-				if e := systemctlSuccess("enable", "webfleet.service"); e != nil {
-					errs = append(errs, fmt.Sprintf("re-enable: %v", e))
+			for _, args := range enableRestoreSteps(priorEnabled, "webfleet.service") {
+				if e := systemctlSuccess(args...); e != nil {
+					errs = append(errs, fmt.Sprintf("restore enablement %q: %v", priorEnabled, e))
+					break
 				}
-			} else if priorEnabled != "" && priorEnabled != "disabled" {
-				errs = append(errs, fmt.Sprintf("prior enablement %q cannot be restored", priorEnabled))
-			} else {
-				_ = systemctlSuccess("disable", "webfleet.service")
 			}
-			if priorActive == "active" {
-				if e := systemctlSuccess("start", "webfleet.service"); e != nil {
-					errs = append(errs, fmt.Sprintf("restart prior service: %v", e))
-				}
-			} else if priorActive != "" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
-				errs = append(errs, fmt.Sprintf("prior active state %q cannot be restored", priorActive))
-			} else {
-				// Service stays stopped (already neutralized above).
-				_ = systemctlSuccess("stop", "webfleet.service")
+			if e := systemctlSuccess(activeRestoreArgs(priorActive, "webfleet.service")...); e != nil {
+				errs = append(errs, fmt.Sprintf("restore active state %q: %v", priorActive, e))
 			}
 		}
 		if len(errs) == 0 {
@@ -431,8 +603,10 @@ func Install(exe, dataDir, listen string) error {
 		return "; rollback incomplete: " + strings.Join(errs, "; ")
 	}
 	defer func() {
-		if !installOK {
-			_ = restore()
+		if !installOK && retErr != nil {
+			if rb := restore(); rb != "" {
+				retErr = fmt.Errorf("%v%s", retErr, rb)
+			}
 		}
 	}()
 	if e := copyFile(exe, BinaryPath, 0o755); e != nil {
@@ -441,27 +615,82 @@ func Install(exe, dataDir, listen string) error {
 	if e := os.WriteFile(UnitPath, []byte(unit), 0o644); e != nil {
 		return e
 	}
-	unitChanged := !hadUnit || string(priorUnit) != unit
-	changed := unitChanged || binaryChanged
 	steps := [][]string{{"daemon-reload"}}
-	if changed {
-		steps = append(steps, []string{"enable", "webfleet.service"}, []string{"restart", "webfleet.service"})
+	if !hadUnit {
+		// Fresh install: establish Web Fleet's normal initial enabled/running state.
+		steps = append(steps, []string{"enable", "webfleet.service"}, []string{"start", "webfleet.service"})
 	} else {
-		if priorEnabled != "enabled" {
-			steps = append(steps, []string{"enable", "webfleet.service"})
-		}
-		if priorActive != "active" {
-			steps = append(steps, []string{"start", "webfleet.service"})
-		}
+		// Reinstall: preserve the exact prior enablement and active state.
+		steps = append(steps, enableRestoreSteps(priorEnabled, "webfleet.service")...)
+		steps = append(steps, activeRestoreArgs(priorActive, "webfleet.service"))
 	}
 	for _, a := range steps {
 		if out, code, err := systemctl(a...); err != nil || code != 0 {
-			return fmt.Errorf("systemctl %s: %s: %w (installation rolled back)", strings.Join(a, " "), bounded(strings.TrimSpace(out)), errorIfNil(err, code, a))
+			retErr = fmt.Errorf("systemctl %s: %s: %w (installation rolled back)", strings.Join(a, " "), bounded(strings.TrimSpace(out)), errorIfNil(err, code, a))
+			return retErr
 		}
 	}
 	installOK = true
 	_ = os.Remove(BinaryPath + ".preinstall")
 	return nil
+}
+
+// restorableEnabledWord reports whether a prior is-enabled word can be
+// recreated exactly by the shared enablement mapping. Persistent enablement
+// (enabled), runtime-only enablement (enabled-runtime) and their absence
+// (disabled) are restorable. Masked/static/linked/generated/transient and other
+// unit-file states are refused before mutation because enable/disable cannot
+// reproduce them.
+func restorableEnabledWord(word string) bool {
+	switch word {
+	case "enabled", "enabled-runtime", "disabled":
+		return true
+	}
+	return false
+}
+
+// restorableActiveWord reports whether a prior is-active word can be recreated
+// exactly by the shared activation mapping. Running and stopped are restorable;
+// transient, failed, reloading, activating and unknown states are not.
+func restorableActiveWord(word string) bool {
+	switch word {
+	case "active", "inactive":
+		return true
+	}
+	return false
+}
+
+// restorablePriorState reports whether the enablement/active pair can be
+// reproduced exactly. Only the states accepted above are combined here; this
+// guard exists so any future widening of the accept sets must also prove the
+// pair is restorable.
+func restorablePriorState(enabledWord, activeWord string) bool {
+	return restorableEnabledWord(enabledWord) && restorableActiveWord(activeWord)
+}
+
+// enableRestoreSteps returns the systemctl calls that reproduce a prior
+// is-enabled word exactly. Enablement is normalized first: the enablement link
+// created by the attempted install is removed with disable, then the intended
+// persistent or runtime link is recreated, so a runtime-only prior never leaves
+// a persistent enablement behind.
+func enableRestoreSteps(word, unit string) [][]string {
+	switch word {
+	case "enabled":
+		return [][]string{{"disable", unit}, {"enable", unit}}
+	case "enabled-runtime":
+		return [][]string{{"disable", unit}, {"enable", "--runtime", unit}}
+	default: // disabled
+		return [][]string{{"disable", unit}}
+	}
+}
+
+// activeRestoreArgs returns the systemctl call that reproduces a prior is-active
+// word exactly.
+func activeRestoreArgs(word, unit string) []string {
+	if word == "active" {
+		return []string{"restart", unit}
+	}
+	return []string{"stop", unit}
 }
 
 func errorIfNil(err error, code int, args []string) error {
@@ -556,12 +785,17 @@ func lifecycle(verb string) error {
 
 // Uninstall stops and disables the service, removes the unit and reloads
 // systemd. The data directory and installed binary are deliberately preserved.
+// Uninstall is idempotent: when no unit is installed it is a successful no-op
+// with no systemctl mutation; a foreign unit at the path is refused.
 func Uninstall() error {
 	if e := requireLinux(); e != nil {
 		return e
 	}
 	if e := requireRoot("uninstall"); e != nil {
 		return e
+	}
+	if _, e := os.Stat(UnitPath); errors.Is(e, os.ErrNotExist) {
+		return nil
 	}
 	if e := requireManaged("uninstall"); e != nil {
 		return e
@@ -589,14 +823,15 @@ func Status(out io.Writer) error {
 	if e != nil {
 		return fmt.Errorf("cannot read %s: %w", UnitPath, e)
 	}
-	if ve := validateManagedUnit(body); ve != nil {
+	meta, ve := readManagedUnit(string(body))
+	if ve != nil {
 		return fmt.Errorf("webfleet.service unit at %s is not valid: %v", UnitPath, ve)
 	}
 	enabled, _ := unitStateWord("is-enabled")
 	active, _ := unitStateWord("is-active")
 	pid, _, _ := systemctl("show", "-p", "MainPID", "--value", "webfleet.service")
-	dataDir := unitEnv(string(body), "WEBFLEET_DATA_DIR")
-	listen := unitEnv(string(body), "WEBFLEET_LISTEN")
+	dataDir := meta.data
+	listen := meta.listen
 	if dataDir == "" {
 		dataDir = DefaultDataDir
 	}
@@ -759,8 +994,8 @@ func updateFailureWithRecovery(updateErr, recoveryErr error) error {
 func verifyActiveAndHealthy() error {
 	listen := DefaultListen
 	if b, e := os.ReadFile(UnitPath); e == nil {
-		if l := unitEnv(string(b), "WEBFLEET_LISTEN"); l != "" {
-			listen = l
+		if meta, ve := readManagedUnit(string(b)); ve == nil && meta.listen != "" {
+			listen = meta.listen
 		}
 	}
 	deadline := time.Now().Add(healthWindow)

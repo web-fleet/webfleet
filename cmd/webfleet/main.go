@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/web-fleet/webfleet/internal/config"
 	"github.com/web-fleet/webfleet/internal/crawler"
@@ -14,6 +16,7 @@ import (
 	"github.com/web-fleet/webfleet/internal/service"
 	"github.com/web-fleet/webfleet/internal/store"
 	"github.com/web-fleet/webfleet/internal/tlshealth"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -147,191 +150,176 @@ func main() {
 	}
 }
 
-// runService dispatches `webfleet service <command>` with the same CLI shape,
-// exit-code model and diagnostics as the sibling projects (Cortex, Warden,
-// Trestle, Watchpost), while operating the Web Fleet systemd **system** unit.
-// Exit codes: 0 success, 1 operational failure, 2 usage error.
-func runService(args []string, defaultListen string) int {
-	cmd := "status"
-	var flags, positional []string
-	for _, a := range args {
-		if a != "" && !strings.HasPrefix(a, "-") {
-			if cmd == "status" && len(positional) == 0 {
-				cmd = a
-				continue
-			}
-			positional = append(positional, a)
-			continue
-		}
-		flags = append(flags, a)
-	}
-	usage := func(msg string) int {
-		fmt.Fprintf(os.Stderr, "webfleet service %s: %s\n", cmd, msg)
-		return 2
-	}
-	if len(flags) > 0 {
-		switch cmd {
-		case "install":
-			for i := 0; i < len(flags); i++ {
-				switch flags[i] {
-				case "--data":
-					if i+1 < len(flags) {
-						i++
-					} else {
-						return usage("--data requires a path")
-					}
-				case "--listen":
-					if i+1 < len(flags) {
-						i++
-					} else {
-						return usage("--listen requires an address")
-					}
-				default:
-					return usage("unknown flag " + flags[i])
-				}
-			}
-		case "logs":
-			if len(flags) > 1 || flags[0] != "--follow" {
-				return usage("logs accepts only --follow")
-			}
-		default:
-			return usage("no flags are accepted for " + cmd)
-		}
-	}
-	switch cmd {
+// serviceCommand is the fully parsed `webfleet service <verb>` invocation.
+type serviceCommand struct {
+	verb     string
+	data     string
+	listen   string
+	follow   bool
+	artifact string
+	sha      string
+}
+
+// execServiceCommand dispatches a parsed service command to the lifecycle,
+// returning the success message (or status/logs body) to print. It is a
+// variable so the CLI can be tested end-to-end without root or systemd.
+var execServiceCommand = func(c serviceCommand) (string, error) {
+	switch c.verb {
 	case "install":
-		if len(positional) != 0 {
-			return usage("install takes no positional arguments")
+		if err := service.Install(service.Executable(), c.data, c.listen); err != nil {
+			return "", err
 		}
-		data, listen := service.DefaultDataDir, defaultListen
-		for i := 0; i < len(flags); i++ {
-			switch flags[i] {
-			case "--data":
-				if i+1 < len(flags) {
-					i++
-					data = flags[i]
-				}
-			case "--listen":
-				if i+1 < len(flags) {
-					i++
-					listen = flags[i]
-				}
+		return "webfleet.service installed and active.", nil
+	case "uninstall":
+		if err := service.Uninstall(); err != nil {
+			return "", err
+		}
+		return "webfleet.service uninstalled. Data in " + service.DefaultDataDir + " was preserved.", nil
+	case "start":
+		if err := service.Start(); err != nil {
+			return "", err
+		}
+		return "webfleet.service started.", nil
+	case "stop":
+		if err := service.Stop(); err != nil {
+			return "", err
+		}
+		return "webfleet.service stopped.", nil
+	case "restart":
+		if err := service.Restart(); err != nil {
+			return "", err
+		}
+		return "webfleet.service restarted.", nil
+	case "enable":
+		if err := service.Enable(); err != nil {
+			return "", err
+		}
+		return "webfleet.service enabled at boot.", nil
+	case "disable":
+		if err := service.Disable(); err != nil {
+			return "", err
+		}
+		return "webfleet.service disabled at boot.", nil
+	case "status":
+		var b bytes.Buffer
+		if err := service.Status(&b); err != nil {
+			return b.String(), err
+		}
+		return b.String(), nil
+	case "logs":
+		var b bytes.Buffer
+		if err := service.Logs(c.follow, &b); err != nil {
+			return b.String(), err
+		}
+		return b.String(), nil
+	case "update":
+		if err := service.Update(c.artifact, c.sha); err != nil {
+			return "", err
+		}
+		return "webfleet.service updated and restarted.", nil
+	case "rollback":
+		if err := service.Rollback(); err != nil {
+			return "", err
+		}
+		return "webfleet.service rolled back and restarted.", nil
+	}
+	return "", fmt.Errorf("internal error: unknown service command %q", c.verb)
+}
+
+// parseServiceCommand deterministically parses `webfleet service <verb>` with
+// command-local flags, preserving `--flag value` pairs that the previous
+// separator-based parser could not (it stripped flag values into positionals).
+// Exit-code model: 0 success, 1 operational failure, 2 usage error.
+func parseServiceCommand(args []string, defaultListen string) (serviceCommand, error) {
+	if len(args) == 0 {
+		args = []string{"status"}
+	}
+	verb := args[0]
+	rest := args[1:]
+	cmd := serviceCommand{verb: verb}
+	switch verb {
+	case "install":
+		fs := flag.NewFlagSet("install", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		data := fs.String("data", "", "data directory")
+		listen := fs.String("listen", "", "listen address")
+		if err := fs.Parse(rest); err != nil {
+			return cmd, fmt.Errorf("install: %v", err)
+		}
+		if fs.NArg() != 0 {
+			return cmd, fmt.Errorf("install takes no positional arguments: %s", strings.Join(fs.Args(), " "))
+		}
+		cmd.data = *data
+		cmd.listen = *listen
+		if cmd.data == "" {
+			cmd.data = service.DefaultDataDir
+		}
+		if cmd.listen == "" {
+			cmd.listen = defaultListen
+		}
+		return cmd, nil
+	case "logs":
+		fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		follow := fs.Bool("follow", false, "tail live journal output")
+		if err := fs.Parse(rest); err != nil {
+			return cmd, fmt.Errorf("logs: %v", err)
+		}
+		if fs.NArg() != 0 {
+			return cmd, fmt.Errorf("logs takes no positional arguments: %s", strings.Join(fs.Args(), " "))
+		}
+		cmd.follow = *follow
+		return cmd, nil
+	case "update":
+		for _, a := range rest {
+			if strings.HasPrefix(a, "-") {
+				return cmd, fmt.Errorf("update takes no flags: %s", a)
 			}
 		}
-		if err := service.Install(service.Executable(), data, listen); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service install:", err)
-			return 1
+		if len(rest) != 2 {
+			return cmd, fmt.Errorf("usage: webfleet service update ARTIFACT SHA256")
 		}
-		fmt.Fprintln(os.Stdout, "webfleet.service installed and active.")
-		return 0
-	case "uninstall":
-		if len(positional) != 0 {
-			return usage("uninstall takes no positional arguments")
+		cmd.artifact = rest[0]
+		cmd.sha = rest[1]
+		return cmd, nil
+	case "uninstall", "start", "stop", "restart", "enable", "disable", "status", "rollback":
+		for _, a := range rest {
+			if strings.HasPrefix(a, "-") {
+				return cmd, fmt.Errorf("%s takes no flags: %s", verb, a)
+			}
 		}
-		if err := service.Uninstall(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service uninstall:", err)
-			return 1
+		if len(rest) != 0 {
+			return cmd, fmt.Errorf("%s takes no positional arguments: %s", verb, strings.Join(rest, " "))
 		}
-		fmt.Fprintln(os.Stdout, "webfleet.service uninstalled. Data in "+service.DefaultDataDir+" was preserved.")
-		return 0
-	case "start":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service start:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service started.")
-		return 0
-	case "stop":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Stop(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service stop:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service stopped.")
-		return 0
-	case "restart":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Restart(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service restart:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service restarted.")
-		return 0
-	case "enable":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Enable(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service enable:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service enabled at boot.")
-		return 0
-	case "disable":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Disable(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service disable:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service disabled at boot.")
-		return 0
-	case "status":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Status(os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service status:", err)
-			return 1
-		}
-		return 0
-	case "logs":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		follow := len(flags) > 0 && flags[0] == "--follow"
-		if err := service.Logs(follow, os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service logs:", err)
-			return 1
-		}
-		return 0
-	case "update":
-		if len(positional) != 2 {
-			return usage("usage: webfleet service update ARTIFACT SHA256")
-		}
-		if err := service.Update(positional[0], positional[1]); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service update:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service updated and restarted.")
-		return 0
-	case "rollback":
-		if err := checkNoArgs(positional, cmd); err != "" {
-			return usage(err)
-		}
-		if err := service.Rollback(); err != nil {
-			fmt.Fprintln(os.Stderr, "webfleet service rollback:", err)
-			return 1
-		}
-		fmt.Fprintln(os.Stdout, "webfleet.service rolled back and restarted.")
-		return 0
+		return cmd, nil
 	default:
-		fmt.Fprintf(os.Stderr, "webfleet: unknown service command %q\n\nUsage: webfleet service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]\n", cmd)
-		return 2
+		return cmd, fmt.Errorf("unknown service command %q\n\nUsage: webfleet service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]", verb)
 	}
 }
 
-func checkNoArgs(positional []string, cmd string) string {
-	if len(positional) != 0 {
-		return fmt.Sprintf("%s takes no positional arguments", cmd)
+// runServiceIO runs a parsed `webfleet service` command against the lifecycle
+// seam and writes diagnostics to the supplied writers. It is the testable core
+// of runService.
+func runServiceIO(out, errOut io.Writer, args []string, defaultListen string) int {
+	cmd, err := parseServiceCommand(args, defaultListen)
+	if err != nil {
+		fmt.Fprintf(errOut, "webfleet service: %v\n", err)
+		return 2
 	}
-	return ""
+	output, err := execServiceCommand(cmd)
+	if err != nil {
+		fmt.Fprintf(errOut, "webfleet service %s: %v\n", cmd.verb, err)
+		return 1
+	}
+	if output != "" {
+		fmt.Fprintln(out, output)
+	}
+	return 0
+}
+
+// runService dispatches `webfleet service <command>` with the same CLI shape,
+// exit-code model and diagnostics as the sibling projects (Cortex, Warden,
+// Trestle, Watchpost), while operating the Web Fleet systemd **system** unit.
+func runService(args []string, defaultListen string) int {
+	return runServiceIO(os.Stdout, os.Stderr, args, defaultListen)
 }
