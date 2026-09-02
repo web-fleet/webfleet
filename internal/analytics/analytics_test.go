@@ -426,12 +426,20 @@ func TestRollingSevenDayWindowSpansWeeklyBoundary(t *testing.T) {
 	}
 	// The boundary between the previous and current weekly buckets, within the
 	// rolling last-7-days window.
-	b := weeklyBucket(time.Now().UTC())
+	// Fixed reporting clock (a Wednesday) so the 7-day calendar window
+	// deterministically straddles the Monday weekly boundary with both events
+	// inside it, regardless of the real day of week.
+	fixed := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC) // Wednesday
+	s.nowFn = func() time.Time { return fixed }
+	b := weeklyBucket(fixed)
 	boundary := weeklyEpoch.Add(time.Duration(mustBucketIndex(b)) * 7 * 24 * time.Hour)
 	before := boundary.Add(-time.Hour)
 	after := boundary.Add(time.Hour)
 	if weeklyBucket(before) == weeklyBucket(after) {
 		t.Fatalf("test dates did not straddle the weekly boundary")
+	}
+	if fixed.Sub(before) > 7*24*time.Hour || fixed.Sub(after) > 7*24*time.Hour {
+		t.Fatalf("test dates must both lie inside the 7-day reporting window")
 	}
 	for _, ev := range []struct{ ip, path, at, key string }{
 		{"203.0.113.10", "/a", before.Format(time.RFC3339), key(weeklyBucket(before), "203.0.113.10")},

@@ -35,6 +35,7 @@ type Service struct {
 	allowNoOrigin bool
 	validLim      *limiter
 	badLim        *limiter
+	nowFn         func() time.Time
 }
 
 // Options configures the analytics service. AllowNoOrigin enables a deliberate
@@ -55,7 +56,7 @@ func NewWithOptions(st *store.Store, o Options) *Service {
 		salt = randomKey(24)
 		_ = sqlite.Exec(st.DB, `INSERT INTO app_settings(key,value,updated_at) VALUES('analytics_visitor_salt',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, salt, store.Now())
 	}
-	return &Service{st: st, salt: salt, allowNoOrigin: o.AllowNoOrigin, validLim: newLimiter(time.Minute, 300, 20000), badLim: newLimiter(time.Minute, 60, 20000)}
+	return &Service{st: st, salt: salt, allowNoOrigin: o.AllowNoOrigin, validLim: newLimiter(time.Minute, 300, 20000), badLim: newLimiter(time.Minute, 60, 20000), nowFn: func() time.Time { return time.Now().UTC() }}
 }
 func randomKey(n int) string {
 	b := make([]byte, n)
@@ -299,7 +300,7 @@ func (s *Service) Summary(siteID int64, days int) (Summary, error) {
 	if e != nil || p == nil {
 		return Summary{}, e
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	since := s.nowFn().AddDate(0, 0, -days+1).Format("2006-01-02")
 	rows, e := sqlite.Query(s.st.DB, `SELECT day,pageviews,visitors FROM analytics_daily WHERE property_id=? AND day>=? ORDER BY day`, p.ID, since)
 	if e != nil {
 		return Summary{}, e
@@ -338,7 +339,7 @@ func (s *Service) Fleet(orgID int64, days int) (FleetSummary, error) {
 	if days < 1 {
 		days = 1
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	since := s.nowFn().AddDate(0, 0, -days+1).Format("2006-01-02")
 	// Headline fleet totals are derived from the event table over the requested
 	// window with the same weekly-bucket pseudonym as the site Summary, so a
 	// multi-day fleet visitor total is a true unique-visitor estimate. Because
@@ -439,7 +440,7 @@ func (s *Service) Pages(siteID int64, days, page, pageSize int) (PageViews, erro
 	if e != nil || p == nil {
 		return PageViews{}, e
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	since := s.nowFn().AddDate(0, 0, -days+1).Format("2006-01-02")
 	var total int64
 	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT path) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=?`, p.ID, since); qe == nil && len(r) > 0 {
 		total = r[0]["n"].Int64
@@ -490,7 +491,7 @@ func (s *Service) Countries(siteID int64, days, page, pageSize int) (Countries, 
 	if e != nil || p == nil {
 		return Countries{}, e
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	since := s.nowFn().AddDate(0, 0, -days+1).Format("2006-01-02")
 	var total int64
 	if r, qe := sqlite.Query(s.st.DB, `SELECT COUNT(DISTINCT country) n FROM analytics_events WHERE property_id=? AND kind='pageview' AND occurred_at>=? AND country<>''`, p.ID, since); qe == nil && len(r) > 0 {
 		total = r[0]["n"].Int64
