@@ -1525,3 +1525,216 @@ func TestInstallSurfacesRollbackNeutralizationFailures(t *testing.T) {
 		}
 	})
 }
+
+// hasMutatingSystemctl reports whether a call log contains any lifecycle-mutating
+// systemctl invocation (read-only state queries are excluded).
+func hasMutatingSystemctl(log []string) bool {
+	for _, call := range log {
+		for _, prefix := range []string{
+			"systemctl enable ", "systemctl disable ", "systemctl start ",
+			"systemctl restart ", "systemctl stop ", "systemctl daemon-reload",
+		} {
+			if strings.HasPrefix(call, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestInstallRefusesExistingUnacceptableDirBeforeMutation proves an existing
+// unacceptable (foreign-owned) data directory is refused with ZERO account/data
+// mutation and zero binary/unit/systemctl mutation: the account is never created
+// merely to discover the directory is unsuitable.
+func TestInstallRefusesExistingUnacceptableDirBeforeMutation(t *testing.T) {
+	allowTempDataDirs(t)
+	r := setupService(t)
+	dir := filepath.Join(t.TempDir(), "existing")
+	if e := os.Mkdir(dir, 0o700); e != nil {
+		t.Fatal(e)
+	}
+	testUID := os.Getuid()
+	svcUID := testUID + 1
+	if svcUID == 0 {
+		svcUID = 9999
+	}
+	serviceUID = func() (int, error) { return svcUID, nil }
+	requireServiceOwned = requireServiceOwnedReal
+	c := countMutations()
+	binBefore := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := Install(exe, dir, "127.0.0.1:8090"); e == nil {
+		t.Fatal("install adopted a foreign-owned existing directory")
+	}
+	assertNoMutation(t, c, "existing unacceptable data dir")
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+		t.Fatal("binary mutated before refusing")
+	}
+	if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+		t.Fatal("unit written before refusing")
+	}
+	if len(r.log) != 0 {
+		t.Fatal("systemctl touched before refusing")
+	}
+}
+
+// TestReinstallDataDirContractWithNoOp proves the genuine no-op requires the
+// recorded data directory to already exist as a safe service-owned leaf: a
+// missing leaf is repaired (not silently skipped), and an unsafe/foreign leaf is
+// refused with no unrelated mutation.
+func TestReinstallDataDirContractWithNoOp(t *testing.T) {
+	t.Run("genuine-noop-with-valid-data-dir", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		dataDir := filepath.Join(t.TempDir(), "webfleet")
+		if e := os.Mkdir(dataDir, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
+		setState(r, "enabled", "active")
+		serviceUID = func() (int, error) { return os.Getuid(), nil }
+		requireServiceOwned = requireServiceOwnedReal
+		c := countMutations()
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
+		if e := Install(exe, dataDir, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		if hasMutatingSystemctl(r.log) {
+			t.Fatalf("genuine no-op issued mutating systemctl calls: %v", r.log)
+		}
+		assertNoMutation(t, c, "genuine no-op")
+	})
+	t.Run("missing-data-leaf-repaired-not-noop", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		dataDir := filepath.Join(t.TempDir(), "webfleet")
+		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
+		setState(r, "enabled", "active")
+		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
+		if e := Install(exe, dataDir, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := os.Stat(dataDir); e != nil {
+			t.Fatalf("missing data leaf was not repaired: %v", e)
+		}
+		if hasMutatingSystemctl(r.log) {
+			t.Fatalf("repair-only install issued mutating systemctl calls: %v", r.log)
+		}
+	})
+	t.Run("unsafe-existing-data-dir-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		dataDir := filepath.Join(t.TempDir(), "webfleet")
+		if e := os.Mkdir(dataDir, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
+		setState(r, "enabled", "active")
+		testUID := os.Getuid()
+		svcUID := testUID + 1
+		if svcUID == 0 {
+			svcUID = 9999
+		}
+		serviceUID = func() (int, error) { return svcUID, nil }
+		requireServiceOwned = requireServiceOwnedReal
+		c := countMutations()
+		binBefore := mustRead(t, BinaryPath)
+		unitBefore, _ := os.ReadFile(UnitPath)
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
+		if e := Install(exe, dataDir, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install accepted an unsafe existing data dir")
+		}
+		assertNoMutation(t, c, "unsafe existing data dir")
+		if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+			t.Fatal("binary mutated before refusing")
+		}
+		if got, _ := os.ReadFile(UnitPath); !bytes.Equal(got, unitBefore) {
+			t.Fatal("unit mutated before refusing")
+		}
+		if hasMutatingSystemctl(r.log) {
+			t.Fatal("systemctl mutated before refusing")
+		}
+	})
+}
+
+// TestDataDirAncestorSymlinkEscape proves an allowed-looking lexical path cannot
+// resolve through symlinked ancestors into a protected hierarchy: legitimate
+// parents are accepted, symlinked parents/intermediates into a protected target
+// are refused, and no leaf is ever created at the resolved protected target.
+func TestDataDirAncestorSymlinkEscape(t *testing.T) {
+	protected := t.TempDir()
+	base := t.TempDir()
+	oldProtected := protectedDataHierarchies
+	protectedDataHierarchies = []string{protected}
+	t.Cleanup(func() { protectedDataHierarchies = oldProtected })
+
+	exe := func() string {
+		p := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		return p
+	}
+
+	t.Run("legitimate-parent-accepted", func(t *testing.T) {
+		r := setupService(t)
+		realParent := filepath.Join(base, "real")
+		if e := os.Mkdir(realParent, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		leaf := filepath.Join(realParent, "webfleet")
+		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl enable webfleet.service"] = fakeResult{}
+		r.script["systemctl start webfleet.service"] = fakeResult{}
+		if e := Install(exe(), leaf, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := os.Stat(leaf); e != nil {
+			t.Fatalf("legitimate leaf not created: %v", e)
+		}
+	})
+	t.Run("immediate-symlink-parent-refused", func(t *testing.T) {
+		r := setupService(t)
+		link := filepath.Join(base, "link")
+		if e := os.Symlink(protected, link); e != nil {
+			t.Fatal(e)
+		}
+		leaf := filepath.Join(link, "webfleet")
+		if e := Install(exe(), leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install accepted a data leaf through a symlinked parent into a protected hierarchy")
+		}
+		if _, e := os.Stat(filepath.Join(protected, "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the resolved protected target: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("symlink-escape install touched systemctl")
+		}
+	})
+	t.Run("intermediate-symlink-refused", func(t *testing.T) {
+		r := setupService(t)
+		link := filepath.Join(base, "link2")
+		if e := os.Symlink(protected, link); e != nil {
+			t.Fatal(e)
+		}
+		child := filepath.Join(protected, "child")
+		if e := os.Mkdir(child, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		leaf := filepath.Join(link, "child", "webfleet")
+		if e := Install(exe(), leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install accepted a leaf through an intermediate symlink into a protected hierarchy")
+		}
+		if _, e := os.Stat(filepath.Join(child, "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the resolved protected target: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("symlink-escape install touched systemctl")
+		}
+	})
+}

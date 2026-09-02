@@ -337,28 +337,110 @@ func validateDataDirPath(path string) error {
 	return nil
 }
 
-// prepareDataDir safely establishes the service data directory. A missing final
-// leaf is created ONLY when its parent already exists (the parent hierarchy is
-// never created, chmod'ed or chown'ed); a failure to establish mode 0700 is an
-// error. An existing directory is only reused if it is a non-symlink directory
-// already owned by the service account with no group/world-write bits; an
-// unrelated or root-owned existing directory is refused rather than adopted.
-func prepareDataDir(path string) error {
+// dataDirStatus classifies the outcome of the non-mutating data-path
+// inspection so the installer can defer every filesystem mutation until after
+// all preflight succeeds.
+type dataDirStatus int
+
+const (
+	// dataDirAcceptFresh means the final leaf is missing but its parent already
+	// exists and resolves safely; the leaf may be created during the mutation
+	// phase.
+	dataDirAcceptFresh dataDirStatus = iota
+	// dataDirAcceptExisting means the leaf already exists and is a safe,
+	// service-owned directory.
+	dataDirAcceptExisting
+)
+
+// inspectDataDir performs the NON-MUTATING data-path preflight: it classifies
+// the requested directory (acceptable fresh leaf with a safe existing parent,
+// or acceptable existing service-owned leaf) or refuses it. It never creates,
+// chmods or chowns anything, and it refuses an existing directory it cannot
+// prove is service-owned (including when the service account does not yet
+// exist) rather than creating the account first just to discover the directory
+// is unsuitable. It also resolves the existing parent/leaf chain so an
+// intermediate ancestor symlink cannot redirect a later creation into a
+// protected hierarchy.
+func inspectDataDir(path string) (dataDirStatus, error) {
 	info, e := os.Lstat(path)
 	if errors.Is(e, os.ErrNotExist) {
-		// Final-leaf-only creation: the parent must already exist and be a
-		// directory; only the final leaf is created and assigned.
 		parent := filepath.Dir(path)
-		pinfo, pe := os.Lstat(parent)
-		if errors.Is(pe, os.ErrNotExist) {
-			return fmt.Errorf("data directory %q: parent %q does not exist; create the parent hierarchy first", path, parent)
+		resolvedParent, re := resolveExistingParent(parent)
+		if re != nil {
+			return 0, fmt.Errorf("data directory %q: %v", path, re)
 		}
-		if pe != nil {
-			return fmt.Errorf("data directory %q: cannot inspect parent %q: %w", path, parent, pe)
+		if err := validateResolvedNotProtected(resolvedParent, path); err != nil {
+			return 0, err
 		}
-		if !pinfo.IsDir() {
-			return fmt.Errorf("data directory %q: parent %q is not a directory", path, parent)
+		return dataDirAcceptFresh, nil
+	}
+	if e != nil {
+		return 0, fmt.Errorf("data directory %q: %w", path, e)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, fmt.Errorf("data directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("data directory %q is not a directory", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return 0, fmt.Errorf("data directory %q must not be group- or world-writable", path)
+	}
+	// Ownership must be validated against the service account. If the account
+	// does not yet exist the directory cannot be shown to be service-owned and
+	// is refused rather than adopted; the account is never created merely to
+	// discover the directory is unsuitable.
+	if e := requireServiceOwned(path); e != nil {
+		return 0, e
+	}
+	if err := validateResolvedNotProtected(path, path); err != nil {
+		return 0, err
+	}
+	return dataDirAcceptExisting, nil
+}
+
+// resolveExistingParent verifies the parent of a missing leaf exists and is a
+// directory, resolving the full existing chain (ancestor symlinks included) so
+// the returned path is the parent's resolved location. It performs no mutation.
+func resolveExistingParent(parent string) (string, error) {
+	resolved, re := filepath.EvalSymlinks(parent)
+	if re != nil {
+		if errors.Is(re, os.ErrNotExist) {
+			return "", fmt.Errorf("parent %q does not exist; create the parent hierarchy first", parent)
 		}
+		return "", fmt.Errorf("cannot resolve parent %q: %w", parent, re)
+	}
+	pinfo, se := os.Stat(resolved)
+	if se != nil {
+		return "", fmt.Errorf("cannot inspect parent %q: %w", parent, se)
+	}
+	if !pinfo.IsDir() {
+		return "", fmt.Errorf("parent %q is not a directory", parent)
+	}
+	return resolved, nil
+}
+
+// validateResolvedNotProtected refuses a resolved path that lands inside (or
+// on) a protected system hierarchy, so a symlinked ancestor cannot smuggle the
+// final leaf into /etc, /usr, /home and friends behind an allowed-looking
+// lexical path.
+func validateResolvedNotProtected(resolved, original string) error {
+	clean := filepath.Clean(resolved)
+	for _, p := range protectedDataHierarchies {
+		if clean == p || strings.HasPrefix(clean, p+"/") {
+			return fmt.Errorf("data directory %q resolves through symlinks to %q, inside the protected system hierarchy %q; refusing", original, resolved, p)
+		}
+	}
+	return nil
+}
+
+// establishDataDir performs the MUTATION phase after inspectDataDir accepted the
+// path: it creates the final leaf (fresh) or normalizes its mode (existing).
+// After creating a fresh leaf it re-verifies the created path still resolves
+// outside protected hierarchies, guarding against a parent swap between
+// validation and creation.
+func establishDataDir(path string, status dataDirStatus) error {
+	if status == dataDirAcceptFresh {
 		if e := mkdirData(path, 0o700); e != nil {
 			return e
 		}
@@ -368,22 +450,13 @@ func prepareDataDir(path string) error {
 		if e := chownData(path); e != nil {
 			return e
 		}
+		if resolved, re := filepath.EvalSymlinks(path); re == nil {
+			if err := validateResolvedNotProtected(resolved, path); err != nil {
+				_ = os.Remove(path)
+				return err
+			}
+		}
 		return nil
-	}
-	if e != nil {
-		return fmt.Errorf("data directory %q: %w", path, e)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("data directory %q must not be a symlink", path)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("data directory %q is not a directory", path)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
-	}
-	if e := requireServiceOwned(path); e != nil {
-		return e
 	}
 	if e := chmodData(path, 0o700); e != nil {
 		return fmt.Errorf("data directory %q: set mode 0700: %w", path, e)
@@ -502,13 +575,16 @@ func Unit(dataDir, listen string) string {
 // initial enabled/running state.
 //
 // Every non-mutating check (argument validation, unit integrity, state
-// classification, executable inspection) runs as preflight BEFORE any account
-// or data-directory creation, so an install that must fail closed never leaves
-// a machine mutation behind. After preflight, a partial failure restores the
-// prior unit, enablement, active state and binary, and the returned error
-// combines the original failure with EVERY rollback failure (including
-// neutralization stop/disable) rather than claiming "installation rolled back"
-// blindly.
+// classification, executable inspection, and data-path inspection classifying
+// the directory as an acceptable fresh leaf or existing service-owned leaf)
+// runs as preflight BEFORE any account or data-directory creation, so an
+// install that must fail closed never leaves a machine mutation behind, and a
+// genuine no-op additionally requires the recorded data directory to already
+// exist as a safe service-owned leaf (a missing leaf is repaired instead). A
+// partial failure restores the prior unit, enablement, active state and binary,
+// and the returned error combines the original failure with EVERY rollback
+// failure (including neutralization stop/disable) rather than claiming
+// "installation rolled back" blindly.
 func Install(exe, dataDir, listen string) (retErr error) {
 	if e := requireLinux(); e != nil {
 		return e
@@ -581,10 +657,22 @@ func Install(exe, dataDir, listen string) (retErr error) {
 		priorBinaryDigest = d
 	}
 	binaryChanged := !hadBinary || incomingDigest != priorBinaryDigest
-	// Genuine no-op: the installed unit and executable already match the request,
-	// so the service is already running the requested version in its prior state;
-	// nothing is rewritten, reloaded, enabled or started.
-	if hadUnit && string(priorUnit) == unit && !binaryChanged {
+	// Non-mutating data-path inspection: classify the requested directory
+	// (acceptable fresh leaf with a safe existing parent, or acceptable existing
+	// service-owned leaf) or refuse it. This runs before the genuine-no-op
+	// return so a reinstall never claims "already correct" while a recorded
+	// runtime prerequisite (the data directory) is missing or unsafe, and it
+	// runs before any account/data mutation so an unacceptable existing
+	// directory cannot trigger account creation first.
+	dataStatus, dErr := inspectDataDir(dataDir)
+	if dErr != nil {
+		return fmt.Errorf("refusing to install webfleet.service: %w", dErr)
+	}
+	// Genuine no-op: the installed unit and executable already match the request
+	// AND the recorded data directory already exists as a safe service-owned
+	// leaf, so the service is already running the requested version in its prior
+	// state; nothing is rewritten, reloaded, enabled or started.
+	if hadUnit && string(priorUnit) == unit && !binaryChanged && dataStatus == dataDirAcceptExisting {
 		return nil
 	}
 	// Preflight is complete: only now may install mutate the machine (account,
@@ -592,8 +680,14 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if e := ensureAccount(); e != nil {
 		return e
 	}
-	if e := prepareDataDir(dataDir); e != nil {
+	if e := establishDataDir(dataDir, dataStatus); e != nil {
 		return e
+	}
+	// Repair-only: the unit and binary already match the request, so the only
+	// reason the no-op check did not return early was a missing data leaf, which
+	// has just been recreated. No systemd state change is needed.
+	if hadUnit && string(priorUnit) == unit && !binaryChanged {
+		return nil
 	}
 	// Preserve the prior binary so activation failure can roll back cleanly.
 	if hadBinary {
