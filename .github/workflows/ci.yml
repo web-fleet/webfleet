@@ -170,7 +170,6 @@ jobs:
           # --- custom data path and dangerous-path adoption ---
           # custom safe data path is created and assigned to the service account
           sudo /tmp/wf service install --data /var/lib/webfleet-safe
-          sudo test -O /var/lib/webfleet-safe || exit 1
           test "$(stat -c %U /var/lib/webfleet-safe)" = webfleet || exit 1
           wait_healthz
           # dangerous system roots and relative paths are refused without mutation
