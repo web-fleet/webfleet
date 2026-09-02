@@ -168,9 +168,12 @@ jobs:
           test "$(systemctl is-enabled webfleet.service)" = disabled
           test "$(systemctl is-active webfleet.service)" = inactive
           # --- custom data path and dangerous-path adoption ---
-          # custom safe data path is created and assigned to the service account
+          # custom safe data path is created and assigned to the service account; the
+          # service is currently disabled+inactive (preserved state), so start it
+          # and verify it runs from the safe data directory.
           sudo /tmp/wf service install --data /var/lib/webfleet-safe
           test "$(stat -c %U /var/lib/webfleet-safe)" = webfleet || exit 1
+          sudo /tmp/wf service start
           wait_healthz
           # dangerous system roots and relative paths are refused without mutation
           for bad in / /etc /usr /var /tmp; do
