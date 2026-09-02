@@ -780,14 +780,25 @@ func verifyActiveAndHealthy() error {
 // operational state after a failed update. It returns an error if any step of
 // the recovery (stop, binary restore, restart, health) fails, so a failed
 // update never silently claims a rollback happened.
+// readPriorStateAtRecovery is a test-only seam: production reads the
+// .prior-active marker file, but a test may override it to inject a missing or
+// corrupt marker precisely at recovery time (after state capture and binary
+// mutation), proving recovery fails closed rather than guessing.
+var readPriorStateAtRecovery = func() (string, error) {
+	b, err := os.ReadFile(BinaryPath + ".prior-active")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 func restoreAfterFailedUpdate() error {
 	// Fail closed: the prior-state marker was written transactionally before the
 	// binary was replaced, so recovery must not guess at the active state.
-	b, err := os.ReadFile(BinaryPath + ".prior-active")
+	priorActive, err := readPriorStateAtRecovery()
 	if err != nil {
 		return fmt.Errorf("recovery: no prior-state marker: %w", err)
 	}
-	priorActive := strings.TrimSpace(string(b))
 	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
 		return fmt.Errorf("recovery: invalid prior-state marker %q", priorActive)
 	}
