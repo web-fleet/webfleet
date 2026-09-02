@@ -260,9 +260,6 @@ func requireLinux() error {
 
 var isRoot = func() bool { return os.Geteuid() == 0 }
 var ensureAccount = func() error { return ensureServiceAccount() }
-var chownData = func(path string) error { return chownService(path) }
-var chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
-var mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
 
 // serviceUID returns the numeric UID of the service account. It is a variable
 // so tests can simulate the account without a real system user.
@@ -270,11 +267,6 @@ var serviceUID = func() (int, error) {
 	uid, _, e := lookupServiceIDs()
 	return uid, e
 }
-
-// requireServiceOwned validates that an existing data directory is already
-// owned by the service account, so the installer never silently adopts an
-// unrelated directory. It is a variable so tests can simulate ownership.
-var requireServiceOwned = func(path string) error { return requireServiceOwnedReal(path) }
 
 // systemDataRoots are filesystem and system-prefix directories the service
 // installer must never adopt as a data directory. Passing one of these as
@@ -344,143 +336,46 @@ type dataDirStatus int
 
 const (
 	// dataDirAcceptFresh means the final leaf is missing but its parent already
-	// exists and resolves safely; the leaf may be created during the mutation
-	// phase.
+	// exists and was safely opened; the leaf may be created during the mutation
+	// phase, relative to the retained parent descriptor.
 	dataDirAcceptFresh dataDirStatus = iota
 	// dataDirAcceptExisting means the leaf already exists and is a safe,
 	// service-owned directory.
 	dataDirAcceptExisting
 )
 
-// inspectDataDir performs the NON-MUTATING data-path preflight: it classifies
-// the requested directory (acceptable fresh leaf with a safe existing parent,
-// or acceptable existing service-owned leaf) or refuses it. It never creates,
-// chmods or chowns anything, and it refuses an existing directory it cannot
-// prove is service-owned (including when the service account does not yet
-// exist) rather than creating the account first just to discover the directory
-// is unsuitable. It also resolves the existing parent/leaf chain so an
-// intermediate ancestor symlink cannot redirect a later creation into a
-// protected hierarchy.
-func inspectDataDir(path string) (dataDirStatus, error) {
-	info, e := os.Lstat(path)
-	if errors.Is(e, os.ErrNotExist) {
-		parent := filepath.Dir(path)
-		resolvedParent, re := resolveExistingParent(parent)
-		if re != nil {
-			return 0, fmt.Errorf("data directory %q: %v", path, re)
-		}
-		if err := validateResolvedNotProtected(resolvedParent, path); err != nil {
-			return 0, err
-		}
-		return dataDirAcceptFresh, nil
-	}
-	if e != nil {
-		return 0, fmt.Errorf("data directory %q: %w", path, e)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return 0, fmt.Errorf("data directory %q must not be a symlink", path)
-	}
-	if !info.IsDir() {
-		return 0, fmt.Errorf("data directory %q is not a directory", path)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return 0, fmt.Errorf("data directory %q must not be group- or world-writable", path)
-	}
-	// Ownership must be validated against the service account. If the account
-	// does not yet exist the directory cannot be shown to be service-owned and
-	// is refused rather than adopted; the account is never created merely to
-	// discover the directory is unsuitable.
-	if e := requireServiceOwned(path); e != nil {
-		return 0, e
-	}
-	if err := validateResolvedNotProtected(path, path); err != nil {
-		return 0, err
-	}
-	return dataDirAcceptExisting, nil
+// dataLeafInfo carries the leaf stat fields the installer needs, kept
+// cross-platform so the descriptor-relative primitives can be declared and
+// stubbed on every build target.
+type dataLeafInfo struct {
+	isDir     bool
+	isSymlink bool
+	mode      os.FileMode
+	uid       int
 }
 
-// resolveExistingParent verifies the parent of a missing leaf exists and is a
-// directory, resolving the full existing chain (ancestor symlinks included) so
-// the returned path is the parent's resolved location. It performs no mutation.
-func resolveExistingParent(parent string) (string, error) {
-	resolved, re := filepath.EvalSymlinks(parent)
-	if re != nil {
-		if errors.Is(re, os.ErrNotExist) {
-			return "", fmt.Errorf("parent %q does not exist; create the parent hierarchy first", parent)
-		}
-		return "", fmt.Errorf("cannot resolve parent %q: %w", parent, re)
-	}
-	pinfo, se := os.Stat(resolved)
-	if se != nil {
-		return "", fmt.Errorf("cannot inspect parent %q: %w", parent, se)
-	}
-	if !pinfo.IsDir() {
-		return "", fmt.Errorf("parent %q is not a directory", parent)
-	}
-	return resolved, nil
+// dataDirPlan is the result of the non-mutating inspection. It retains the
+// validated parent directory descriptor so the mutation phase is bound to the
+// exact directory inspected, never re-walked by pathname.
+type dataDirPlan struct {
+	status   dataDirStatus
+	parentFd int
+	leafName string
+	path     string
 }
 
-// validateResolvedNotProtected refuses a resolved path that lands inside (or
-// on) a protected system hierarchy, so a symlinked ancestor cannot smuggle the
-// final leaf into /etc, /usr, /home and friends behind an allowed-looking
-// lexical path.
-func validateResolvedNotProtected(resolved, original string) error {
-	clean := filepath.Clean(resolved)
-	for _, p := range protectedDataHierarchies {
-		if clean == p || strings.HasPrefix(clean, p+"/") {
-			return fmt.Errorf("data directory %q resolves through symlinks to %q, inside the protected system hierarchy %q; refusing", original, resolved, p)
-		}
+// close releases the retained parent descriptor (idempotent).
+func (p *dataDirPlan) close() {
+	if p.parentFd >= 0 {
+		closeFdSeam(p.parentFd)
+		p.parentFd = -1
 	}
-	return nil
 }
 
-// establishDataDir performs the MUTATION phase after inspectDataDir accepted the
-// path: it creates the final leaf (fresh) or normalizes its mode (existing).
-// After creating a fresh leaf it re-verifies the created path still resolves
-// outside protected hierarchies, guarding against a parent swap between
-// validation and creation.
-func establishDataDir(path string, status dataDirStatus) error {
-	if status == dataDirAcceptFresh {
-		if e := mkdirData(path, 0o700); e != nil {
-			return e
-		}
-		if e := chmodData(path, 0o700); e != nil {
-			return fmt.Errorf("data directory %q: set mode 0700: %w", path, e)
-		}
-		if e := chownData(path); e != nil {
-			return e
-		}
-		if resolved, re := filepath.EvalSymlinks(path); re == nil {
-			if err := validateResolvedNotProtected(resolved, path); err != nil {
-				_ = os.Remove(path)
-				return err
-			}
-		}
-		return nil
-	}
-	if e := chmodData(path, 0o700); e != nil {
-		return fmt.Errorf("data directory %q: set mode 0700: %w", path, e)
-	}
-	return nil
-}
-
-// requireServiceOwnedReal implements the real ownership check used by
-// prepareDataDir for existing directories.
-func requireServiceOwnedReal(path string) error {
-	info, e := os.Lstat(path)
-	if e != nil {
-		return e
-	}
-	uid, e := serviceUID()
-	if e != nil {
-		return e
-	}
-	owner := fileUID(info)
-	if owner != uid {
-		return fmt.Errorf("data directory %q already exists and is owned by UID %d; the webfleet service requires it to be owned by %s:%s with mode 0700. Move existing data under %s or re-home it; the installer will not adopt an existing directory", path, owner, ServiceUser, ServiceGroup, DefaultDataDir)
-	}
-	return nil
-}
+// inspectDataDir and establishDataDir are implemented on Linux using a
+// descriptor-relative, no-symlink walk of the parent chain (see datadir_linux.go)
+// so the validated parent is the exact directory mutated; non-Linux stubs fail
+// (Install is Linux-gated).
 
 func requireRoot(verb string) error {
 	if !isRoot() {
@@ -664,15 +559,16 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	// runtime prerequisite (the data directory) is missing or unsafe, and it
 	// runs before any account/data mutation so an unacceptable existing
 	// directory cannot trigger account creation first.
-	dataStatus, dErr := inspectDataDir(dataDir)
+	dataPlan, dErr := inspectDataDir(dataDir)
 	if dErr != nil {
 		return fmt.Errorf("refusing to install webfleet.service: %w", dErr)
 	}
+	defer dataPlan.close()
 	// Genuine no-op: the installed unit and executable already match the request
 	// AND the recorded data directory already exists as a safe service-owned
 	// leaf, so the service is already running the requested version in its prior
 	// state; nothing is rewritten, reloaded, enabled or started.
-	if hadUnit && string(priorUnit) == unit && !binaryChanged && dataStatus == dataDirAcceptExisting {
+	if hadUnit && string(priorUnit) == unit && !binaryChanged && dataPlan.status == dataDirAcceptExisting {
 		return nil
 	}
 	// Preflight is complete: only now may install mutate the machine (account,
@@ -680,7 +576,7 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if e := ensureAccount(); e != nil {
 		return e
 	}
-	if e := establishDataDir(dataDir, dataStatus); e != nil {
+	if e := establishDataDir(&dataPlan); e != nil {
 		return e
 	}
 	// Repair-only: the unit and binary already match the request, so the only
@@ -861,17 +757,8 @@ func ensureServiceAccount() error {
 	return nil
 }
 
-// chownService transfers the data directory to the service account so the
-// unprivileged service can open its database. The parent chain is left
-// root-owned; only the service data directory is handed over.
-func chownService(path string) error {
-	uid, gid, e := lookupServiceIDs()
-	if e != nil {
-		return e
-	}
-	return os.Chown(path, uid, gid)
-}
-
+// lookupServiceIDs resolves the numeric uid/gid of the dedicated service
+// account, used for descriptor-relative ownership assignment of the data leaf.
 func lookupServiceIDs() (int, int, error) {
 	g, e := user.LookupGroup(ServiceGroup)
 	if e != nil {

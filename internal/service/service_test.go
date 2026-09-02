@@ -67,15 +67,19 @@ func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
 
 // setupService points the unit/binary paths at temp files, simulates root and
 // the service account, and installs a strict fake runner. It returns the fake
-// runner and a cleanup.
+// runner and a cleanup. The descriptor-relative data-dir seams default to a
+// simulated successful fresh-leaf establishment; tests needing real filesystem
+// behavior override them (see useRealDataDirSeams).
 func setupService(t *testing.T) *fakeRunner {
 	t.Helper()
 	dir := t.TempDir()
 	oldUnit, oldBin := UnitPath, BinaryPath
-	oldRoot, oldAccount, oldChown := isRoot, ensureAccount, chownData
-	oldMkdir := mkdirData
-	oldChmod := chmodData
-	oldUID, oldOwned := serviceUID, requireServiceOwned
+	oldRoot, oldAccount := isRoot, ensureAccount
+	oldUID := serviceUID
+	oldOpenParent, oldConsistent := openDataParentSeam, dataParentConsistentSeam
+	oldStatLeaf, oldMkdirAt := statDataLeafSeam, mkdirAtLeafSeam
+	oldOpenAt, oldChmod, oldChown := openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam
+	oldFstat, oldUnlink, oldClose := fstatLeafSeam, unlinkAtSeam, closeFdSeam
 	oldRunner := defaultRunner
 	oldHealth := healthWindow
 	oldPriorRead := readPriorStateAtRecovery
@@ -84,19 +88,29 @@ func setupService(t *testing.T) *fakeRunner {
 	os.WriteFile(BinaryPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	isRoot = func() bool { return true }
 	ensureAccount = func() error { return nil }
-	chownData = func(string) error { return nil }
-	chmodData = func(string, os.FileMode) error { return nil }
-	mkdirData = func(string, os.FileMode) error { return nil }
 	serviceUID = func() (int, error) { return 4242, nil }
-	requireServiceOwned = func(string) error { return nil }
+	openDataParentSeam = func(string) (int, error) { return 1, nil }
+	dataParentConsistentSeam = func(int, string) bool { return true }
+	statDataLeafSeam = func(int, string) (dataLeafInfo, error) { return dataLeafInfo{}, os.ErrNotExist }
+	mkdirAtLeafSeam = func(int, string) error { return nil }
+	openAtLeafSeam = func(int, string) (int, error) { return 2, nil }
+	fchmodLeafSeam = func(int) error { return nil }
+	fchownLeafSeam = func(int) error { return nil }
+	fstatLeafSeam = func(int) (dataLeafInfo, error) {
+		return dataLeafInfo{isDir: true, mode: 0o700, uid: 4242}, nil
+	}
+	unlinkAtSeam = func(int, string) error { return nil }
+	closeFdSeam = func(int) error { return nil }
 	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}, strict: true}
 	defaultRunner = r
 	t.Cleanup(func() {
 		UnitPath, BinaryPath = oldUnit, oldBin
-		isRoot, ensureAccount, chownData = oldRoot, oldAccount, oldChown
-		mkdirData = oldMkdir
-		chmodData = oldChmod
-		serviceUID, requireServiceOwned = oldUID, oldOwned
+		isRoot, ensureAccount = oldRoot, oldAccount
+		serviceUID = oldUID
+		openDataParentSeam, dataParentConsistentSeam = oldOpenParent, oldConsistent
+		statDataLeafSeam, mkdirAtLeafSeam = oldStatLeaf, oldMkdirAt
+		openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam = oldOpenAt, oldChmod, oldChown
+		fstatLeafSeam, unlinkAtSeam, closeFdSeam = oldFstat, oldUnlink, oldClose
 		healthWindow = oldHealth
 		healthCheckFunc = func(url string) error { return healthCheckReal(url) }
 		readPriorStateAtRecovery = oldPriorRead
@@ -1168,7 +1182,7 @@ func TestInstallRefusesExistingForeignOwnedDir(t *testing.T) {
 		svcUID = 9999
 	}
 	serviceUID = func() (int, error) { return svcUID, nil }
-	requireServiceOwned = requireServiceOwnedReal
+	useRealDataDirSeams(t)
 	binBefore := mustRead(t, BinaryPath)
 	exe := filepath.Join(t.TempDir(), "wf")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -1196,7 +1210,7 @@ func TestInstallReusesServiceOwnedExistingDir(t *testing.T) {
 		t.Fatal(e)
 	}
 	serviceUID = func() (int, error) { return os.Getuid(), nil }
-	requireServiceOwned = requireServiceOwnedReal
+	useRealDataDirSeams(t)
 	exe := filepath.Join(t.TempDir(), "wf")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	r.script["systemctl daemon-reload"] = fakeResult{}
@@ -1265,10 +1279,28 @@ type mutationCounts struct{ account, mkdir, chmod, chown int }
 func countMutations() *mutationCounts {
 	c := &mutationCounts{}
 	ensureAccount = func() error { c.account++; return nil }
-	mkdirData = func(string, os.FileMode) error { c.mkdir++; return nil }
-	chmodData = func(string, os.FileMode) error { c.chmod++; return nil }
-	chownData = func(string) error { c.chown++; return nil }
+	mkdirAtLeafSeam = func(int, string) error { c.mkdir++; return nil }
+	fchmodLeafSeam = func(int) error { c.chmod++; return nil }
+	fchownLeafSeam = func(int) error { c.chown++; return nil }
 	return c
+}
+
+// useRealDataDirSeams switches the descriptor-relative data-dir seams to their
+// real implementations so tests can exercise real leaf creation and inspection
+// under t.TempDir(). The ownership step is stubbed to a no-op (the service
+// account does not exist on the test host).
+func useRealDataDirSeams(t *testing.T) {
+	t.Helper()
+	openDataParentSeam = openDataParentReal
+	dataParentConsistentSeam = dataParentConsistentReal
+	statDataLeafSeam = statDataLeafReal
+	mkdirAtLeafSeam = mkdirAtLeafReal
+	openAtLeafSeam = openAtLeafReal
+	fchmodLeafSeam = fchmodLeafReal
+	fchownLeafSeam = func(int) error { return nil }
+	fstatLeafSeam = fstatLeafReal
+	unlinkAtSeam = unlinkAtLeafReal
+	closeFdSeam = closeFdReal
 }
 
 func assertNoMutation(t *testing.T, c *mutationCounts, what string) {
@@ -1351,10 +1383,9 @@ func TestPrepareDataDirLeafOnlyContract(t *testing.T) {
 	t.Run("existing-parent-creates-leaf-only", func(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
+		useRealDataDirSeams(t)
 		parent := t.TempDir()
 		leaf := filepath.Join(parent, "webfleet")
-		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
-		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
 		exe := filepath.Join(t.TempDir(), "wf")
 		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 		r.script["systemctl daemon-reload"] = fakeResult{}
@@ -1373,10 +1404,9 @@ func TestPrepareDataDirLeafOnlyContract(t *testing.T) {
 	t.Run("missing-parent-refused", func(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
+		useRealDataDirSeams(t)
 		root := t.TempDir()
 		leaf := filepath.Join(root, "new-parent", "webfleet")
-		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
-		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
 		exe := filepath.Join(t.TempDir(), "wf")
 		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
@@ -1433,27 +1463,86 @@ func TestValidateDataDirPathAllowsCanonical(t *testing.T) {
 	}
 }
 
-// TestInstallSurfacesChmodFailure proves a failure to establish mode 0700 on the
-// data directory is a surfaced install error, not a silently weakened install.
-func TestInstallSurfacesChmodFailure(t *testing.T) {
-	allowTempDataDirs(t)
-	r := setupService(t)
-	leaf := filepath.Join(t.TempDir(), "webfleet")
-	mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
-	chmodData = func(path string, mode os.FileMode) error { return errors.New("chmod denied") }
-	exe := filepath.Join(t.TempDir(), "wf")
-	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
-	if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
-		t.Fatal("install succeeded despite a chmod failure")
-	} else if !strings.Contains(e.Error(), "mode 0700") {
-		t.Fatalf("chmod failure not surfaced: %v", e)
+// TestDataDirEstablishmentFailuresCleanUp proves a failure to fully establish
+// the data leaf (mode, ownership, or post-creation inspection) fails the
+// install BEFORE any binary/unit/systemd mutation, removes the partial leaf via
+// the retained parent descriptor, and reports the cleanup result.
+func TestDataDirEstablishmentFailuresCleanUp(t *testing.T) {
+	run := func(name string, breakIt func()) {
+		t.Run(name, func(t *testing.T) {
+			allowTempDataDirs(t)
+			r := setupService(t)
+			useRealDataDirSeams(t)
+			leaf := filepath.Join(t.TempDir(), "webfleet")
+			binBefore := mustRead(t, BinaryPath)
+			breakIt()
+			exe := filepath.Join(t.TempDir(), "wf")
+			os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+			if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+				t.Fatal("install succeeded despite a data-leaf establishment failure")
+			}
+			if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+				t.Fatal("unit written despite the data-leaf failure")
+			}
+			if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+				t.Fatal("binary mutated despite the data-leaf failure")
+			}
+			if hasMutatingSystemctl(r.log) {
+				t.Fatalf("systemctl mutated despite the data-leaf failure: %v", r.log)
+			}
+			if _, e := os.Stat(leaf); !os.IsNotExist(e) {
+				t.Fatal("partial leaf was not cleaned up after the establishment failure")
+			}
+		})
 	}
-	if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
-		t.Fatal("unit written despite the chmod failure")
-	}
-	if len(r.log) != 0 {
-		t.Fatal("chmod-failure install touched systemctl")
-	}
+	run("chmod-failure", func() { fchmodLeafSeam = func(int) error { return errors.New("chmod denied") } })
+	run("chown-failure", func() { fchownLeafSeam = func(int) error { return errors.New("chown denied") } })
+	run("inspection-failure", func() {
+		fstatLeafSeam = func(int) (dataLeafInfo, error) { return dataLeafInfo{}, errors.New("inspect denied") }
+	})
+	run("bind-failure", func() {
+		openAtLeafSeam = func(int, string) (int, error) { return -1, errors.New("bind denied") }
+	})
+
+	// A failure to establish mode 0700 must be surfaced as such.
+	t.Run("chmod-error-message", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		leaf := filepath.Join(t.TempDir(), "webfleet")
+		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install succeeded despite a chmod failure")
+		} else if !strings.Contains(e.Error(), "mode 0700") {
+			t.Fatalf("chmod failure not surfaced: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("chmod-failure install touched systemctl")
+		}
+	})
+
+	// A cleanup failure after a failed establishment must be reported, not
+	// silently claimed as rolled back.
+	t.Run("cleanup-failure-reported", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		leaf := filepath.Join(t.TempDir(), "webfleet")
+		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
+		unlinkAtSeam = func(int, string) error { return errors.New("unlink denied") }
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install succeeded despite a cleanup failure")
+		} else if !strings.Contains(e.Error(), "partial leaf cleanup incomplete") {
+			t.Fatalf("cleanup failure not surfaced: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("cleanup-failure install touched systemctl")
+		}
+	})
 }
 
 // TestInstallSurfacesRollbackNeutralizationFailures proves the initial rollback
@@ -1559,7 +1648,7 @@ func TestInstallRefusesExistingUnacceptableDirBeforeMutation(t *testing.T) {
 		svcUID = 9999
 	}
 	serviceUID = func() (int, error) { return svcUID, nil }
-	requireServiceOwned = requireServiceOwnedReal
+	useRealDataDirSeams(t)
 	c := countMutations()
 	binBefore := mustRead(t, BinaryPath)
 	exe := filepath.Join(t.TempDir(), "wf")
@@ -1594,7 +1683,7 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
 		setState(r, "enabled", "active")
 		serviceUID = func() (int, error) { return os.Getuid(), nil }
-		requireServiceOwned = requireServiceOwnedReal
+		useRealDataDirSeams(t)
 		c := countMutations()
 		exe := filepath.Join(t.TempDir(), "wf2")
 		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
@@ -1612,8 +1701,7 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 		dataDir := filepath.Join(t.TempDir(), "webfleet")
 		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
 		setState(r, "enabled", "active")
-		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
-		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+		useRealDataDirSeams(t)
 		exe := filepath.Join(t.TempDir(), "wf2")
 		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
 		if e := Install(exe, dataDir, "127.0.0.1:8090"); e != nil {
@@ -1641,7 +1729,7 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 			svcUID = 9999
 		}
 		serviceUID = func() (int, error) { return svcUID, nil }
-		requireServiceOwned = requireServiceOwnedReal
+		useRealDataDirSeams(t)
 		c := countMutations()
 		binBefore := mustRead(t, BinaryPath)
 		unitBefore, _ := os.ReadFile(UnitPath)
@@ -1664,16 +1752,11 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 }
 
 // TestDataDirAncestorSymlinkEscape proves an allowed-looking lexical path cannot
-// resolve through symlinked ancestors into a protected hierarchy: legitimate
-// parents are accepted, symlinked parents/intermediates into a protected target
-// are refused, and no leaf is ever created at the resolved protected target.
+// resolve through symlinked ancestors into an unrelated location: legitimate
+// parents are accepted, symlinked parents/intermediates are refused (never
+// silently redirected), and no leaf is ever created at the resolved target.
 func TestDataDirAncestorSymlinkEscape(t *testing.T) {
-	protected := t.TempDir()
 	base := t.TempDir()
-	oldProtected := protectedDataHierarchies
-	protectedDataHierarchies = []string{protected}
-	t.Cleanup(func() { protectedDataHierarchies = oldProtected })
-
 	exe := func() string {
 		p := filepath.Join(t.TempDir(), "wf")
 		os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -1681,14 +1764,14 @@ func TestDataDirAncestorSymlinkEscape(t *testing.T) {
 	}
 
 	t.Run("legitimate-parent-accepted", func(t *testing.T) {
+		allowTempDataDirs(t)
 		r := setupService(t)
+		useRealDataDirSeams(t)
 		realParent := filepath.Join(base, "real")
 		if e := os.Mkdir(realParent, 0o700); e != nil {
 			t.Fatal(e)
 		}
 		leaf := filepath.Join(realParent, "webfleet")
-		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
-		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
 		r.script["systemctl daemon-reload"] = fakeResult{}
 		r.script["systemctl enable webfleet.service"] = fakeResult{}
 		r.script["systemctl start webfleet.service"] = fakeResult{}
@@ -1700,41 +1783,104 @@ func TestDataDirAncestorSymlinkEscape(t *testing.T) {
 		}
 	})
 	t.Run("immediate-symlink-parent-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
 		r := setupService(t)
+		useRealDataDirSeams(t)
+		target := t.TempDir()
 		link := filepath.Join(base, "link")
-		if e := os.Symlink(protected, link); e != nil {
+		if e := os.Symlink(target, link); e != nil {
 			t.Fatal(e)
 		}
 		leaf := filepath.Join(link, "webfleet")
 		if e := Install(exe(), leaf, "127.0.0.1:8090"); e == nil {
-			t.Fatal("install accepted a data leaf through a symlinked parent into a protected hierarchy")
+			t.Fatal("install accepted a data leaf through a symlinked parent")
 		}
-		if _, e := os.Stat(filepath.Join(protected, "webfleet")); !os.IsNotExist(e) {
-			t.Fatalf("leaf created at the resolved protected target: %v", e)
+		if _, e := os.Stat(filepath.Join(target, "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the symlink target: %v", e)
 		}
 		if len(r.log) != 0 {
 			t.Fatal("symlink-escape install touched systemctl")
 		}
 	})
 	t.Run("intermediate-symlink-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
 		r := setupService(t)
+		useRealDataDirSeams(t)
+		target := t.TempDir()
 		link := filepath.Join(base, "link2")
-		if e := os.Symlink(protected, link); e != nil {
+		if e := os.Symlink(target, link); e != nil {
 			t.Fatal(e)
 		}
-		child := filepath.Join(protected, "child")
+		child := filepath.Join(target, "child")
 		if e := os.Mkdir(child, 0o700); e != nil {
 			t.Fatal(e)
 		}
 		leaf := filepath.Join(link, "child", "webfleet")
 		if e := Install(exe(), leaf, "127.0.0.1:8090"); e == nil {
-			t.Fatal("install accepted a leaf through an intermediate symlink into a protected hierarchy")
+			t.Fatal("install accepted a leaf through an intermediate symlink")
 		}
 		if _, e := os.Stat(filepath.Join(child, "webfleet")); !os.IsNotExist(e) {
-			t.Fatalf("leaf created at the resolved protected target: %v", e)
+			t.Fatalf("leaf created at the resolved symlink target: %v", e)
 		}
 		if len(r.log) != 0 {
 			t.Fatal("symlink-escape install touched systemctl")
+		}
+	})
+	// A symlinked ancestor into another otherwise-allowed hierarchy is refused
+	// outright rather than silently redirected, even though the target is not
+	// protected: the privileged installer never follows symlinked service-data
+	// ancestry.
+	t.Run("symlink-into-allowed-hierarchy-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		target := t.TempDir()
+		link := filepath.Join(base, "link3")
+		if e := os.Symlink(target, link); e != nil {
+			t.Fatal(e)
+		}
+		leaf := filepath.Join(link, "webfleet")
+		if e := Install(exe(), leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install followed a symlinked ancestor into another hierarchy")
+		}
+		if _, e := os.Stat(filepath.Join(target, "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the symlink target: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("symlink-escape install touched systemctl")
+		}
+	})
+	// An ancestor replaced after inspection but before creation is detected via
+	// the retained parent descriptor and refused; the substituted (now symlinked)
+	// location never receives a leaf.
+	t.Run("ancestor-swap-after-inspection-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		original := t.TempDir()
+		substitute := t.TempDir()
+		leaf := filepath.Join(original, "webfleet")
+		// Between inspection (parent descriptor opened) and establishment, an
+		// attacker replaces the parent with a symlink to the substitute.
+		ensureAccount = func() error {
+			if e := os.Rename(original, original+"-moved"); e != nil {
+				return e
+			}
+			return os.Symlink(substitute, original)
+		}
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded after the parent was swapped for a symlink")
+		}
+		if _, e := os.Stat(filepath.Join(substitute, "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the substituted target: %v", e)
+		}
+		if _, e := os.Stat(filepath.Join(original+"-moved", "webfleet")); !os.IsNotExist(e) {
+			t.Fatalf("leaf created at the renamed original: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("ancestor-swap install touched systemctl")
 		}
 	})
 }
