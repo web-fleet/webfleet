@@ -261,7 +261,8 @@ func requireLinux() error {
 var isRoot = func() bool { return os.Geteuid() == 0 }
 var ensureAccount = func() error { return ensureServiceAccount() }
 var chownData = func(path string) error { return chownService(path) }
-var mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+var chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+var mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
 
 // serviceUID returns the numeric UID of the service account. It is a variable
 // so tests can simulate the account without a real system user.
@@ -283,6 +284,18 @@ var systemDataRoots = map[string]bool{
 	"/home": true, "/lib": true, "/lib64": true, "/opt": true, "/proc": true,
 	"/root": true, "/run": true, "/sbin": true, "/srv": true, "/sys": true,
 	"/tmp": true, "/usr": true, "/var": true,
+}
+
+// protectedDataHierarchies are filesystem prefixes whose descendants are never
+// adopted as a service data directory. The unit sandbox makes /home, /root and
+// /run/user inaccessible to the service (ProtectHome=true, PrivateTmp=true),
+// and these hold system machine state that a privileged installer must not
+// create directories inside. /var/lib and /srv are deliberately excluded so a
+// deliberate custom location like /srv/webfleet remains usable. It is a
+// variable so tests can narrow it around their own temporary paths.
+var protectedDataHierarchies = []string{
+	"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64",
+	"/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/home",
 }
 
 // validateReadWritePath validates a data directory for ReadWritePaths=: an
@@ -308,28 +321,50 @@ func validateReadWritePath(path string) error {
 }
 
 // validateDataDirPath rejects data-directory paths that are dangerous system
-// roots. It must run before any ownership or mode mutation.
+// roots or descendants of a protected system hierarchy. It must run before any
+// ownership or mode mutation. /var/lib and /srv custom locations are allowed;
+// only the exact roots and protected descendants are refused.
 func validateDataDirPath(path string) error {
 	clean := filepath.Clean(path)
 	if systemDataRoots[clean] {
 		return fmt.Errorf("data directory %q is a system directory and cannot be adopted as a service data directory", path)
 	}
+	for _, p := range protectedDataHierarchies {
+		if clean == p || strings.HasPrefix(clean, p+"/") {
+			return fmt.Errorf("data directory %q is under the protected system hierarchy %q and cannot be adopted as a service data directory", path, p)
+		}
+	}
 	return nil
 }
 
-// prepareDataDir safely establishes the service data directory. A newly created
-// leaf directory is created and assigned to the service account. An existing
-// directory is only reused if it is a non-symlink directory already owned by the
-// service account with no group/world-write bits; an unrelated or root-owned
-// existing directory is refused rather than silently adopted. Parent directories
-// are never chmod/chown'd to make the leaf work.
+// prepareDataDir safely establishes the service data directory. A missing final
+// leaf is created ONLY when its parent already exists (the parent hierarchy is
+// never created, chmod'ed or chown'ed); a failure to establish mode 0700 is an
+// error. An existing directory is only reused if it is a non-symlink directory
+// already owned by the service account with no group/world-write bits; an
+// unrelated or root-owned existing directory is refused rather than adopted.
 func prepareDataDir(path string) error {
 	info, e := os.Lstat(path)
 	if errors.Is(e, os.ErrNotExist) {
+		// Final-leaf-only creation: the parent must already exist and be a
+		// directory; only the final leaf is created and assigned.
+		parent := filepath.Dir(path)
+		pinfo, pe := os.Lstat(parent)
+		if errors.Is(pe, os.ErrNotExist) {
+			return fmt.Errorf("data directory %q: parent %q does not exist; create the parent hierarchy first", path, parent)
+		}
+		if pe != nil {
+			return fmt.Errorf("data directory %q: cannot inspect parent %q: %w", path, parent, pe)
+		}
+		if !pinfo.IsDir() {
+			return fmt.Errorf("data directory %q: parent %q is not a directory", path, parent)
+		}
 		if e := mkdirData(path, 0o700); e != nil {
 			return e
 		}
-		_ = os.Chmod(path, 0o700)
+		if e := chmodData(path, 0o700); e != nil {
+			return fmt.Errorf("data directory %q: set mode 0700: %w", path, e)
+		}
 		if e := chownData(path); e != nil {
 			return e
 		}
@@ -350,7 +385,9 @@ func prepareDataDir(path string) error {
 	if e := requireServiceOwned(path); e != nil {
 		return e
 	}
-	_ = os.Chmod(path, 0o700)
+	if e := chmodData(path, 0o700); e != nil {
+		return fmt.Errorf("data directory %q: set mode 0700: %w", path, e)
+	}
 	return nil
 }
 
@@ -464,10 +501,14 @@ func Unit(dataDir, listen string) string {
 // of forcing enabled+active. A fresh install establishes Web Fleet's normal
 // initial enabled/running state.
 //
-// Every state that cannot be recreated exactly is refused BEFORE any mutation,
-// and a partial failure restores the prior unit, enablement, active state and
-// binary; the returned error combines the original failure with any rollback
-// failure rather than claiming "installation rolled back" blindly.
+// Every non-mutating check (argument validation, unit integrity, state
+// classification, executable inspection) runs as preflight BEFORE any account
+// or data-directory creation, so an install that must fail closed never leaves
+// a machine mutation behind. After preflight, a partial failure restores the
+// prior unit, enablement, active state and binary, and the returned error
+// combines the original failure with EVERY rollback failure (including
+// neutralization stop/disable) rather than claiming "installation rolled back"
+// blindly.
 func Install(exe, dataDir, listen string) (retErr error) {
 	if e := requireLinux(); e != nil {
 		return e
@@ -495,12 +536,6 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found; is systemd installed?")
 	}
-	if e := ensureAccount(); e != nil {
-		return e
-	}
-	if e := prepareDataDir(dataDir); e != nil {
-		return e
-	}
 	unit := Unit(dataDir, listen)
 	priorUnit, hadUnit := []byte(nil), false
 	if b, e := os.ReadFile(UnitPath); e == nil {
@@ -512,10 +547,11 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	// Snapshot and classify the exact prior enablement and active states BEFORE
-	// any mutation. Query failures are propagated and every state that cannot be
-	// recreated exactly by the shared restore mapping is refused up front, so
-	// install never mutates a state it cannot restore.
+	// Non-mutating preflight: snapshot and classify the exact prior enablement
+	// and active states BEFORE any account/data/binary/unit mutation. Query
+	// failures are propagated and every state that cannot be recreated exactly
+	// by the shared restore mapping is refused up front, so install never
+	// mutates a state it cannot restore.
 	priorEnabled, priorActive := "", ""
 	if hadUnit {
 		var e error
@@ -551,6 +587,14 @@ func Install(exe, dataDir, listen string) (retErr error) {
 	if hadUnit && string(priorUnit) == unit && !binaryChanged {
 		return nil
 	}
+	// Preflight is complete: only now may install mutate the machine (account,
+	// data directory, then binary/unit/systemd state).
+	if e := ensureAccount(); e != nil {
+		return e
+	}
+	if e := prepareDataDir(dataDir); e != nil {
+		return e
+	}
 	// Preserve the prior binary so activation failure can roll back cleanly.
 	if hadBinary {
 		if e := copyFile(BinaryPath, BinaryPath+".preinstall", 0o755); e != nil {
@@ -562,8 +606,14 @@ func Install(exe, dataDir, listen string) (retErr error) {
 		var errs []string
 		// 1) Neutralize any attempted activation before restoring the binary so a
 		// previously running service is never restarted with the failing binary.
-		_ = systemctlSuccess("stop", "webfleet.service")
-		_ = systemctlSuccess("disable", "webfleet.service")
+		// These neutralization failures are part of the rollback result, never
+		// discarded.
+		if e := systemctlSuccess("stop", "webfleet.service"); e != nil {
+			errs = append(errs, fmt.Sprintf("stop failed service: %v", e))
+		}
+		if e := systemctlSuccess("disable", "webfleet.service"); e != nil {
+			errs = append(errs, fmt.Sprintf("disable failed service: %v", e))
+		}
 		// 2) Restore the executable before the unit and before activation.
 		if hadBinary {
 			if e := copyFile(BinaryPath+".preinstall", BinaryPath, 0o755); e != nil {

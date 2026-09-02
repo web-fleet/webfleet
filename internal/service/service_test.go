@@ -4,6 +4,7 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +74,7 @@ func setupService(t *testing.T) *fakeRunner {
 	oldUnit, oldBin := UnitPath, BinaryPath
 	oldRoot, oldAccount, oldChown := isRoot, ensureAccount, chownData
 	oldMkdir := mkdirData
+	oldChmod := chmodData
 	oldUID, oldOwned := serviceUID, requireServiceOwned
 	oldRunner := defaultRunner
 	oldHealth := healthWindow
@@ -83,6 +85,7 @@ func setupService(t *testing.T) *fakeRunner {
 	isRoot = func() bool { return true }
 	ensureAccount = func() error { return nil }
 	chownData = func(string) error { return nil }
+	chmodData = func(string, os.FileMode) error { return nil }
 	mkdirData = func(string, os.FileMode) error { return nil }
 	serviceUID = func() (int, error) { return 4242, nil }
 	requireServiceOwned = func(string) error { return nil }
@@ -92,6 +95,7 @@ func setupService(t *testing.T) *fakeRunner {
 		UnitPath, BinaryPath = oldUnit, oldBin
 		isRoot, ensureAccount, chownData = oldRoot, oldAccount, oldChown
 		mkdirData = oldMkdir
+		chmodData = oldChmod
 		serviceUID, requireServiceOwned = oldUID, oldOwned
 		healthWindow = oldHealth
 		healthCheckFunc = func(url string) error { return healthCheckReal(url) }
@@ -311,7 +315,7 @@ func TestQuotingSurvivesSpacesInDataPath(t *testing.T) {
 	r := setupService(t)
 	exe := filepath.Join(t.TempDir(), "wf")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
-	data := filepath.Join(t.TempDir(), "web fleet data")
+	data := "/var/lib/web fleet data"
 	r.script["systemctl daemon-reload"] = fakeResult{}
 	r.script["systemctl enable webfleet.service"] = fakeResult{}
 	r.script["systemctl start webfleet.service"] = fakeResult{}
@@ -521,6 +525,23 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(e)
 	}
 	return b
+}
+
+// allowTempDataDirs narrows the protected-hierarchy check so tests can build
+// real data leaves under t.TempDir() (/tmp on Linux) without weakening the
+// production contract; the refused system paths remain covered by dedicated
+// tests.
+func allowTempDataDirs(t *testing.T) {
+	t.Helper()
+	old := protectedDataHierarchies
+	var filtered []string
+	for _, p := range old {
+		if p != "/tmp" && p != filepath.Clean(os.TempDir()) {
+			filtered = append(filtered, p)
+		}
+	}
+	protectedDataHierarchies = filtered
+	t.Cleanup(func() { protectedDataHierarchies = old })
 }
 
 func fakeSHA(path string) string {
@@ -1135,6 +1156,7 @@ func TestInstallRefusesRelativeDataDir(t *testing.T) {
 // owned by the service account is refused rather than silently adopted, before
 // any metadata mutation.
 func TestInstallRefusesExistingForeignOwnedDir(t *testing.T) {
+	allowTempDataDirs(t)
 	r := setupService(t)
 	dir := filepath.Join(t.TempDir(), "existing")
 	if e := os.Mkdir(dir, 0o700); e != nil {
@@ -1167,6 +1189,7 @@ func TestInstallRefusesExistingForeignOwnedDir(t *testing.T) {
 // TestInstallReusesServiceOwnedExistingDir proves an existing directory already
 // owned by the service account is validated and reused rather than re-adopted.
 func TestInstallReusesServiceOwnedExistingDir(t *testing.T) {
+	allowTempDataDirs(t)
 	r := setupService(t)
 	dir := filepath.Join(t.TempDir(), "owned")
 	if e := os.Mkdir(dir, 0o700); e != nil {
@@ -1235,4 +1258,270 @@ func TestStrictHarnessRejectsUnexpectedCalls(t *testing.T) {
 	if err == nil || code == 0 {
 		t.Fatal("strict harness accepted an unexpected systemctl call")
 	}
+}
+
+type mutationCounts struct{ account, mkdir, chmod, chown int }
+
+func countMutations() *mutationCounts {
+	c := &mutationCounts{}
+	ensureAccount = func() error { c.account++; return nil }
+	mkdirData = func(string, os.FileMode) error { c.mkdir++; return nil }
+	chmodData = func(string, os.FileMode) error { c.chmod++; return nil }
+	chownData = func(string) error { c.chown++; return nil }
+	return c
+}
+
+func assertNoMutation(t *testing.T, c *mutationCounts, what string) {
+	t.Helper()
+	if c.account != 0 || c.mkdir != 0 || c.chmod != 0 || c.chown != 0 {
+		t.Fatalf("%s: install mutated the machine before refusing (account=%d mkdir=%d chmod=%d chown=%d)", what, c.account, c.mkdir, c.chmod, c.chown)
+	}
+}
+
+// TestInstallPreflightBeforeAnyMutation proves every preflight-only refusal
+// (foreign/tampered unit, unsupported or unqueryable systemd state) happens
+// before any account/data-directory mutation, using real mutation counters
+// rather than systemctl-call assertions alone.
+func TestInstallPreflightBeforeAnyMutation(t *testing.T) {
+	exe := func() string {
+		p := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		return p
+	}
+	t.Run("foreign-unit", func(t *testing.T) {
+		r := setupService(t)
+		writeForeignUnit(t)
+		c := countMutations()
+		if e := Install(exe(), "/srv/new-webfleet", "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded with a foreign unit")
+		}
+		assertNoMutation(t, c, "foreign unit")
+		_ = r
+	})
+	t.Run("tampered-unit", func(t *testing.T) {
+		r := setupService(t)
+		u := Unit("/var/lib/webfleet", "127.0.0.1:8090")
+		os.WriteFile(UnitPath, []byte(strings.Replace(u, "127.0.0.1:8090", "127.0.0.1:9090", 1)), 0o644)
+		c := countMutations()
+		if e := Install(exe(), "/srv/new-webfleet", "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded with a tampered unit")
+		}
+		assertNoMutation(t, c, "tampered unit")
+		_ = r
+	})
+	t.Run("unsupported-is-enabled", func(t *testing.T) {
+		r := setupService(t)
+		installManagedUnit(t)
+		r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "masked", code: 1}
+		r.script["systemctl is-active webfleet.service"] = fakeResult{out: "inactive", code: 0}
+		c := countMutations()
+		if e := Install(exe(), "/srv/new-webfleet", "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded with an unsupported enablement state")
+		}
+		assertNoMutation(t, c, "unsupported is-enabled")
+	})
+	t.Run("unsupported-is-active", func(t *testing.T) {
+		r := setupService(t)
+		installManagedUnit(t)
+		r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: "disabled", code: 0}
+		r.script["systemctl is-active webfleet.service"] = fakeResult{out: "failed", code: 3}
+		c := countMutations()
+		if e := Install(exe(), "/srv/new-webfleet", "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded with an unsupported active state")
+		}
+		assertNoMutation(t, c, "unsupported is-active")
+	})
+	t.Run("state-query-failure", func(t *testing.T) {
+		r := setupService(t)
+		installManagedUnit(t)
+		r.script["systemctl is-enabled webfleet.service"] = fakeResult{err: fmt.Errorf("cannot reach systemd")}
+		c := countMutations()
+		if e := Install(exe(), "/srv/new-webfleet", "127.0.0.1:8090"); e == nil {
+			t.Fatal("install proceeded when the prior enablement state could not be queried")
+		}
+		assertNoMutation(t, c, "state-query failure")
+	})
+}
+
+// TestPrepareDataDirLeafOnlyContract proves the data directory is a
+// final-leaf-only creation primitive: an existing parent + missing leaf is
+// created as a single leaf, a missing parent is refused with nothing created,
+// and the service account ownership applies only to the leaf.
+func TestPrepareDataDirLeafOnlyContract(t *testing.T) {
+	t.Run("existing-parent-creates-leaf-only", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		parent := t.TempDir()
+		leaf := filepath.Join(parent, "webfleet")
+		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl enable webfleet.service"] = fakeResult{}
+		r.script["systemctl start webfleet.service"] = fakeResult{}
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := os.Stat(leaf); e != nil {
+			t.Fatalf("final leaf was not created: %v", e)
+		}
+		if entries, _ := os.ReadDir(parent); len(entries) != 1 {
+			t.Fatalf("parent gained unexpected entries: %v", entries)
+		}
+	})
+	t.Run("missing-parent-refused", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		root := t.TempDir()
+		leaf := filepath.Join(root, "new-parent", "webfleet")
+		mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+		chmodData = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install created a data leaf under a missing parent")
+		}
+		if _, e := os.Stat(filepath.Join(root, "new-parent")); !os.IsNotExist(e) {
+			t.Fatalf("missing parent was created: %v", e)
+		}
+		if _, e := os.Stat(leaf); !os.IsNotExist(e) {
+			t.Fatalf("leaf was created under a missing parent: %v", e)
+		}
+		if len(r.log) != 0 {
+			t.Fatal("missing-parent install touched systemctl")
+		}
+	})
+}
+
+// TestInstallRefusesProtectedHierarchyDescendants proves descendants of the
+// protected system hierarchies (/etc, /usr, /tmp, /run, /bin, /home, /root,
+// ...) are refused before any mutation.
+func TestInstallRefusesProtectedHierarchyDescendants(t *testing.T) {
+	for _, dir := range []string{
+		"/etc/webfleet", "/usr/local/webfleet", "/tmp/webfleet", "/run/webfleet",
+		"/bin/webfleet", "/home/alice/webfleet", "/root/webfleet", "/sbin/webfleet",
+	} {
+		t.Run(dir, func(t *testing.T) {
+			r := setupService(t)
+			binBefore := mustRead(t, BinaryPath)
+			exe := filepath.Join(t.TempDir(), "wf")
+			os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+			if e := Install(exe, dir, "127.0.0.1:8090"); e == nil {
+				t.Fatalf("install accepted protected hierarchy descendant %q", dir)
+			}
+			if len(r.log) != 0 {
+				t.Fatalf("%q touched systemctl before refusing", dir)
+			}
+			if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+				t.Fatalf("%q mutated the binary before refusing", dir)
+			}
+			if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+				t.Fatalf("%q wrote a unit before refusing", dir)
+			}
+		})
+	}
+}
+
+// TestValidateDataDirPathAllowsCanonical proves the canonical and deliberate
+// custom data namespaces (/var/lib/<project>, /srv/<project>) are allowed.
+func TestValidateDataDirPathAllowsCanonical(t *testing.T) {
+	for _, dir := range []string{"/var/lib/webfleet", "/var/lib/something", "/srv/webfleet", "/srv/monitoring/data"} {
+		if e := validateDataDirPath(dir); e != nil {
+			t.Fatalf("canonical data dir %q refused: %v", dir, e)
+		}
+	}
+}
+
+// TestInstallSurfacesChmodFailure proves a failure to establish mode 0700 on the
+// data directory is a surfaced install error, not a silently weakened install.
+func TestInstallSurfacesChmodFailure(t *testing.T) {
+	allowTempDataDirs(t)
+	r := setupService(t)
+	leaf := filepath.Join(t.TempDir(), "webfleet")
+	mkdirData = func(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+	chmodData = func(path string, mode os.FileMode) error { return errors.New("chmod denied") }
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+		t.Fatal("install succeeded despite a chmod failure")
+	} else if !strings.Contains(e.Error(), "mode 0700") {
+		t.Fatalf("chmod failure not surfaced: %v", e)
+	}
+	if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+		t.Fatal("unit written despite the chmod failure")
+	}
+	if len(r.log) != 0 {
+		t.Fatal("chmod-failure install touched systemctl")
+	}
+}
+
+// TestInstallSurfacesRollbackNeutralizationFailures proves the initial rollback
+// stop/disable (the neutralization boundary) failures are collected into the
+// combined error rather than discarded.
+func TestInstallSurfacesRollbackNeutralizationFailures(t *testing.T) {
+	t.Run("rollback-stop-failure", func(t *testing.T) {
+		r := setupService(t)
+		installManagedUnit(t)
+		setState(r, "enabled", "active")
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl stop webfleet.service"] = fakeResult{out: "cannot stop", code: 1}
+		r.script["systemctl restart webfleet.service"] = fakeResult{}
+		r.seq["systemctl disable webfleet.service"] = []fakeResult{{}, {}, {}}
+		r.seq["systemctl enable webfleet.service"] = []fakeResult{{out: "forward enable failed", code: 1}, {}}
+		err := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090")
+		if err == nil {
+			t.Fatal("install returned nil")
+		}
+		if !strings.Contains(err.Error(), "rollback incomplete") {
+			t.Fatalf("rollback failure marker missing: %v", err)
+		}
+		if !strings.Contains(err.Error(), "stop failed service") {
+			t.Fatalf("rollback stop failure not surfaced: %v", err)
+		}
+	})
+	t.Run("rollback-disable-failure", func(t *testing.T) {
+		r := setupService(t)
+		installManagedUnit(t)
+		setState(r, "enabled", "active")
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl stop webfleet.service"] = fakeResult{}
+		r.script["systemctl restart webfleet.service"] = fakeResult{}
+		r.seq["systemctl disable webfleet.service"] = []fakeResult{{}, {out: "cannot disable", code: 1}, {out: "cannot disable", code: 1}}
+		r.seq["systemctl enable webfleet.service"] = []fakeResult{{out: "forward enable failed", code: 1}}
+		err := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090")
+		if err == nil {
+			t.Fatal("install returned nil")
+		}
+		if !strings.Contains(err.Error(), "rollback incomplete") {
+			t.Fatalf("rollback failure marker missing: %v", err)
+		}
+		if !strings.Contains(err.Error(), "disable failed service") {
+			t.Fatalf("rollback disable failure not surfaced: %v", err)
+		}
+	})
+	t.Run("fresh-install-rollback-disable-failure", func(t *testing.T) {
+		r := setupService(t)
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl enable webfleet.service"] = fakeResult{}
+		r.script["systemctl start webfleet.service"] = fakeResult{out: "activation failed", code: 1}
+		r.script["systemctl stop webfleet.service"] = fakeResult{}
+		r.script["systemctl disable webfleet.service"] = fakeResult{out: "cannot disable", code: 1}
+		err := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090")
+		if err == nil {
+			t.Fatal("install returned nil")
+		}
+		if !strings.Contains(err.Error(), "rollback incomplete") {
+			t.Fatalf("rollback failure marker missing: %v", err)
+		}
+		if !strings.Contains(err.Error(), "disable failed service") {
+			t.Fatalf("fresh-install rollback disable failure not surfaced: %v", err)
+		}
+	})
 }

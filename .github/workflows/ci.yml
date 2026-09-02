@@ -304,3 +304,28 @@ jobs:
           sudo systemctl enable webfleet.service
           sudo systemctl restart webfleet.service
           wait_healthz
+          # Fourth branch: the rollback NEUTRALIZATION (stop) failure is also
+          # reported, not discarded. A fake systemctl that fails both `stop`
+          # (rollback boundary) and `enable` (forward activation + restore
+          # enablement) must surface both failures in the combined error.
+          mkdir -p /tmp/fakebin3
+          cat > /tmp/fakebin3/systemctl <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            "stop webfleet.service"|"enable webfleet.service") echo "simulated neutralization failure" >&2; exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin3/systemctl
+          set +e
+          sudo env "PATH=/tmp/fakebin3:/usr/sbin:/usr/bin:/bin" /tmp/wf service install --listen 127.0.0.1:8091 > /tmp/install-fail4.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "install with failing neutralization succeeded unexpectedly" >&2; cat /tmp/install-fail4.log >&2; exit 1; }
+          grep -q "rollback incomplete" /tmp/install-fail4.log || { echo "rollback failure marker missing" >&2; cat /tmp/install-fail4.log >&2; exit 1; }
+          grep -q "stop failed service" /tmp/install-fail4.log || { echo "rollback stop failure not surfaced" >&2; cat /tmp/install-fail4.log >&2; exit 1; }
+          # Re-sync the real systemd manager (the fake could not reload it).
+          sudo systemctl daemon-reload
+          sudo systemctl enable webfleet.service
+          sudo systemctl restart webfleet.service
+          wait_healthz

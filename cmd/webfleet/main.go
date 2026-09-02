@@ -160,6 +160,37 @@ type serviceCommand struct {
 	sha      string
 }
 
+// serviceSuccessMessage returns the state-neutral success message for a
+// completed service command. The lifecycle deliberately preserves prior state
+// (a stopped service stays stopped across reinstall/update/rollback), so
+// install/update/rollback must not claim the service is active or was
+// restarted; only the verbs whose effect is inherently a state change
+// (start/stop/restart/enable/disable) state it.
+func serviceSuccessMessage(c serviceCommand) string {
+	switch c.verb {
+	case "install":
+		return "webfleet.service installed."
+	case "uninstall":
+		return "webfleet.service uninstalled. Persistent data was preserved."
+	case "start":
+		return "webfleet.service started."
+	case "stop":
+		return "webfleet.service stopped."
+	case "restart":
+		return "webfleet.service restarted."
+	case "enable":
+		return "webfleet.service enabled at boot."
+	case "disable":
+		return "webfleet.service disabled at boot."
+	case "update":
+		return "webfleet.service updated."
+	case "rollback":
+		return "webfleet.service rolled back."
+	default:
+		return ""
+	}
+}
+
 // execServiceCommand dispatches a parsed service command to the lifecycle,
 // returning the success message (or status/logs body) to print. It is a
 // variable so the CLI can be tested end-to-end without root or systemd.
@@ -169,37 +200,30 @@ var execServiceCommand = func(c serviceCommand) (string, error) {
 		if err := service.Install(service.Executable(), c.data, c.listen); err != nil {
 			return "", err
 		}
-		return "webfleet.service installed and active.", nil
 	case "uninstall":
 		if err := service.Uninstall(); err != nil {
 			return "", err
 		}
-		return "webfleet.service uninstalled. Data in " + service.DefaultDataDir + " was preserved.", nil
 	case "start":
 		if err := service.Start(); err != nil {
 			return "", err
 		}
-		return "webfleet.service started.", nil
 	case "stop":
 		if err := service.Stop(); err != nil {
 			return "", err
 		}
-		return "webfleet.service stopped.", nil
 	case "restart":
 		if err := service.Restart(); err != nil {
 			return "", err
 		}
-		return "webfleet.service restarted.", nil
 	case "enable":
 		if err := service.Enable(); err != nil {
 			return "", err
 		}
-		return "webfleet.service enabled at boot.", nil
 	case "disable":
 		if err := service.Disable(); err != nil {
 			return "", err
 		}
-		return "webfleet.service disabled at boot.", nil
 	case "status":
 		var b bytes.Buffer
 		if err := service.Status(&b); err != nil {
@@ -216,14 +240,12 @@ var execServiceCommand = func(c serviceCommand) (string, error) {
 		if err := service.Update(c.artifact, c.sha); err != nil {
 			return "", err
 		}
-		return "webfleet.service updated and restarted.", nil
 	case "rollback":
 		if err := service.Rollback(); err != nil {
 			return "", err
 		}
-		return "webfleet.service rolled back and restarted.", nil
 	}
-	return "", fmt.Errorf("internal error: unknown service command %q", c.verb)
+	return serviceSuccessMessage(c), nil
 }
 
 // parseServiceCommand deterministically parses `webfleet service <verb>` with

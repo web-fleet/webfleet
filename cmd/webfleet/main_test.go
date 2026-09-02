@@ -112,7 +112,7 @@ func TestRunServiceUpdate(t *testing.T) {
 	var got serviceCommand
 	withStub(t, func(c serviceCommand) (string, error) {
 		got = c
-		return "updated", nil
+		return serviceSuccessMessage(c), nil
 	})
 	var out, errOut bytes.Buffer
 	if code := runServiceIO(&out, &errOut, []string{"update", "/tmp/art", "abc123"}, "127.0.0.1:8090"); code != 0 {
@@ -121,7 +121,7 @@ func TestRunServiceUpdate(t *testing.T) {
 	if got.verb != "update" || got.artifact != "/tmp/art" || got.sha != "abc123" {
 		t.Fatalf("update parsed = %+v", got)
 	}
-	if !strings.Contains(out.String(), "updated") {
+	if !strings.Contains(out.String(), "webfleet.service updated.") {
 		t.Fatalf("update success message missing: %q", out.String())
 	}
 
@@ -134,6 +134,31 @@ func TestRunServiceUpdate(t *testing.T) {
 		var b1, b2 bytes.Buffer
 		if code := runServiceIO(&b1, &b2, bad, "127.0.0.1:8090"); code != 2 {
 			t.Fatalf("update %v exit %d, want 2", bad, code)
+		}
+	}
+}
+
+// TestServiceSuccessMessagesAreStateNeutral proves the real success-message
+// semantics do not contradict the state-preserving lifecycle: install/update/
+// rollback must not claim the service is active or was restarted, and uninstall
+// must not hard-code a data directory that may differ from the managed one.
+func TestServiceSuccessMessagesAreStateNeutral(t *testing.T) {
+	verbs := []string{"install", "update", "rollback", "uninstall"}
+	for _, verb := range verbs {
+		msg := strings.ToLower(serviceSuccessMessage(serviceCommand{verb: verb}))
+		if msg == "" {
+			t.Fatalf("%s has no success message", verb)
+		}
+		for _, banned := range []string{"active", "restarted", "/var/lib/webfleet"} {
+			if strings.Contains(msg, banned) {
+				t.Fatalf("success message for %s overstates state: %q contains %q", verb, msg, banned)
+			}
+		}
+	}
+	// The verbs whose effect IS a state change may state it.
+	for _, verb := range []string{"start", "stop", "restart", "enable", "disable"} {
+		if serviceSuccessMessage(serviceCommand{verb: verb}) == "" {
+			t.Fatalf("%s has no success message", verb)
 		}
 	}
 }
