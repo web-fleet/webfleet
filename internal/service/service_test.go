@@ -833,8 +833,12 @@ func TestRecoveryFailsClosedWithoutMarker(t *testing.T) {
 		exe := filepath.Join(t.TempDir(), "wf2")
 		os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
 		r.script["systemctl restart webfleet.service"] = fakeResult{}
-		// Intercept the recovery-time marker read to simulate disappearance.
+		// Record the log position at the moment the marker is found missing, so
+		// we can assert NO recovery activation (stop/restart) is issued AFTER the
+		// fail-closed decision - independent of the update's own legitimate restart.
+		markerRead := 0
 		readPriorStateAtRecovery = func() (string, error) {
+			markerRead = len(r.log)
 			mutate()
 			b, err := os.ReadFile(BinaryPath + ".prior-active")
 			if err != nil {
@@ -852,14 +856,20 @@ func TestRecoveryFailsClosedWithoutMarker(t *testing.T) {
 		if !strings.Contains(uerr.Error(), "prior-state marker") {
 			t.Fatalf("[%s] recovery did not fail closed on the marker (got: %v)", desc, uerr)
 		}
+		// Fail closed means recovery must NOT proceed into a guessed-active
+		// restart: no stop/restart may be issued after the marker failure.
+		for _, call := range r.log[markerRead:] {
+			if strings.HasPrefix(call, "systemctl stop ") || strings.HasPrefix(call, "systemctl restart ") {
+				t.Fatalf("[%s] recovery proceeded to activate after the marker failure: %s", desc, call)
+			}
+		}
 	}
 	run("missing", func() { os.Remove(BinaryPath + ".prior-active") })
 	run("invalid", func() { os.WriteFile(BinaryPath+".prior-active", []byte("bogus"), 0o600) })
 }
 
-// TestRecoveryFailsClosedIsGenuineRegression proves the corrected test fails if
-// recovery is changed back to a guess-to-active default, i.e. it truly guards
-// the fail-closed contract rather than being a source-shape assertion.
+// TestInitialRestartFailureSurfacesRecoveryFailure proves the initial-restart
+// failure branch also surfaces a recovery failure (not just the health branch).
 func TestRecoveryFailsClosedIsGenuineRegression(t *testing.T) {
 	r := setupService(t)
 	installManagedUnit(t)
