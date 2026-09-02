@@ -289,6 +289,8 @@ jobs:
           #!/bin/sh
           case "$*" in
             *daemon-reload*) echo "simulated daemon-reload failure" >&2; exit 1 ;;
+            "is-enabled webfleet.service") echo "enabled" ;;
+            "is-active webfleet.service") echo "active" ;;
             *) exit 0 ;;
           esac
           EOF
@@ -316,6 +318,8 @@ jobs:
           #!/bin/sh
           case "$*" in
             "stop webfleet.service"|"enable webfleet.service") echo "simulated neutralization failure" >&2; exit 1 ;;
+            "is-enabled webfleet.service") echo "enabled" ;;
+            "is-active webfleet.service") echo "active" ;;
             *) exit 0 ;;
           esac
           EOF
