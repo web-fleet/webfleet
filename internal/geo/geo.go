@@ -284,18 +284,21 @@ func (m *Manager) LoadExisting() bool {
 	return true
 }
 
-// Install downloads and activates the database. It is a no-op if the database
-// is already installed unless force is set (manual refresh).
-func (m *Manager) Install(ctx context.Context, force bool) error {
-	if m.url == "" {
-		return fmt.Errorf("no GeoIP database URL configured")
-	}
-	m.mu.Lock()
-	installed := m.db != nil
-	m.mu.Unlock()
-	if installed && !force {
+// EnsureCurrent implements the automatic lifecycle: a missing database is
+// installed, a fresh one is left alone (no network), and a stale one is
+// refreshed in place - atomically, keeping the previous database active on
+// failure. This is the operation the server startup auto-update path uses.
+func (m *Manager) EnsureCurrent(ctx context.Context) error {
+	if !m.NeedsRefresh() {
 		return nil
 	}
+	return m.fetch(ctx)
+}
+
+// Update forces an immediate refresh regardless of database age (the manual
+// "Update database" action). A failed refresh keeps the previous database and
+// its last-updated timestamp.
+func (m *Manager) Update(ctx context.Context) error {
 	return m.fetch(ctx)
 }
 

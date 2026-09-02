@@ -73,7 +73,7 @@ func TestManagerInstallAtomicAndFailureRetainsPrevious(t *testing.T) {
 	if m.LoadExisting() {
 		t.Fatal("no database should be installed initially")
 	}
-	if e := m.Install(context.Background(), false); e != nil {
+	if e := m.EnsureCurrent(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if m.DB() == nil || m.DB().Lookup("203.0.113.1") != "AU" {
@@ -88,7 +88,7 @@ func TestManagerInstallAtomicAndFailureRetainsPrevious(t *testing.T) {
 	if m2.DB() == nil {
 		t.Fatal("existing database not loaded by second manager")
 	}
-	if e := m2.Install(context.Background(), true); e == nil {
+	if e := m2.Update(context.Background()); e == nil {
 		t.Fatal("corrupt update unexpectedly succeeded")
 	}
 	if m2.DB() == nil || m2.DB().Lookup("203.0.113.1") != "AU" {
@@ -110,7 +110,7 @@ func TestGzipDatabaseSurvivesRestart(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	m := NewManager(dir, srv.URL)
-	if e := m.Install(context.Background(), false); e != nil {
+	if e := m.EnsureCurrent(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	// Persisted file must be plain CSV named .csv (decompressed before writing).
@@ -136,6 +136,28 @@ func TestGzipDatabaseSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestUpdateForcesRefresh proves the manual Update action refreshes regardless
+// of database age.
+func TestUpdateForcesRefresh(t *testing.T) {
+	valid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, fixtureCSV) }))
+	defer valid.Close()
+	dir := t.TempDir()
+	m := NewManager(dir, valid.URL)
+	if e := m.Update(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if m.DB() == nil {
+		t.Fatal("Update did not install")
+	}
+	t0 := m.LastUpdated()
+	if e := m.Update(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if m.LastUpdated() < t0 && m.LastUpdated() != t0 {
+		t.Fatal("Update did not advance the refresh timestamp")
+	}
+}
+
 // TestManagerStalePolicy uses a controllable clock to prove the auto-update
 // contract: missing -> eligible, fresh -> not, stale -> eligible; a failed
 // refresh retains the previous database and a successful one advances it.
@@ -153,7 +175,7 @@ func TestManagerStalePolicy(t *testing.T) {
 	if !m.NeedsRefresh() {
 		t.Fatal("missing database should be refresh-eligible")
 	}
-	if e := m.Install(context.Background(), false); e != nil {
+	if e := m.EnsureCurrent(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if m.LastUpdated() != clock.Format(time.RFC3339) {
@@ -162,6 +184,13 @@ func TestManagerStalePolicy(t *testing.T) {
 	// Fresh database within the interval is not refreshed.
 	if m.NeedsRefresh() {
 		t.Fatal("fresh database should not be refresh-eligible")
+	}
+	// EnsureCurrent (the production auto path) must be a no-op for a fresh DB.
+	if e := m.EnsureCurrent(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if m.LastUpdated() != clock.Format(time.RFC3339) {
+		t.Fatal("EnsureCurrent changed a fresh database")
 	}
 	// Advance past the 30-day interval: now stale.
 	clock = clock.Add(31 * 24 * time.Hour)
@@ -173,7 +202,7 @@ func TestManagerStalePolicy(t *testing.T) {
 	mf.now = func() time.Time { return clock }
 	mf.LoadExisting()
 	before := mf.LastUpdated()
-	if e := mf.Install(context.Background(), true); e == nil {
+	if e := mf.EnsureCurrent(context.Background()); e == nil {
 		t.Fatal("failed refresh unexpectedly succeeded")
 	}
 	if mf.DB() == nil || mf.DB().Lookup("203.0.113.1") != "AU" {
@@ -187,7 +216,7 @@ func TestManagerStalePolicy(t *testing.T) {
 	ms := NewManager(dir, valid.URL)
 	ms.now = func() time.Time { return clock }
 	ms.LoadExisting()
-	if e := ms.Install(context.Background(), true); e != nil {
+	if e := ms.EnsureCurrent(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if ms.LastUpdated() != clock.Format(time.RFC3339) {

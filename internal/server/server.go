@@ -190,7 +190,7 @@ func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	// monthly); an existing fresh database is served without a network request.
 	if cfg.GeoIPAutoUpdate && s.geo.NeedsRefresh() {
 		go func() {
-			if err := s.geo.Install(context.Background(), false); err == nil {
+			if err := s.geo.EnsureCurrent(context.Background()); err == nil {
 				a.SetGeo(s.geo.DB())
 			} else {
 				log.Warn("geoip auto-install/refresh failed", "error", err)
@@ -557,7 +557,7 @@ func (s *Server) handleGeoUpdate(w http.ResponseWriter, r *http.Request, _ princ
 		return
 	}
 	go func() {
-		if err := s.geo.Install(context.WithoutCancel(r.Context()), true); err == nil {
+		if err := s.geo.Update(context.WithoutCancel(r.Context())); err == nil {
 			s.analytics.SetGeo(s.geo.DB())
 		}
 	}()
