@@ -725,17 +725,16 @@ func Update(artifact, want string) error {
 		return nil
 	}
 	// Verify real activation/health after the restart: a zero exit from
-	// `restart` does not prove the process stayed alive.
+	// `restart` does not prove the process stayed alive. Both the initial-restart
+	// failure and the later health failure share one recovery path, so a
+	// recovery failure is always surfaced alongside the original update error.
 	if out, code, err := systemctl("restart", "webfleet.service"); err != nil || code != 0 {
-		restoreAfterFailedUpdate()
-		return fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
+		updateErr := fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
+		return updateFailureWithRecovery(updateErr, restoreAfterFailedUpdate())
 	}
 	if e := verifyActiveAndHealthy(); e != nil {
-		rbErr := restoreAfterFailedUpdate()
-		if rbErr != nil {
-			return fmt.Errorf("update: new binary failed to become healthy (%v); recovery also failed: %v", e, rbErr)
-		}
-		return fmt.Errorf("update: new binary failed to become healthy: %w", e)
+		updateErr := fmt.Errorf("update: new binary failed to become healthy: %w", e)
+		return updateFailureWithRecovery(updateErr, restoreAfterFailedUpdate())
 	}
 	// Successful active update: retain the rollback binary and the prior-active
 	// marker so a later manual `service rollback` can still restore the previous
@@ -745,6 +744,15 @@ func Update(artifact, want string) error {
 }
 
 var healthWindow = 30 * time.Second
+
+// updateFailureWithRecovery returns the update error, augmenting it with a
+// recovery error when the attempt to restore the previous version also failed.
+func updateFailureWithRecovery(updateErr, recoveryErr error) error {
+	if recoveryErr != nil {
+		return fmt.Errorf("%v; recovery also failed: %v", updateErr, recoveryErr)
+	}
+	return updateErr
+}
 
 // verifyActiveAndHealthy polls a bounded window for the service to be active
 // and its healthz endpoint to return 200.
@@ -773,9 +781,15 @@ func verifyActiveAndHealthy() error {
 // the recovery (stop, binary restore, restart, health) fails, so a failed
 // update never silently claims a rollback happened.
 func restoreAfterFailedUpdate() error {
-	priorActive := "active"
-	if b, e := os.ReadFile(BinaryPath + ".prior-active"); e == nil {
-		priorActive = strings.TrimSpace(string(b))
+	// Fail closed: the prior-state marker was written transactionally before the
+	// binary was replaced, so recovery must not guess at the active state.
+	b, err := os.ReadFile(BinaryPath + ".prior-active")
+	if err != nil {
+		return fmt.Errorf("recovery: no prior-state marker: %w", err)
+	}
+	priorActive := strings.TrimSpace(string(b))
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("recovery: invalid prior-state marker %q", priorActive)
 	}
 	if e := systemctlSuccess("stop", "webfleet.service"); e != nil {
 		return fmt.Errorf("recovery: stop failed service: %w", e)
@@ -791,7 +805,10 @@ func restoreAfterFailedUpdate() error {
 			return fmt.Errorf("recovery: restored service not healthy: %w", e)
 		}
 	}
+	// Verified recovery complete: consume both temporary rollback artifacts so no
+	// stale rollback binary remains for the now-current (restored) version.
 	_ = os.Remove(BinaryPath + ".prior-active")
+	_ = os.Remove(BinaryPath + ".rollback")
 	return nil
 }
 

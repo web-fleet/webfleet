@@ -753,3 +753,88 @@ func TestFailedUpdateRecoverySurfacesFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestInitialRestartFailureSurfacesRecoveryFailure proves the initial-restart
+// failure branch also surfaces a recovery failure (not just the health branch).
+func TestInitialRestartFailureSurfacesRecoveryFailure(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	// Initial restart of the new binary fails (code 1), then recovery's own
+	// restart also fails.
+	r.seq["systemctl restart webfleet.service"] = []fakeResult{
+		{out: "new binary failed to start", code: 1},
+		{out: "recovery restart failed", code: 1},
+	}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	uerr := Update(exe, fakeSHA(exe))
+	if uerr == nil {
+		t.Fatal("update succeeded despite initial restart failure")
+	}
+	if !strings.Contains(uerr.Error(), "restart after update") {
+		t.Fatalf("original restart failure missing: %v", uerr)
+	}
+	if !strings.Contains(uerr.Error(), "recovery") {
+		t.Fatalf("recovery failure not surfaced: %v", uerr)
+	}
+}
+
+// TestInitialRestartFailureRecoverySucceedsCleansMetadata proves when the
+// initial restart fails but recovery succeeds, the old binary is restored,
+// health is verified, and both rollback artifacts are consumed.
+func TestInitialRestartFailureRecoverySucceedsCleansMetadata(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	oldBin := mustRead(t, BinaryPath)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	healthWindow = 1 * time.Second
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.seq["systemctl restart webfleet.service"] = []fakeResult{
+		{out: "new binary failed to start", code: 1}, // initial
+		{}, // recovery restart succeeds
+	}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	uerr := Update(exe, fakeSHA(exe))
+	if uerr == nil {
+		t.Fatal("update should report the initial restart failure")
+	}
+	back, _ := os.ReadFile(BinaryPath)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("recovery did not restore the old binary")
+	}
+	// Verified recovery consumed both artifacts.
+	if _, e := os.Stat(BinaryPath + ".rollback"); !os.IsNotExist(e) {
+		t.Fatal("stale rollback binary left after verified recovery")
+	}
+	if _, e := os.Stat(BinaryPath + ".prior-active"); !os.IsNotExist(e) {
+		t.Fatal("stale prior-active marker left after verified recovery")
+	}
+}
+
+// TestRecoveryFailsClosedWithoutMarker proves recovery does not guess to active
+// when the prior-state marker is missing/invalid.
+func TestRecoveryFailsClosedWithoutMarker(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	// Set up a healthy update path but with NO prior-active marker so recovery
+	// must fail closed.
+	prepareUpdate(r, "active", false)
+	healthWindow = 1 * time.Second
+	os.Remove(BinaryPath + ".prior-active")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	uerr := Update(exe, fakeSHA(exe))
+	if uerr == nil {
+		t.Fatal("update succeeded despite a missing recovery marker")
+	}
+	if !strings.Contains(uerr.Error(), "recovery") {
+		t.Fatalf("recovery fail-closed degradation not surfaced: %v", uerr)
+	}
+}
