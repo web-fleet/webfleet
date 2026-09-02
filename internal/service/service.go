@@ -128,6 +128,24 @@ func systemctlSuccess(args ...string) error {
 	return nil
 }
 
+// resetFailed clears systemd's accumulated failed/start-limit state for the
+// managed unit. The CLI issues it immediately before its own deliberate
+// start/restart activations (install, update, rollback, recovery and the
+// explicit start/restart verbs), so the finite crash-loop policy in the unit
+// body catches spontaneous Restart=on-failure crash loops while
+// operator-controlled lifecycle transitions are never blocked by previously
+// accumulated starts.
+func resetFailed() error {
+	out, code, err := systemctl("reset-failed", "webfleet.service")
+	if err != nil {
+		return fmt.Errorf("cannot run systemctl reset-failed webfleet.service: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("systemctl reset-failed webfleet.service exited %d: %s", code, bounded(strings.TrimSpace(out)))
+	}
+	return nil
+}
+
 // unitStateWord runs a state verb (is-enabled/is-active) and returns the
 // trimmed state word. A nonzero exit is a legitimate negative state answer
 // (disabled, inactive, masked, ...); only a launch failure is a query error.
@@ -471,9 +489,11 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 // unitBody renders the systemd directives (no managed marker) for a legacy
 // bootstrap unit: the recorded WEBFLEET_LISTEN environment is what the
-// foreground binds. StartLimitIntervalSec=0 disables systemd's start rate
-// limiting so install/update/rollback restarts in quick succession never trip
-// the default 5-starts-per-10s limit.
+// foreground binds. The explicit StartLimitIntervalSec/StartLimitBurst pair is
+// a finite crash-loop boundary: a persistent startup failure is eventually
+// rate-limited instead of restarting forever. The CLI clears the accumulated
+// counter with reset-failed before its own deliberate activations, so
+// legitimate install/update/rollback restarts are never blocked.
 func unitBody(dataDir, listen string) string {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
@@ -485,7 +505,8 @@ func unitBody(dataDir, listen string) string {
 Description=Web Fleet website monitoring
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -512,8 +533,9 @@ WantedBy=multi-user.target
 // so the installed process genuinely binds that listener across
 // restart/reboot, and no WEBFLEET_LISTEN environment is set (the flags are the
 // runtime authority; the foreground resolves CLI > env > default). As in the
-// bootstrap body, StartLimitIntervalSec=0 disables the start rate limit for
-// legitimate install/update/rollback restarts.
+// bootstrap body, the explicit finite start-limit pair retains a crash-loop
+// boundary that the CLI's reset-failed-before-activation clears for deliberate
+// lifecycle transitions.
 func unitBodyExplicit(dataDir, host, port string) string {
 	if dataDir == "" {
 		dataDir = DefaultDataDir
@@ -523,7 +545,8 @@ func unitBodyExplicit(dataDir, host, port string) string {
 	b.WriteString("Description=Web Fleet website monitoring\n")
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
-	b.WriteString("StartLimitIntervalSec=0\n\n")
+	b.WriteString("StartLimitIntervalSec=60\n")
+	b.WriteString("StartLimitBurst=5\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
 	b.WriteString("User=" + ServiceUser + "\n")
@@ -809,6 +832,14 @@ func install(exe, dataDir string, opts installOptions) (retErr error) {
 					break
 				}
 			}
+			// The restore may reactivate the service, so clear any start-limit
+			// state accumulated by the failed activation first; a reset failure
+			// is part of the combined rollback result, never discarded.
+			if priorActive == "active" {
+				if e := resetFailed(); e != nil {
+					errs = append(errs, fmt.Sprintf("reset failed state: %v", e))
+				}
+			}
 			if e := systemctlSuccess(activeRestoreArgs(priorActive, "webfleet.service")...); e != nil {
 				errs = append(errs, fmt.Sprintf("restore active state %q: %v", priorActive, e))
 			}
@@ -839,6 +870,13 @@ func install(exe, dataDir string, opts installOptions) (retErr error) {
 		// Reinstall: preserve the exact prior enablement and active state.
 		steps = append(steps, enableRestoreSteps(priorEnabled, "webfleet.service")...)
 		steps = append(steps, activeRestoreArgs(priorActive, "webfleet.service"))
+	}
+	// A deliberate start/restart clears any accumulated start-limit state first
+	// so the finite crash-loop policy never blocks an operator-controlled
+	// activation; a reset failure is an install step failure and participates
+	// in the transactional rollback below.
+	if last := steps[len(steps)-1]; last[0] == "start" || last[0] == "restart" {
+		steps = append(steps[:len(steps)-1], []string{"reset-failed", "webfleet.service"}, last)
 	}
 	for _, a := range steps {
 		if out, code, err := systemctl(a...); err != nil || code != 0 {
@@ -983,6 +1021,14 @@ func lifecycle(verb string) error {
 	}
 	if e := requireManaged(verb); e != nil {
 		return e
+	}
+	// A deliberate start/restart clears any start-limit state accumulated since
+	// the last operator-controlled activation; a reset failure fails the verb
+	// rather than silently attempting a blocked activation.
+	if verb == "start" || verb == "restart" {
+		if e := resetFailed(); e != nil {
+			return e
+		}
 	}
 	if err := systemctlSuccess(verb, "webfleet.service"); err != nil {
 		return err
@@ -1180,6 +1226,12 @@ func Update(artifact, want string) error {
 	// `restart` does not prove the process stayed alive. Both the initial-restart
 	// failure and the later health failure share one recovery path, so a
 	// recovery failure is always surfaced alongside the original update error.
+	// The deliberate restart clears any accumulated start-limit state first; a
+	// reset failure after the binary swap enters the verified recovery path.
+	if e := resetFailed(); e != nil {
+		updateErr := fmt.Errorf("restart after update: %v", e)
+		return updateFailureWithRecovery(updateErr, restoreAfterFailedUpdate())
+	}
 	if out, code, err := systemctl("restart", "webfleet.service"); err != nil || code != 0 {
 		updateErr := fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errorIfNil(err, code, nil))
 		return updateFailureWithRecovery(updateErr, restoreAfterFailedUpdate())
@@ -1261,6 +1313,9 @@ func restoreAfterFailedUpdate() error {
 		return fmt.Errorf("recovery: restore old binary: %w", e)
 	}
 	if priorActive == "active" {
+		if e := resetFailed(); e != nil {
+			return fmt.Errorf("recovery: reset failed state: %w", e)
+		}
 		if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
 			return fmt.Errorf("recovery: restart old service: %w", e)
 		}
@@ -1313,6 +1368,9 @@ func Rollback() error {
 		_ = os.Remove(BinaryPath + ".prior-active")
 		_ = os.Remove(BinaryPath + ".rollback")
 		return nil
+	}
+	if e := resetFailed(); e != nil {
+		return e
 	}
 	if e := systemctlSuccess("restart", "webfleet.service"); e != nil {
 		return e

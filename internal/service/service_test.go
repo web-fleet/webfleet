@@ -109,6 +109,9 @@ func setupService(t *testing.T) *fakeRunner {
 	unlinkAtSeam = func(int, string) error { return nil }
 	closeFdSeam = func(int) error { return nil }
 	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}, strict: true}
+	// Deliberate lifecycle activations reset-failed first; script the default
+	// success so existing tests observe the new order unless they override it.
+	r.script["systemctl reset-failed webfleet.service"] = fakeResult{}
 	defaultRunner = r
 	t.Cleanup(func() {
 		UnitPath, BinaryPath = oldUnit, oldBin
@@ -152,10 +155,13 @@ func installManagedUnit(t *testing.T) {
 func TestUnitHardeningAndManagedMarker(t *testing.T) {
 	setupService(t)
 	u := Unit("/var/lib/webfleet", "127.0.0.1:8090")
-	for _, x := range []string{"# Managed by webfleet. Do not edit manually.", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadWritePaths=\"/var/lib/webfleet\"", "User=" + ServiceUser, "Group=" + ServiceGroup, "WantedBy=multi-user.target", "StartLimitIntervalSec=0"} {
+	for _, x := range []string{"# Managed by webfleet. Do not edit manually.", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadWritePaths=\"/var/lib/webfleet\"", "User=" + ServiceUser, "Group=" + ServiceGroup, "WantedBy=multi-user.target", "StartLimitIntervalSec=60", "StartLimitBurst=5"} {
 		if !strings.Contains(u, x) {
 			t.Fatal("missing " + x)
 		}
+	}
+	if strings.Contains(u, "StartLimitIntervalSec=0") {
+		t.Fatal("unit must retain a finite crash-loop limit, not disable it")
 	}
 	if !strings.Contains(Unit("/var/lib/web fleet", "127.0.0.1:8090"), "WEBFLEET_DATA_DIR=\"/var/lib/web fleet\"") {
 		t.Fatal("data path with spaces is not quoted")
@@ -204,6 +210,43 @@ func TestLifecycleVerbsRequireManagedUnit(t *testing.T) {
 	r.script["systemctl stop webfleet.service"] = fakeResult{out: "Job failed", code: 1}
 	if err := lifecycle("stop"); err == nil {
 		t.Fatal("failed stop returned nil")
+	}
+}
+
+func TestLifecycleResetFailedPrecedesStartRestart(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	for _, v := range []string{"start", "restart"} {
+		r.log = nil
+		if e := lifecycle(v); e != nil {
+			t.Fatalf("%s: %v", v, e)
+		}
+		if !ordered(r.log, []string{"systemctl reset-failed webfleet.service", "systemctl " + v + " webfleet.service"}) {
+			t.Fatalf("%s must reset-failed before activating: %v", v, r.log)
+		}
+	}
+	// A reset failure fails the verb and must not proceed to activation.
+	r.script["systemctl reset-failed webfleet.service"] = fakeResult{out: "reset failed", code: 1}
+	r.log = nil
+	if e := lifecycle("start"); e == nil {
+		t.Fatal("start succeeded despite reset-failed failure")
+	}
+	if contains(r.log, "systemctl start webfleet.service") {
+		t.Fatalf("start proceeded after reset-failed failure: %v", r.log)
+	}
+}
+
+func TestLifecycleStopDoesNotReset(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	if e := lifecycle("stop"); e != nil {
+		t.Fatal(e)
+	}
+	if contains(r.log, "systemctl reset-failed webfleet.service") {
+		t.Fatalf("stop must not reset-failed: %v", r.log)
 	}
 }
 
@@ -359,6 +402,18 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
+// ordered reports whether every element of want appears in log in the given
+// relative order (not necessarily contiguously).
+func ordered(log, want []string) bool {
+	i := 0
+	for _, l := range log {
+		if i < len(want) && l == want[i] {
+			i++
+		}
+	}
+	return i == len(want)
+}
+
 func setState(r *fakeRunner, enabled, active string) {
 	r.script["systemctl is-enabled webfleet.service"] = fakeResult{out: enabled, code: 0}
 	r.script["systemctl is-active webfleet.service"] = fakeResult{out: active, code: 0}
@@ -409,6 +464,52 @@ func TestReinstallChangedBinaryRestarts(t *testing.T) {
 	}
 	if !contains(r.log, "systemctl restart webfleet.service") {
 		t.Fatal("changed binary did not trigger a restart")
+	}
+}
+
+func TestInstallResetFailedPrecedesActivation(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# different binary\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl disable webfleet.service"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Install(exe, "/var/lib/webfleet", "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	if !ordered(r.log, []string{"systemctl reset-failed webfleet.service", "systemctl restart webfleet.service"}) {
+		t.Fatalf("reinstall restart must be preceded by reset-failed: %v", r.log)
+	}
+}
+
+func TestInstallResetFailedFailureRollsBack(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	priorUnit := mustRead(t, UnitPath)
+	priorBin := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# new\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl disable webfleet.service"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	// The forward activation reset fails; the rollback reset succeeds.
+	r.seq["systemctl reset-failed webfleet.service"] = []fakeResult{{out: "reset failed", code: 1}, {}}
+	if err := Install(exe, "/var/lib/webfleet", "127.0.0.1:9090"); err == nil {
+		t.Fatal("install succeeded despite reset-failed failure")
+	} else if !strings.Contains(err.Error(), "reset-failed") {
+		t.Fatalf("install error must surface the reset failure: %v", err)
+	}
+	if got := mustRead(t, UnitPath); !bytes.Equal(got, priorUnit) {
+		t.Fatal("prior unit not restored after reset-failed failure")
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, priorBin) {
+		t.Fatal("prior binary not restored after reset-failed failure")
 	}
 }
 
@@ -679,6 +780,95 @@ func TestRollbackRestoresRunningState(t *testing.T) {
 		if strings.HasPrefix(call, "systemctl enable ") || strings.HasPrefix(call, "systemctl disable ") {
 			t.Fatalf("update/rollback changed enablement: %s", call)
 		}
+	}
+}
+
+func TestUpdateResetFailedPrecedesRestart(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	if !ordered(r.log, []string{"systemctl reset-failed webfleet.service", "systemctl restart webfleet.service"}) {
+		t.Fatalf("update restart must be preceded by reset-failed: %v", r.log)
+	}
+}
+
+func TestUpdateResetFailedFailureEntersRecovery(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	oldBin := mustRead(t, BinaryPath)
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	// The post-swap reset fails; the recovery reset succeeds.
+	r.seq["systemctl reset-failed webfleet.service"] = []fakeResult{{out: "reset failed", code: 1}, {}}
+	err := Update(exe, fakeSHA(exe))
+	if err == nil {
+		t.Fatal("update succeeded despite reset-failed failure")
+	}
+	if !strings.Contains(err.Error(), "restart after update") || !strings.Contains(err.Error(), "reset-failed") {
+		t.Fatalf("update error must surface the reset failure: %v", err)
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, oldBin) {
+		t.Fatal("recovery did not restore the old binary after reset-failed failure")
+	}
+}
+
+func TestRollbackResetFailedPrecedesRestartAndFails(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	if e := Update(exe, fakeSHA(exe)); e != nil {
+		t.Fatal(e)
+	}
+	// A reset failure during rollback fails the rollback honestly.
+	r.script["systemctl reset-failed webfleet.service"] = fakeResult{out: "reset failed", code: 1}
+	r.log = nil
+	if e := Rollback(); e == nil {
+		t.Fatal("rollback succeeded despite reset-failed failure")
+	}
+	if contains(r.log, "systemctl restart webfleet.service") {
+		t.Fatalf("rollback restarted despite reset-failed failure: %v", r.log)
+	}
+}
+
+func TestUpdateRecoveryResetFailedPrecedesRestart(t *testing.T) {
+	r := setupService(t)
+	installManagedUnit(t)
+	setState(r, "enabled", "active")
+	prepareUpdate(r, "active", true)
+	exe := filepath.Join(t.TempDir(), "wf2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart webfleet.service"] = fakeResult{}
+	r.script["systemctl stop webfleet.service"] = fakeResult{}
+	// Forward restart fails, sending update into recovery; the recovery restart
+	// must be preceded by its own reset-failed.
+	r.seq["systemctl restart webfleet.service"] = []fakeResult{{out: "activation failed", code: 1}, {}}
+	if e := Update(exe, fakeSHA(exe)); e == nil {
+		t.Fatal("failed-activation update returned nil")
+	}
+	// Last restart is the recovery restart and must be preceded by reset-failed.
+	idx := -1
+	for i, call := range r.log {
+		if call == "systemctl restart webfleet.service" {
+			idx = i
+		}
+	}
+	if idx < 0 || !contains(r.log[:idx], "systemctl reset-failed webfleet.service") {
+		t.Fatalf("recovery restart must be preceded by reset-failed: %v", r.log)
 	}
 }
 
@@ -2311,8 +2501,11 @@ func TestUnitExplicitRecordsHostPortInExecStart(t *testing.T) {
 	if !strings.Contains(u, "# webfleet-listen: 127.0.0.1:7336") {
 		t.Fatalf("explicit unit must record the canonical joined listener:\n%s", u)
 	}
-	if !strings.Contains(u, "StartLimitIntervalSec=0") {
-		t.Fatalf("explicit unit must disable the start rate limit:\n%s", u)
+	if !strings.Contains(u, "StartLimitIntervalSec=60") || !strings.Contains(u, "StartLimitBurst=5") {
+		t.Fatalf("explicit unit must retain a finite crash-loop limit:\n%s", u)
+	}
+	if strings.Contains(u, "StartLimitIntervalSec=0") {
+		t.Fatalf("explicit unit must not disable the start limiter:\n%s", u)
 	}
 	// IPv6 hosts are bracketed in the metadata and ExecStart.
 	u6 := UnitExplicit("/var/lib/webfleet", "::1", "7336")

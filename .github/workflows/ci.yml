@@ -257,6 +257,52 @@ jobs:
           sudo /tmp/wf service uninstall   # idempotent no-op
           test ! -f /etc/systemd/system/webfleet.service
           sudo test -d "$DATA"
+      - name: Rate-limit a persistent crash loop (finite limiter + deliberate reset)
+        run: |
+          set -euxo pipefail
+          # A persistently crashing service must be stopped by the finite unit
+          # policy (StartLimitIntervalSec=60, StartLimitBurst=5), not restarted
+          # forever; a deliberate CLI start then clears the accumulated limit
+          # via reset-failed and recovers normally.
+          wait_healthz() {
+            for _ in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:7336/healthz | grep -q '"ok":true'; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "healthz never became ready" >&2
+            return 1
+          }
+          sudo /tmp/wf service install --host 127.0.0.1 --port 7336
+          wait_healthz
+          grep -q 'StartLimitIntervalSec=60' /etc/systemd/system/webfleet.service
+          grep -q 'StartLimitBurst=5' /etc/systemd/system/webfleet.service
+          grep -qv 'StartLimitIntervalSec=0' /etc/systemd/system/webfleet.service
+          # Swap in an entrypoint that always exits 1 and restart manually (no
+          # CLI reset) so the crash loop accumulates toward the finite limit.
+          printf '#!/bin/sh\nexit 1\n' | sudo tee /tmp/wf-crash-entry >/dev/null
+          sudo chmod +x /tmp/wf-crash-entry
+          sudo mv /tmp/wf-crash-entry /usr/local/bin/webfleet
+          sudo systemctl restart webfleet.service
+          rate_limited=0
+          for _ in $(seq 1 25); do
+            if [ "$(systemctl show webfleet.service -p ActiveState --value)" = failed ]; then
+              rate_limited=1
+              break
+            fi
+            sleep 1
+          done
+          [ "$rate_limited" -eq 1 ] || { echo "crash loop was never rate-limited" >&2; systemctl status webfleet.service --no-pager -l; exit 1; }
+          n1=$(systemctl show webfleet.service -p NRestarts --value)
+          sleep 6
+          n2=$(systemctl show webfleet.service -p NRestarts --value)
+          [ "$n1" = "$n2" ] || { echo "crash loop resumed after rate-limit" >&2; exit 1; }
+          # A deliberate CLI start clears the accumulated limit and recovers.
+          sudo cp /tmp/wf /usr/local/bin/webfleet
+          sudo /tmp/wf service start
+          wait_healthz
+          sudo /tmp/wf service uninstall || true
       - name: Rehearse partial-failure rollback (deterministic activation failure)
         run: |
           set -euxo pipefail
