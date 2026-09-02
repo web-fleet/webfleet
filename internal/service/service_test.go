@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeRunner records systemctl/journalctl invocations and returns scripted
@@ -77,7 +79,8 @@ func setupService(t *testing.T) *fakeRunner {
 	oldRoot, oldAccount := isRoot, ensureAccount
 	oldUID := serviceUID
 	oldOpenParent, oldConsistent := openDataParentSeam, dataParentConsistentSeam
-	oldStatLeaf, oldMkdirAt := statDataLeafSeam, mkdirAtLeafSeam
+	oldStatLeaf, oldParentSafe := statDataLeafSeam, parentSafeSeam
+	oldMkdirAt := mkdirAtLeafSeam
 	oldOpenAt, oldChmod, oldChown := openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam
 	oldFstat, oldUnlink, oldClose := fstatLeafSeam, unlinkAtSeam, closeFdSeam
 	oldRunner := defaultRunner
@@ -91,6 +94,7 @@ func setupService(t *testing.T) *fakeRunner {
 	serviceUID = func() (int, error) { return 4242, nil }
 	openDataParentSeam = func(string) (int, error) { return 1, nil }
 	dataParentConsistentSeam = func(int, string) bool { return true }
+	parentSafeSeam = func(int) error { return nil }
 	statDataLeafSeam = func(int, string) (dataLeafInfo, error) { return dataLeafInfo{}, os.ErrNotExist }
 	mkdirAtLeafSeam = func(int, string) error { return nil }
 	openAtLeafSeam = func(int, string) (int, error) { return 2, nil }
@@ -108,7 +112,8 @@ func setupService(t *testing.T) *fakeRunner {
 		isRoot, ensureAccount = oldRoot, oldAccount
 		serviceUID = oldUID
 		openDataParentSeam, dataParentConsistentSeam = oldOpenParent, oldConsistent
-		statDataLeafSeam, mkdirAtLeafSeam = oldStatLeaf, oldMkdirAt
+		statDataLeafSeam, parentSafeSeam = oldStatLeaf, oldParentSafe
+		mkdirAtLeafSeam = oldMkdirAt
 		openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam = oldOpenAt, oldChmod, oldChown
 		fstatLeafSeam, unlinkAtSeam, closeFdSeam = oldFstat, oldUnlink, oldClose
 		healthWindow = oldHealth
@@ -1211,6 +1216,7 @@ func TestInstallReusesServiceOwnedExistingDir(t *testing.T) {
 	}
 	serviceUID = func() (int, error) { return os.Getuid(), nil }
 	useRealDataDirSeams(t)
+	trustParentForTest(t)
 	exe := filepath.Join(t.TempDir(), "wf")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	r.script["systemctl daemon-reload"] = fakeResult{}
@@ -1288,11 +1294,14 @@ func countMutations() *mutationCounts {
 // useRealDataDirSeams switches the descriptor-relative data-dir seams to their
 // real implementations so tests can exercise real leaf creation and inspection
 // under t.TempDir(). The ownership step is stubbed to a no-op (the service
-// account does not exist on the test host).
+// account does not exist on the test host), and the parent-trust check uses the
+// real fstat so fresh-leaf tests must call trustParentForTest (t.TempDir() is
+// not root-owned).
 func useRealDataDirSeams(t *testing.T) {
 	t.Helper()
 	openDataParentSeam = openDataParentReal
 	dataParentConsistentSeam = dataParentConsistentReal
+	parentSafeSeam = parentSafeReal
 	statDataLeafSeam = statDataLeafReal
 	mkdirAtLeafSeam = mkdirAtLeafReal
 	openAtLeafSeam = openAtLeafReal
@@ -1301,6 +1310,32 @@ func useRealDataDirSeams(t *testing.T) {
 	fstatLeafSeam = fstatLeafReal
 	unlinkAtSeam = unlinkAtLeafReal
 	closeFdSeam = closeFdReal
+}
+
+// trustParentForTest makes the retained parent appear as a trusted root-owned,
+// non-writable directory so fresh-leaf tests can create leaves under
+// t.TempDir() (which is owned by the test user, not root).
+func trustParentForTest(t *testing.T) {
+	t.Helper()
+	parentSafeSeam = func(int) error { return nil }
+}
+
+// parentSafeFromInfo mirrors the production safe-parent contract for test seams:
+// the parent must be a directory, owned by root (uid 0), and not group- or
+// world-writable.
+func parentSafeFromInfo(info dataLeafInfo) func(int) error {
+	return func(int) error {
+		if !info.isDir {
+			return errors.New("parent is not a directory")
+		}
+		if info.uid != 0 {
+			return fmt.Errorf("parent owned by UID %d; requires root-owned", info.uid)
+		}
+		if info.mode&0o022 != 0 {
+			return fmt.Errorf("parent is group- or world-writable")
+		}
+		return nil
+	}
 }
 
 func assertNoMutation(t *testing.T, c *mutationCounts, what string) {
@@ -1384,6 +1419,7 @@ func TestPrepareDataDirLeafOnlyContract(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		parent := t.TempDir()
 		leaf := filepath.Join(parent, "webfleet")
 		exe := filepath.Join(t.TempDir(), "wf")
@@ -1473,6 +1509,7 @@ func TestDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 			allowTempDataDirs(t)
 			r := setupService(t)
 			useRealDataDirSeams(t)
+			trustParentForTest(t)
 			leaf := filepath.Join(t.TempDir(), "webfleet")
 			binBefore := mustRead(t, BinaryPath)
 			breakIt()
@@ -1509,6 +1546,7 @@ func TestDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		leaf := filepath.Join(t.TempDir(), "webfleet")
 		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
 		exe := filepath.Join(t.TempDir(), "wf")
@@ -1529,6 +1567,7 @@ func TestDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		leaf := filepath.Join(t.TempDir(), "webfleet")
 		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
 		unlinkAtSeam = func(int, string) error { return errors.New("unlink denied") }
@@ -1684,6 +1723,7 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 		setState(r, "enabled", "active")
 		serviceUID = func() (int, error) { return os.Getuid(), nil }
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		c := countMutations()
 		exe := filepath.Join(t.TempDir(), "wf2")
 		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
@@ -1702,6 +1742,7 @@ func TestReinstallDataDirContractWithNoOp(t *testing.T) {
 		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
 		setState(r, "enabled", "active")
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		exe := filepath.Join(t.TempDir(), "wf2")
 		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
 		if e := Install(exe, dataDir, "127.0.0.1:8090"); e != nil {
@@ -1767,6 +1808,7 @@ func TestDataDirAncestorSymlinkEscape(t *testing.T) {
 		allowTempDataDirs(t)
 		r := setupService(t)
 		useRealDataDirSeams(t)
+		trustParentForTest(t)
 		realParent := filepath.Join(base, "real")
 		if e := os.Mkdir(realParent, 0o700); e != nil {
 			t.Fatal(e)
@@ -1883,4 +1925,278 @@ func TestDataDirAncestorSymlinkEscape(t *testing.T) {
 			t.Fatal("ancestor-swap install touched systemctl")
 		}
 	})
+}
+
+// fdTracker records which data-dir descriptors were opened and how many times
+// each was closed, so descriptor-lifecycle tests can prove exactly-once close
+// (no leaks on inspection errors/no-op returns, no double-close).
+type fdTracker struct {
+	opened []int
+	closed map[int]int
+}
+
+func trackFds(t *testing.T) *fdTracker {
+	t.Helper()
+	tr := &fdTracker{closed: map[int]int{}}
+	oldOpenParent := openDataParentSeam
+	oldOpenAt := openAtLeafSeam
+	oldClose := closeFdSeam
+	openDataParentSeam = func(p string) (int, error) {
+		fd, err := oldOpenParent(p)
+		if err == nil {
+			tr.opened = append(tr.opened, fd)
+		}
+		return fd, err
+	}
+	openAtLeafSeam = func(fd int, name string) (int, error) {
+		nfd, err := oldOpenAt(fd, name)
+		if err == nil {
+			tr.opened = append(tr.opened, nfd)
+		}
+		return nfd, err
+	}
+	closeFdSeam = func(fd int) error {
+		tr.closed[fd]++
+		return oldClose(fd)
+	}
+	t.Cleanup(func() {
+		openDataParentSeam = oldOpenParent
+		openAtLeafSeam = oldOpenAt
+		closeFdSeam = oldClose
+	})
+	return tr
+}
+
+func (tr *fdTracker) assert(t *testing.T) {
+	t.Helper()
+	if len(tr.opened) == 0 {
+		t.Fatal("no data-dir descriptors were opened; tracking ineffective")
+	}
+	for _, fd := range tr.opened {
+		if tr.closed[fd] != 1 {
+			t.Fatalf("opened fd %d was closed %d times (want exactly once)", fd, tr.closed[fd])
+		}
+	}
+	for fd, n := range tr.closed {
+		if n > 1 {
+			t.Fatalf("fd %d was closed %d times (double close)", fd, n)
+		}
+	}
+}
+
+// TestDataDirDescriptorsClosedExactlyOnce proves parent and leaf descriptors are
+// closed exactly once across success, no-op, refusal and failure paths.
+func TestDataDirDescriptorsClosedExactlyOnce(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		trustParentForTest(t)
+		leaf := filepath.Join(t.TempDir(), "webfleet")
+		tr := trackFds(t)
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		r.script["systemctl daemon-reload"] = fakeResult{}
+		r.script["systemctl enable webfleet.service"] = fakeResult{}
+		r.script["systemctl start webfleet.service"] = fakeResult{}
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		tr.assert(t)
+	})
+	t.Run("noop", func(t *testing.T) {
+		allowTempDataDirs(t)
+		r := setupService(t)
+		useRealDataDirSeams(t)
+		trustParentForTest(t)
+		dataDir := filepath.Join(t.TempDir(), "webfleet")
+		if e := os.Mkdir(dataDir, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		os.WriteFile(UnitPath, []byte(Unit(dataDir, "127.0.0.1:8090")), 0o644)
+		setState(r, "enabled", "active")
+		serviceUID = func() (int, error) { return os.Getuid(), nil }
+		tr := trackFds(t)
+		exe := filepath.Join(t.TempDir(), "wf2")
+		os.WriteFile(exe, mustRead(t, BinaryPath), 0o755)
+		if e := Install(exe, dataDir, "127.0.0.1:8090"); e != nil {
+			t.Fatal(e)
+		}
+		tr.assert(t)
+	})
+	t.Run("refusal", func(t *testing.T) {
+		allowTempDataDirs(t)
+		setupService(t)
+		useRealDataDirSeams(t)
+		dataDir := filepath.Join(t.TempDir(), "webfleet")
+		if e := os.Mkdir(dataDir, 0o700); e != nil {
+			t.Fatal(e)
+		}
+		svcUID := os.Getuid() + 1
+		serviceUID = func() (int, error) { return svcUID, nil }
+		tr := trackFds(t)
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, dataDir, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install adopted a foreign-owned leaf")
+		}
+		tr.assert(t)
+	})
+	t.Run("failure", func(t *testing.T) {
+		allowTempDataDirs(t)
+		setupService(t)
+		useRealDataDirSeams(t)
+		trustParentForTest(t)
+		leaf := filepath.Join(t.TempDir(), "webfleet")
+		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
+		tr := trackFds(t)
+		exe := filepath.Join(t.TempDir(), "wf")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+			t.Fatal("install succeeded despite a chmod failure")
+		}
+		tr.assert(t)
+	})
+}
+
+// TestDataDirExistingLeafReplacementNotMutated proves an existing leaf inspected
+// and retained by descriptor is the ONLY possible mutation target: renaming the
+// leaf and replacing it with another ordinary directory between inspection and
+// establishment leaves the replacement untouched (O_NOFOLLOW alone is
+// insufficient against ordinary-directory replacement; descriptor binding is
+// the fix).
+func TestDataDirExistingLeafReplacementNotMutated(t *testing.T) {
+	allowTempDataDirs(t)
+	r := setupService(t)
+	useRealDataDirSeams(t)
+	trustParentForTest(t)
+	parent := t.TempDir()
+	leaf := filepath.Join(parent, "webfleet")
+	if e := os.Mkdir(leaf, 0o755); e != nil {
+		t.Fatal(e)
+	}
+	serviceUID = func() (int, error) { return os.Getuid(), nil }
+	// Between inspection (leaf descriptor retained) and establishment, the leaf
+	// is renamed away and replaced with another ordinary directory.
+	ensureAccount = func() error {
+		if e := os.Rename(leaf, leaf+"-orig"); e != nil {
+			return e
+		}
+		return os.Mkdir(leaf, 0o755)
+	}
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable webfleet.service"] = fakeResult{}
+	r.script["systemctl start webfleet.service"] = fakeResult{}
+	if e := Install(exe, leaf, "127.0.0.1:8090"); e != nil {
+		t.Fatal(e)
+	}
+	// The replacement is NOT chmodded: its mode stays 0755.
+	fi, _ := os.Stat(leaf)
+	if fi.Mode().Perm() != 0o755 {
+		t.Fatalf("replacement leaf was mutated (mode %o)", fi.Mode().Perm())
+	}
+	// The retained original (renamed) descriptor WAS the mutation target: 0700.
+	oi, _ := os.Stat(leaf + "-orig")
+	if oi.Mode().Perm() != 0o700 {
+		t.Fatalf("retained original leaf not normalized to 0700 (mode %o)", oi.Mode().Perm())
+	}
+}
+
+// TestDataDirFreshLeafBindRace proves a replacement of the freshly created leaf
+// between mkdirat and openat is detected (the bound entry is not the expected
+// fresh directory) and the replacement is never chmod'd or chown'd.
+func TestDataDirFreshLeafBindRace(t *testing.T) {
+	allowTempDataDirs(t)
+	r := setupService(t)
+	useRealDataDirSeams(t)
+	trustParentForTest(t)
+	parent := t.TempDir()
+	leaf := filepath.Join(parent, "webfleet")
+	// Between mkdirat and openat the created leaf is renamed away and replaced
+	// with another ordinary directory of a different mode.
+	mkdirAtLeafSeam = func(fd int, name string) error {
+		if e := unix.Mkdirat(fd, name, 0o700); e != nil {
+			return e
+		}
+		if e := os.Rename(filepath.Join(parent, name), filepath.Join(parent, name+"-orig")); e != nil {
+			return e
+		}
+		return os.Mkdir(filepath.Join(parent, name), 0o755)
+	}
+	unlinkAtSeam = func(int, string) error { return nil } // keep the replacement observable
+	binBefore := mustRead(t, BinaryPath)
+	exe := filepath.Join(t.TempDir(), "wf")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+		t.Fatal("install bound a replaced fresh leaf")
+	}
+	// The replacement was never chmod'd to 0700.
+	fi, _ := os.Stat(leaf)
+	if fi.Mode().Perm() != 0o755 {
+		t.Fatalf("replacement leaf was mutated (mode %o)", fi.Mode().Perm())
+	}
+	if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+		t.Fatal("binary mutated despite the bind-race refusal")
+	}
+	if hasMutatingSystemctl(r.log) {
+		t.Fatalf("systemctl mutated despite the bind-race refusal: %v", r.log)
+	}
+}
+
+// TestDataDirFreshRequiresTrustedParent proves a fresh data leaf is only created
+// under a root-owned, non-group/world-writable parent; an untrusted parent is
+// refused before any account/data/binary/unit/systemd mutation.
+func TestDataDirFreshRequiresTrustedParent(t *testing.T) {
+	cases := []struct {
+		name string
+		info dataLeafInfo
+		ok   bool
+	}{
+		{"root-0755", dataLeafInfo{isDir: true, mode: 0o755, uid: 0}, true},
+		{"root-0700", dataLeafInfo{isDir: true, mode: 0o700, uid: 0}, true},
+		{"non-root-owned", dataLeafInfo{isDir: true, mode: 0o755, uid: 1000}, false},
+		{"group-writable", dataLeafInfo{isDir: true, mode: 0o775, uid: 0}, false},
+		{"world-writable", dataLeafInfo{isDir: true, mode: 0o777, uid: 0}, false},
+		{"not-a-directory", dataLeafInfo{isDir: false, mode: 0o755, uid: 0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allowTempDataDirs(t)
+			r := setupService(t)
+			useRealDataDirSeams(t)
+			parentSafeSeam = parentSafeFromInfo(tc.info)
+			leaf := filepath.Join(t.TempDir(), "webfleet")
+			binBefore := mustRead(t, BinaryPath)
+			exe := filepath.Join(t.TempDir(), "wf")
+			os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+			if tc.ok {
+				r.script["systemctl daemon-reload"] = fakeResult{}
+				r.script["systemctl enable webfleet.service"] = fakeResult{}
+				r.script["systemctl start webfleet.service"] = fakeResult{}
+				if e := Install(exe, leaf, "127.0.0.1:8090"); e != nil {
+					t.Fatalf("trusted parent rejected: %v", e)
+				}
+				if _, e := os.Stat(leaf); e != nil {
+					t.Fatalf("fresh leaf not created under trusted parent: %v", e)
+				}
+			} else {
+				c := countMutations()
+				if e := Install(exe, leaf, "127.0.0.1:8090"); e == nil {
+					t.Fatal("install created a leaf under an untrusted parent")
+				}
+				assertNoMutation(t, c, tc.name)
+				if _, e := os.Stat(UnitPath); !os.IsNotExist(e) {
+					t.Fatal("unit written under an untrusted parent")
+				}
+				if got := mustRead(t, BinaryPath); !bytes.Equal(got, binBefore) {
+					t.Fatal("binary mutated under an untrusted parent")
+				}
+				if hasMutatingSystemctl(r.log) {
+					t.Fatal("systemctl mutated under an untrusted parent")
+				}
+			}
+		})
+	}
 }
