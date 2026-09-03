@@ -1117,7 +1117,7 @@ func TestA11yCrawlEvidenceAndGrammar(t *testing.T) {
 	if !a11yPoll(t, ctx, `document.body.textContent.includes('Linked from') && document.body.textContent.includes('/broken-page') && document.body.textContent.includes('HTTP 500') && document.querySelector('[data-failed-page="0"]') !== null`) {
 		t.Fatal("broken-link source/target/result evidence missing")
 	}
-	if !a11yPoll(t, ctx, `document.getElementById('broken-links-jump') !== null && document.getElementById('crawl-failures') !== null`) {
+	if !a11yPoll(t, ctx, `document.getElementById('broken-links-jump') !== null && document.getElementById('broken-links-jump').textContent.includes('View failed pages') && document.getElementById('crawl-failures') !== null`) {
 		t.Fatal("broken-link summary does not navigate to failed-page evidence")
 	}
 }
