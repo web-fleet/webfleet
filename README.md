@@ -1,5 +1,19 @@
 # Web Fleet
 
+Web Fleet is a self-hosted website monitoring, crawling, analytics and alerting platform.
+
+## Command line
+
+```sh
+webfleet version
+webfleet --version
+webfleet service status
+```
+
+Unknown commands and unsupported options fail with a non-zero exit status.
+Run the binary without a subcommand to start the integrated server, or use
+`webfleet serve` where that compatibility alias is supported.
+
 Self-hosted monitoring and analytics for all your websites.
 
 Web Fleet is in early development. The project is designed to give self-hosters, freelancers, agencies and larger web teams one place to understand website availability, performance, TLS, DNS, links, changes and opt-in privacy-first analytics.

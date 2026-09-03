@@ -28,13 +28,17 @@ import (
 )
 
 // version is overridden at release build time via -ldflags -X main.version.
-var version = "dev"
+var version = "0.1.0"
 
 func main() {
 	// Service-management commands must remain usable even when the application
 	// configuration is unhealthy, so dispatch before any runtime config load.
 	if len(os.Args) >= 2 && os.Args[1] == "service" {
 		os.Exit(runService(os.Args[2:]))
+	}
+	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Fprintln(os.Stdout, version)
+		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -96,6 +100,11 @@ func main() {
 		case "serve", "worker", "analytics-ingest":
 			mode = args[0]
 			args = args[1:]
+		default:
+			if !strings.HasPrefix(args[0], "-") {
+				fmt.Fprintln(os.Stderr, "webfleet: unknown command", args[0])
+				os.Exit(2)
+			}
 		}
 	}
 	fs := flag.NewFlagSet("webfleet", flag.ContinueOnError)
@@ -104,6 +113,10 @@ func main() {
 	port := fs.String("port", "", "HTTP bind port, 1-65535 (default 7336; WEBFLEET_PORT overrides, CLI wins)")
 	if err := fs.Parse(args); err != nil {
 		log.Error("arguments", "error", err)
+		os.Exit(2)
+	}
+	if fs.NArg() != 0 {
+		log.Error("arguments", "error", fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")))
 		os.Exit(2)
 	}
 	addr, err := resolveListener(*host, *port, "", flagProvided(fs, "host"), flagProvided(fs, "port"), false)
