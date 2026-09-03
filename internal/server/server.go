@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -90,6 +91,7 @@ var apiRouteDefs = []routeDef{
 	{"PUT", "/api/oidc/config", "organization.update", true, func(s *Server) handler { return s.handleOIDCConfigSave }, nil},
 	{"POST", "/api/logout", "session", true, func(s *Server) handler { return s.handleLogout }, nil},
 	{"GET", "/api/session", "session", false, func(s *Server) handler { return s.handleSession }, nil},
+	{"POST", "/api/me/password", "session", true, func(s *Server) handler { return s.handleChangePassword }, nil},
 	{"POST", "/api/tokens", "tokens.manage", true, func(s *Server) handler { return s.handleCreateToken }, nil},
 	{"DELETE", "/api/tokens/{id}", "tokens.manage", true, func(s *Server) handler { return s.handleRevokeToken }, nil},
 	{"GET", "/api/notifications/webhooks", "webhooks.read", false, func(s *Server) handler { return s.handleWebhooks }, nil},
@@ -173,11 +175,12 @@ type Server struct {
 	loginLim      *rateLimiter
 	setupLim      *rateLimiter
 	tokenLim      *rateLimiter
+	passwordLim   *rateLimiter
 }
 
 func New(cfg config.Config, st *store.Store, log *slog.Logger) *Server {
 	a := analytics.NewWithOptions(st, analytics.Options{AllowNoOrigin: cfg.AnalyticsServerSide})
-	s := &Server{cfg: cfg, store: st, analytics: a, tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), geo: geo.NewManager(cfg.DataDir, cfg.GeoIPURL), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000)}
+	s := &Server{cfg: cfg, store: st, analytics: a, tokens: apitokens.New(st), audit: audit.NewWithOptions(st, audit.Options{Sandbox: cfg.AuditSandbox}), auth: auth.New(st), sites: sites.New(st), monitor: monitor.New(st), maintenance: maintenance.New(st), rbac: rbac.New(st), incidents: incidents.New(st), tls: tlshealth.New(st), dns: dnsobs.New(st), deployments: deployments.New(st), crawler: crawler.New(st), geo: geo.NewManager(cfg.DataDir, cfg.GeoIPURL), log: log, mux: http.NewServeMux(), proxy: requestmeta.Config{Trusted: cfg.TrustedProxies}, loginLim: newRateLimiter(time.Minute, 10, 10000), setupLim: newRateLimiter(time.Minute, 5, 1000), tokenLim: newRateLimiter(time.Minute, 20, 10000), passwordLim: newRateLimiter(time.Minute, 10, 10000)}
 	s.oidc = oidc.New(st, s.auth)
 	s.notifications = notifications.New(st)
 	// Local country database: load any already-installed copy (no network); when
@@ -806,6 +809,33 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, p principa
 	}
 	http.SetCookie(w, &http.Cookie{Name: "webfleet_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.proxy.Secure(r), MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, p principal) {
+	if !s.passwordLim.Allow("password:" + s.proxy.ClientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "too many password attempts, try again later")
+		return
+	}
+	var in struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	cookie, err := r.Cookie("webfleet_session")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if err = s.auth.ChangePassword(r.Context(), p.UserID, in.CurrentPassword, in.NewPassword, cookie.Value); err != nil {
+		if errors.Is(err, auth.ErrInvalidCurrentPassword) {
+			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 func (s *Server) handleSiteCrawl(w http.ResponseWriter, r *http.Request, p principal) {
 	id, ok := pathSiteID(w, r)

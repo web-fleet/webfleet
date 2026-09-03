@@ -343,6 +343,7 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 		fs := flag.NewFlagSet("install", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		data := fs.String("data", "", "data directory")
+		dataDir := fs.String("data-dir", "", "data directory")
 		listen := fs.String("listen", "", "listen address (legacy; alternative to --host/--port, honors WEBFLEET_LISTEN)")
 		host := fs.String("host", "", "HTTP bind host (default 127.0.0.1; WEBFLEET_HOST overrides, CLI wins)")
 		port := fs.String("port", "", "HTTP bind port, 1-65535 (default 7336; WEBFLEET_PORT overrides, CLI wins)")
@@ -352,7 +353,13 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 		if fs.NArg() != 0 {
 			return cmd, fmt.Errorf("install takes no positional arguments: %s", strings.Join(fs.Args(), " "))
 		}
+		if flagProvided(fs, "data") && flagProvided(fs, "data-dir") {
+			return cmd, fmt.Errorf("install: --data and --data-dir cannot be combined")
+		}
 		cmd.data = *data
+		if *dataDir != "" {
+			cmd.data = *dataDir
+		}
 		if cmd.data == "" {
 			cmd.data = service.DefaultDataDir
 		}

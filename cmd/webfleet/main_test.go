@@ -390,6 +390,19 @@ func TestRunServiceUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestParseServiceInstallAcceptsDataDirAlias(t *testing.T) {
+	cmd, err := parseServiceCommand([]string{"install", "--data-dir", "/srv/webfleet", "--listen", "127.0.0.1:7336"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.data != "/srv/webfleet" {
+		t.Fatalf("data = %q, want /srv/webfleet", cmd.data)
+	}
+	if _, err := parseServiceCommand([]string{"install", "--data", "/one", "--data-dir", "/two", "--listen", "127.0.0.1:7336"}); err == nil {
+		t.Fatal("combining --data and --data-dir should fail")
+	}
+}
+
 func TestRunServiceOutputWriters(t *testing.T) {
 	unsetListenerEnv(t)
 	// runService (the os.Stdout/os.Stderr wrapper) still compiles and routes to

@@ -38,6 +38,44 @@ func TestFirstAdminAndSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestChangePasswordKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := New(st)
+	if err = a.CreateAdmin("admin@example.com", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	currentToken, current, err := a.Login("admin@example.com", "old-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherToken, _, err := a.Login("admin@example.com", "old-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = a.ChangePassword(context.Background(), current.UserID, "wrong-password", "new-password", currentToken); err != ErrInvalidCurrentPassword {
+		t.Fatalf("wrong current password: %v", err)
+	}
+	if err = a.ChangePassword(context.Background(), current.UserID, "old-password", "new-password", currentToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.Session(currentToken); err != nil {
+		t.Fatalf("current session was revoked: %v", err)
+	}
+	if _, err = a.Session(otherToken); err == nil {
+		t.Fatal("other session survived password change")
+	}
+	if _, _, err = a.Login("admin@example.com", "old-password"); err == nil {
+		t.Fatal("old password remained valid")
+	}
+	if _, _, err = a.Login("admin@example.com", "new-password"); err != nil {
+		t.Fatalf("new password rejected: %v", err)
+	}
+}
+
 func TestFirstAdminGetsOwnerMembership(t *testing.T) {
 	st, e := store.Open(t.TempDir())
 	if e != nil {

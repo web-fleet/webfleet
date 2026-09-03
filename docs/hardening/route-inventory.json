@@ -153,6 +153,14 @@
     },
     {
       "method": "POST",
+      "path": "/api/me/password",
+      "action": "session",
+      "csrf": true,
+      "siteScoped": false,
+      "minRole": "viewer"
+    },
+    {
+      "method": "POST",
       "path": "/api/tokens",
       "action": "tokens.manage",
       "csrf": true,

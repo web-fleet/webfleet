@@ -22,6 +22,8 @@ type Session struct {
 }
 type Service struct{ store *store.Store }
 
+var ErrInvalidCurrentPassword = errors.New("current password is incorrect")
+
 func New(s *store.Store) *Service { return &Service{store: s} }
 func (a *Service) NeedsSetup() (bool, error) {
 	r, e := sqlite.Query(a.store.DB, `SELECT COUNT(*) n FROM users`)
@@ -136,6 +138,40 @@ func (a *Service) Logout(raw string) {
 	sum := sha256.Sum256([]byte(raw))
 	_ = sqlite.Exec(a.store.DB, `DELETE FROM sessions WHERE token_hash=?`, sum[:])
 	_ = a.audit("logout", "")
+}
+
+// ChangePassword verifies the caller's current password, updates the stored
+// hash atomically and revokes every other browser session for that user. The
+// session making the change remains valid so the response can complete and
+// the user is not unexpectedly signed out of the current browser.
+func (a *Service) ChangePassword(ctx context.Context, userID int64, currentPassword, newPassword, keepToken string) error {
+	if len(newPassword) < MinPasswordLength {
+		return errors.New("password must be at least 7 characters")
+	}
+	var currentHash string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=?`, userID).Scan(&currentHash); err != nil || !password.Verify(currentHash, currentPassword) {
+		return ErrInvalidCurrentPassword
+	}
+	nextHash, err := password.Hash(newPassword)
+	if err != nil {
+		return err
+	}
+	keepHash := sha256.Sum256([]byte(keepToken))
+	tx, err := a.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, nextHash, userID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND token_hash<>?`, userID, keepHash[:]); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(kind,detail,created_at) VALUES(?,?,?)`, "password_changed", "self-service password change", store.Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (a *Service) audit(kind, detail string) error {
 	return sqlite.Exec(a.store.DB, `INSERT INTO audit_events(kind,detail,created_at) VALUES(?,?,?)`, kind, detail, store.Now())
