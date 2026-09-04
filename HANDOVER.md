@@ -260,3 +260,19 @@ The implementation campaign is complete through CP29. CP30 is now explicitly han
 CP30 Campaign 1 (project-truth correction + identity/RBAC foundation) is complete. Each campaign stops for review after an independently complete, committed repair with regression/adversarial tests. The route/permission inventory at `docs/hardening/route-inventory.json` is the authorization contract that drove the RBAC enforcement work and is enforced by the route-inventory contract test.
 
 Do not tag or announce the public preview while CP31 is blocked on CP30. After the hardening campaign, repair every release blocker, rerun the exact release gates, then perform an ordinary-user dogfood install from the public website before deciding whether to tag the preview.
+# Release procedure
+
+Web Fleet releases are produced from reviewed `vX.Y.Z` tags. Before tagging,
+deploy any changed `install.sh`, `download.sh`, and `update.sh` to
+`https://webfleet.cv`, fetch them back, compare exact bytes with the generated
+repository, and run syntax plus fixture-based checksum and rollback tests.
+
+Run formatting, the complete Go and race suites, vet, SQLite/PostgreSQL tests,
+browser-audit tests, real systemd lifecycle, six-target cross-builds, release
+verification, and a clean pushed-tree check. Rehearse first with an RC tag.
+Verify exactly six archives plus `checksums.txt`, every checksum and GitHub
+provenance against the tag commit. On a clean Linux host exercise public
+download/install/update/rollback, SQLite and PostgreSQL first-run setup, one
+website check, service lifecycle and an opt-in browser audit. Publish stable
+only after approval, repeat the live installer smoke, and never mutate a tag or
+overwrite an existing release asset.
