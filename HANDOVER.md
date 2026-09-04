@@ -260,6 +260,13 @@ The implementation campaign is complete through CP29. CP30 is now explicitly han
 CP30 Campaign 1 (project-truth correction + identity/RBAC foundation) is complete. Each campaign stops for review after an independently complete, committed repair with regression/adversarial tests. The route/permission inventory at `docs/hardening/route-inventory.json` is the authorization contract that drove the RBAC enforcement work and is enforced by the route-inventory contract test.
 
 Do not tag or announce the public preview while CP31 is blocked on CP30. After the hardening campaign, repair every release blocker, rerun the exact release gates, then perform an ordinary-user dogfood install from the public website before deciding whether to tag the preview.
+## Current release state
+
+- Released stable: **v0.1.0** (stable public preview).
+- Current development: **0.1.1** on `main`. An ordinary development build
+  reports 0.1.1 with commit `unknown`; release builds override the default via
+  `-ldflags -X main.version` and are never confused with the released version.
+
 # Release procedure
 
 Web Fleet releases are produced from reviewed `vX.Y.Z` tags. Before tagging,
