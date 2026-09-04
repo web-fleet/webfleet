@@ -13,8 +13,8 @@ jobs:
     env:
       WEBFLEET_AUDIT_TEST_ALLOW_NO_SANDBOX: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -22,13 +22,15 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/webfleet
+      - run: ./scripts/action-pins.sh
+      - run: ./scripts/test-action-pins.sh
   race:
     runs-on: ubuntu-latest
     env:
       WEBFLEET_AUDIT_TEST_ALLOW_NO_SANDBOX: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -37,8 +39,8 @@ jobs:
   crosscompile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -54,8 +56,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -65,7 +67,7 @@ jobs:
       - name: Verify the release tree (read-only)
         run: |
           (cd dist && sha256sum -c checksums.txt)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: webfleet-release
           path: dist/*
@@ -73,8 +75,8 @@ jobs:
   systemd-lifecycle:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with:
           go-version-file: go.mod
           cache: true
