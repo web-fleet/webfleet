@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.0
         with: {go-version-file: go.mod, cache: true}
       - name: Verify
+        env:
+          WEBFLEET_AUDIT_TEST_ALLOW_NO_SANDBOX: "1"
         run: |
           test -z "$(gofmt -l .)"
           go test ./...
