@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/service"
+	"github.com/webfleet-cv/webfleet/internal/service"
 )
 
 // withStub dispatch replaces the lifecycle seam so runService can be exercised

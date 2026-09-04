@@ -12,11 +12,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/password"
-	"github.com/web-fleet/webfleet/internal/sites"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/password"
+	"github.com/webfleet-cv/webfleet/internal/sites"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 func newRBACServer(t *testing.T) (*Server, *store.Store) {

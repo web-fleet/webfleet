@@ -1,8 +1,8 @@
 package apitokens
 
 import (
-	"github.com/web-fleet/webfleet/internal/auth"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/auth"
+	"github.com/webfleet-cv/webfleet/internal/store"
 	"testing"
 )
 

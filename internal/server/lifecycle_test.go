@@ -21,8 +21,8 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 // openFreshPGForServer creates a unique database on a real PostgreSQL server

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 func newTrustedServer(t *testing.T, prefixes ...string) (*Server, *store.Store) {

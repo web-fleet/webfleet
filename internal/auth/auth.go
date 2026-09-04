@@ -6,9 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"github.com/web-fleet/webfleet/internal/password"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/password"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 	"strings"
 	"time"
 )

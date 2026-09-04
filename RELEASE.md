@@ -17,7 +17,7 @@ Before tagging the first public preview:
 - systemd install creates the service account, ownership and data directory idempotently on a clean host.
 - large-fleet measurements and current scale decision are recorded, including single-owner split-worker scheduling via the database lease.
 - public website is audited against actual shipped commands/features.
-- release archives have SHA-256 checksums and provenance/attestation where supported, built and verified with `scripts/release.sh` / `scripts/verify-release.sh` (release building and verification are separate responsibilities; the verifier is read-only).
+- release archives have SHA-256 checksums (`checksums.txt`) and GitHub build-provenance attestations, built with `scripts/build-release.sh` and verified read-only against the published release with `scripts/verify-gh-release.sh` (release building and verification are separate responsibilities; the verifier never edits a release).
 - ordinary-user dogfood installs from the public instructions without repository knowledge.
 
 ## Positioning

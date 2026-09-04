@@ -6,8 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 	"strings"
 )
 
@@ -45,6 +45,7 @@ func (s *Service) Create(user, org int64, name string, scopes []string) (Created
 	}
 	return Created{r[0]["id"].Int64, name, tok, prefix, scopes}, nil
 }
+
 // Authenticate validates a token and returns its owner, organization and
 // scopes. Unknown and revoked tokens return the same generic error so token
 // existence is not disclosed. last_used_at is refreshed on success.

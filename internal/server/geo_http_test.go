@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/geo"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/geo"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 const geoFixtureCSV = `ip_start,ip_end,country

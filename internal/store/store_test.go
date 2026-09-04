@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
 )
 
 func TestFreshOpenRestartAndPragmas(t *testing.T) {

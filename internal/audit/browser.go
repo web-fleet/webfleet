@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/netguard"
+	"github.com/webfleet-cv/webfleet/internal/netguard"
 )
 
 const (

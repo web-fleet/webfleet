@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 func createToken(t *testing.T, s *Server, c *client, name, scopesJSON string) string {
@@ -18,7 +18,9 @@ func createToken(t *testing.T, s *Server, c *client, name, scopesJSON string) st
 	if rr.Code != 201 {
 		t.Fatalf("create token %d %s", rr.Code, rr.Body.String())
 	}
-	var out struct{ Token string `json:"token"` }
+	var out struct {
+		Token string `json:"token"`
+	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || out.Token == "" {
 		t.Fatalf("token response: %v %s", err, rr.Body.String())
 	}
@@ -75,7 +77,9 @@ func TestTokenRejectsMalformedUnknownRevoked(t *testing.T) {
 		t.Fatalf("scope denied = %d", rr.Code)
 	}
 	// Revoked token.
-	var id struct{ ID int64 `json:"id"` }
+	var id struct {
+		ID int64 `json:"id"`
+	}
 	rr := doReq(t, s, admin, "POST", "/api/tokens", `{"name":"rev","scopes":["sites:read"]}`)
 	_ = json.Unmarshal(rr.Body.Bytes(), &id)
 	if rr := doReq(t, s, admin, "DELETE", fmt.Sprintf("/api/tokens/%d", id.ID), ""); rr.Code != 200 {
@@ -105,11 +109,11 @@ func TestTokenScopeMatrix(t *testing.T) {
 	admin := setupAdmin(t, s)
 	siteID := createSiteViaAPI(t, s, admin, "Example", "https://127.0.0.1:1/")
 	cases := []struct {
-		scopes   string
-		path     string
-		method   string
-		body     string
-		want     int
+		scopes string
+		path   string
+		method string
+		body   string
+		want   int
 	}{
 		{`["sites:read"]`, "/api/sites", "GET", "", 200},
 		{`["sites:read"]`, "/api/sites", "POST", `{"name":"x","primary_url":"https://example.com"}`, 403},
@@ -239,7 +243,7 @@ func TestBearerErrorResponsesAreSingleJSON(t *testing.T) {
 	}
 	cases := []struct {
 		name, token, method, path string
-		want                       int
+		want                      int
 	}{
 		{"malformed-empty", "wf_", "GET", "/api/sites", 401},
 		{"unknown", "wf_doesnotexist", "GET", "/api/sites", 401},

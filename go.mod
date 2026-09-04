@@ -1,4 +1,4 @@
-module github.com/web-fleet/webfleet
+module github.com/webfleet-cv/webfleet
 
 go 1.23
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/audit"
+	"github.com/webfleet-cv/webfleet/internal/audit"
 )
 
 // slowAuditRunner is a test Runner that reports the audit as running for a

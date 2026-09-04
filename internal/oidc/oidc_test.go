@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/auth"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/auth"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 const (
@@ -38,17 +38,17 @@ type fakeProvider struct {
 	key    *rsa.PrivateKey
 	issuer string
 
-	mu                  sync.Mutex
-	nonce               string
-	email               string
-	emailVerified       bool
-	omitEmailFromIDTok  bool
-	issOverride         string
-	audOverride         string
-	expire              bool
-	signKey             *rsa.PrivateKey
-	userinfoIss         string
-	userinfoEmailVer    *bool
+	mu                 sync.Mutex
+	nonce              string
+	email              string
+	emailVerified      bool
+	omitEmailFromIDTok bool
+	issOverride        string
+	audOverride        string
+	expire             bool
+	signKey            *rsa.PrivateKey
+	userinfoIss        string
+	userinfoEmailVer   *bool
 }
 
 func newFake(t *testing.T, email string, verified bool) *fakeProvider {

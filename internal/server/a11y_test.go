@@ -17,8 +17,8 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 // This suite drives the real embedded application in a headless browser and

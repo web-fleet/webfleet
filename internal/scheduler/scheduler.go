@@ -4,17 +4,17 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
-	"github.com/web-fleet/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
 	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/crawler"
-	"github.com/web-fleet/webfleet/internal/dnsobs"
-	"github.com/web-fleet/webfleet/internal/monitor"
-	"github.com/web-fleet/webfleet/internal/store"
-	"github.com/web-fleet/webfleet/internal/tlshealth"
+	"github.com/webfleet-cv/webfleet/internal/crawler"
+	"github.com/webfleet-cv/webfleet/internal/dnsobs"
+	"github.com/webfleet-cv/webfleet/internal/monitor"
+	"github.com/webfleet-cv/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/tlshealth"
 )
 
 type Checker interface {
@@ -34,8 +34,8 @@ type Scheduler struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	owner         string
-	checkLeaseTTL  time.Duration
-	crawlLeaseTTL  time.Duration
+	checkLeaseTTL time.Duration
+	crawlLeaseTTL time.Duration
 }
 
 func New(st *store.Store, c Checker, tlsSvc *tlshealth.Service, dnsSvc *dnsobs.Service, crawlSvc *crawler.Service, interval, crawlInterval time.Duration, concurrency int, log *slog.Logger) *Scheduler {

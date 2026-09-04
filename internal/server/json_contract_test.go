@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/crawler"
-	"github.com/web-fleet/webfleet/internal/dnsobs"
-	"github.com/web-fleet/webfleet/internal/fleet"
-	"github.com/web-fleet/webfleet/internal/incidents"
-	"github.com/web-fleet/webfleet/internal/monitor"
-	"github.com/web-fleet/webfleet/internal/sites"
+	"github.com/webfleet-cv/webfleet/internal/crawler"
+	"github.com/webfleet-cv/webfleet/internal/dnsobs"
+	"github.com/webfleet-cv/webfleet/internal/fleet"
+	"github.com/webfleet-cv/webfleet/internal/incidents"
+	"github.com/webfleet-cv/webfleet/internal/monitor"
+	"github.com/webfleet-cv/webfleet/internal/sites"
 )
 
 func keys(t *testing.T, v any) map[string]json.RawMessage {

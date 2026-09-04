@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/web-fleet/webfleet/internal/rbac"
+	"github.com/webfleet-cv/webfleet/internal/rbac"
 )
 
 // knownActions is the authoritative action vocabulary. Adding a route with a

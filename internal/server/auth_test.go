@@ -3,8 +3,8 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/web-fleet/webfleet/internal/config"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/config"
+	"github.com/webfleet-cv/webfleet/internal/store"
 	"io"
 	"log/slog"
 	"net/http"

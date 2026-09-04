@@ -53,25 +53,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build release matrix and checksums
+      - name: Build release matrix and checksums (release.yml contract)
         run: |
-          scripts/release.sh
+          scripts/build-release.sh v0.0.0 dist
       - name: Verify the release tree (read-only)
         run: |
-          scripts/verify-release.sh dist
-      - name: Attest build provenance for the archives (dry-run; no Release is created)
-        if: ${{ github.event_name == 'push' }}
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-path: dist/webfleet_*_linux_amd64.tar.gz,dist/webfleet_*_linux_arm64.tar.gz,dist/webfleet_*_darwin_amd64.tar.gz,dist/webfleet_*_darwin_arm64.tar.gz,dist/webfleet_*_windows_amd64.zip,dist/webfleet_*_windows_arm64.zip
+          (cd dist && sha256sum -c checksums.txt)
       - uses: actions/upload-artifact@v4
         with:
           name: webfleet-release

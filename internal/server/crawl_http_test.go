@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/crawler"
-	"github.com/web-fleet/webfleet/internal/netguard"
+	"github.com/webfleet-cv/webfleet/internal/crawler"
+	"github.com/webfleet-cv/webfleet/internal/netguard"
 )
 
 type allowAllResolver struct{}

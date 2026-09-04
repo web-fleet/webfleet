@@ -11,11 +11,11 @@ cd "$(dirname "$0")/.."
 
 BIN=${1:-}
 if [ -z "$BIN" ]; then
-  ./scripts/release.sh >/dev/null 2>&1
-  LINUX_ARCHIVE=$(ls dist/webfleet_*_linux_amd64.tar.gz | head -1)
+  ./scripts/build-release.sh v0.0.0 >/dev/null 2>&1
+  LINUX_ARCHIVE="dist/webfleet-linux-amd64.tar.gz"
   REHEARSE_DIR=$(mktemp -d)
   tar -xzf "$LINUX_ARCHIVE" -C "$REHEARSE_DIR"
-  BIN="$REHEARSE_DIR"/$(basename "$LINUX_ARCHIVE" .tar.gz)/webfleet
+  BIN="$REHEARSE_DIR/webfleet"
 fi
 
 WORK=$(mktemp -d)
@@ -87,17 +87,16 @@ SITES_AFTER=$(get /api/sites | jq -r '.total')
 # Binary update/rollback semantics using separately produced release artifacts:
 # build a second release with the release contract, verify its recorded
 # checksum, swap in its binary, restart, then roll back to the first artifact.
-V2VERSION="0.0.0-update"
 V2_DIST="$WORK/dist2"
-VERSION="$V2VERSION" DIST="$V2_DIST" ./scripts/release.sh >/dev/null 2>&1
-V2_ARCHIVE=$(ls "$V2_DIST"/webfleet_${V2VERSION}_linux_amd64.tar.gz | head -1)
+./scripts/build-release.sh v0.0.1 "$V2_DIST" >/dev/null 2>&1
+V2_ARCHIVE="$V2_DIST/webfleet-linux-amd64.tar.gz"
 V2_DIR=$(mktemp -d)
 tar -xzf "$V2_ARCHIVE" -C "$V2_DIR"
-V2_BIN="$V2_DIR"/$(basename "$V2_ARCHIVE" .tar.gz)/webfleet
+V2_BIN="$V2_DIR/webfleet"
 # The expected checksum comes from the release-build contract, not a self-hash.
 # The archive is verified against its recorded checksum; the binary is then
 # trusted because it is extracted from that verified archive.
-V2_SHA=$(grep "webfleet_${V2VERSION}_linux_amd64.tar.gz" "$V2_DIST/SHA256SUMS" | cut -d' ' -f1)
+V2_SHA=$(awk '$2 == "webfleet-linux-amd64.tar.gz" {print $1}' "$V2_DIST/checksums.txt")
 echo "$V2_SHA  $V2_ARCHIVE" | sha256sum -c - >/dev/null
 cp "$BIN" "$WORK/webfleet-v1"   # the original release artifact binary
 stop_app

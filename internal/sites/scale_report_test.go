@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/fleet"
-	"github.com/web-fleet/webfleet/internal/sites"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/fleet"
+	"github.com/webfleet-cv/webfleet/internal/sites"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 // TestScaleReport measures representative large-fleet paths at 100/1,000/10,000

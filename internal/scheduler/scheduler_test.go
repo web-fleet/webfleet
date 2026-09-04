@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/monitor"
-	"github.com/web-fleet/webfleet/internal/sites"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/monitor"
+	"github.com/webfleet-cv/webfleet/internal/sites"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	"github.com/webfleet-cv/webfleet/internal/store"
 )
 
 type countingChecker struct {

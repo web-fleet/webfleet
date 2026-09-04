@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/web-fleet/webfleet/internal/database"
-	_ "github.com/web-fleet/webfleet/internal/postgresdriver"
-	"github.com/web-fleet/webfleet/internal/sqlite"
-	_ "github.com/web-fleet/webfleet/internal/sqlitedriver"
+	"github.com/webfleet-cv/webfleet/internal/database"
+	_ "github.com/webfleet-cv/webfleet/internal/postgresdriver"
+	"github.com/webfleet-cv/webfleet/internal/sqlite"
+	_ "github.com/webfleet-cv/webfleet/internal/sqlitedriver"
 )
 
 type Store struct {

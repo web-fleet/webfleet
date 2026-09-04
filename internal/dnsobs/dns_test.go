@@ -2,8 +2,8 @@ package dnsobs
 
 import (
 	"context"
-	"github.com/web-fleet/webfleet/internal/sites"
-	"github.com/web-fleet/webfleet/internal/store"
+	"github.com/webfleet-cv/webfleet/internal/sites"
+	"github.com/webfleet-cv/webfleet/internal/store"
 	"net/netip"
 	"testing"
 )
